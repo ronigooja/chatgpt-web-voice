@@ -86,7 +86,11 @@ func (b *Box) Hash(plaintext string) string {
 
 // Seal encrypts a plaintext access token for SQLite storage.
 func (b *Box) Seal(plaintext string) (string, error) {
-	plaintext = strings.TrimSpace(plaintext)
+	return b.SealExact(strings.TrimSpace(plaintext))
+}
+
+// SealExact preserves every credential byte for bridge synchronization.
+func (b *Box) SealExact(plaintext string) (string, error) {
 	if plaintext == "" {
 		return "", errors.New("access token is empty")
 	}
@@ -100,8 +104,10 @@ func (b *Box) Seal(plaintext string) (string, error) {
 
 // Open decrypts a sealed token. Legacy plaintext rows (no enc1. prefix) are
 // returned as-is so startup migration can re-seal them.
-func (b *Box) Open(stored string) (string, error) {
-	stored = strings.TrimSpace(stored)
+func (b *Box) Open(stored string) (string, error) { return b.OpenExact(strings.TrimSpace(stored)) }
+
+// OpenExact preserves plaintext bytes, including Unicode separators.
+func (b *Box) OpenExact(stored string) (string, error) {
 	if stored == "" {
 		return "", errors.New("stored access token is empty")
 	}

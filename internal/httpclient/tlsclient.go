@@ -76,7 +76,9 @@ func (t *tlsClientRoundTripper) httpClient() (tls_client.HttpClient, error) {
 			tls_client.WithRandomTLSExtensionOrder(),
 			tls_client.WithNotFollowRedirects(),
 		}
-		if proxy := strings.TrimSpace(t.accountProxy); proxy != "" {
+		if proxy := strings.TrimSpace(t.accountProxy); proxy == ProxyDirect {
+			// tls-client uses its direct dialer when no proxy option is provided.
+		} else if proxy != "" {
 			options = append(options, tls_client.WithProxyUrl(proxy))
 		} else if envProxy := processProxyURL(); envProxy != "" {
 			// When no per-account proxy is set, honor process proxy env once at client build.

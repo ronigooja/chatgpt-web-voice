@@ -24,10 +24,10 @@ const csrfHeaderName = "X-CSRF-Token"
 
 // Default login brute-force controls. Override via NewWithLimits for tests/config.
 const (
-	DefaultLoginMaxFailures   = 8
-	DefaultLoginWindow        = 15 * time.Minute
-	DefaultLoginLockout       = 15 * time.Minute
-	DefaultLoginFailureDelay  = 200 * time.Millisecond
+	DefaultLoginMaxFailures  = 8
+	DefaultLoginWindow       = 15 * time.Minute
+	DefaultLoginLockout      = 15 * time.Minute
+	DefaultLoginFailureDelay = 200 * time.Millisecond
 )
 
 type userContextKey struct{}
@@ -38,10 +38,10 @@ type session struct {
 }
 
 type loginAttempt struct {
-	failures  int
-	firstAt   time.Time
+	failures    int
+	firstAt     time.Time
 	lockedUntil time.Time
-	lastAt    time.Time
+	lastAt      time.Time
 }
 
 // Limits controls login / Basic-Auth brute-force protection.
@@ -70,12 +70,12 @@ func (l Limits) normalized() Limits {
 
 // Manager validates configured credentials and owns browser login sessions.
 type Manager struct {
-	username   string
-	password   string
-	ttl        time.Duration
-	limits     Limits
-	logger     *slog.Logger
-	store      *SessionStore
+	username string
+	password string
+	ttl      time.Duration
+	limits   Limits
+	logger   *slog.Logger
+	store    *SessionStore
 
 	mu       sync.Mutex
 	sessions map[string]session
@@ -148,6 +148,35 @@ func (m *Manager) Require(next http.Handler) http.Handler {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"detail": map[string]any{"error": "authentication required"},
 		})
+	})
+}
+
+// RequireBasic protects credential-management endpoints without accepting browser
+// cookies. It shares the existing Basic authentication rate limits.
+func (m *Manager) RequireBasic(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		ip := clientIP(r)
+		if retry, locked := m.lockoutRemaining(ip); locked {
+			w.Header().Set("Retry-After", formatRetryAfter(retry))
+			writeAuthError(w, http.StatusTooManyRequests, "too many failed authentication attempts")
+			return
+		}
+		username, password, ok := r.BasicAuth()
+		if !ok || !m.validCredentials(username, password) {
+			if ok {
+				m.recordFailure(ip)
+				if m.limits.FailureDelay > 0 {
+					time.Sleep(m.limits.FailureDelay)
+				}
+			}
+			w.Header().Set("WWW-Authenticate", `Basic realm="voice bridge"`)
+			writeAuthError(w, http.StatusUnauthorized, "basic authentication required")
+			return
+		}
+		m.clearFailures(ip)
+		ctx := context.WithValue(r.Context(), userContextKey{}, m.username)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -461,7 +490,6 @@ func clientIP(r *http.Request) string {
 	return "unknown"
 }
 
-
 func formatRetryAfter(d time.Duration) string {
 	sec := int(d.Round(time.Second) / time.Second)
 	if sec < 1 {
@@ -486,7 +514,6 @@ func logUsername(username string) string {
 	}
 	return username
 }
-
 
 func isUnsafeMethod(method string) bool {
 	switch strings.ToUpper(strings.TrimSpace(method)) {

@@ -1,0 +1,68 @@
+name: Linux CI
+
+on:
+  push:
+    branches: [main, 'integration/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: ${{ matrix.check }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        check: [tests, race, build, bridge-regressions]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Verify
+        shell: bash
+        env:
+          CHECK: ${{ matrix.check }}
+        run: |
+          set -euo pipefail
+          task_log="$(mktemp /tmp/voice-ci.XXXXXX.log)"
+          diagnostics="$RUNNER_TEMP/voice-diagnostics"
+          mkdir -p "$diagnostics"
+          trap 'rm -f "$task_log"' EXIT
+          case "$CHECK" in
+            tests) command=(go test -count=1 -timeout=10m ./...) ;;
+            race) command=(go test -race -count=1 -timeout=15m ./...) ;;
+            build) command=(go build -o "$RUNNER_TEMP/voice-server" ./cmd/server) ;;
+            bridge-regressions)
+              command=(go test -count=1 -timeout=10m -run 'Test(Bridge|DirectTransports|CurlAccount|CurlEmpty|AccountDevice|SessionResumePrefersStableAccount)' ./internal/accounts ./internal/api ./internal/auth ./internal/httpclient ./internal/voice)
+              ;;
+            *) exit 2 ;;
+          esac
+          if "${command[@]}" >"$task_log" 2>&1; then
+            echo "$CHECK passed"
+          else
+            tail -c 65536 "$task_log" | tail -n 160 > "$diagnostics/$CHECK.log"
+            cat "$diagnostics/$CHECK.log"
+            exit 1
+          fi
+      - name: Retain failure excerpt
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: voice-${{ matrix.check }}-failure
+          path: ${{ runner.temp }}/voice-diagnostics/*.log
+          if-no-files-found: ignore
+          retention-days: 7

@@ -83,11 +83,15 @@ func (s *Service) CreateImageUploadCredential(owner, voiceSessionID string, req 
 		// a bound session, and we do not re-pick accounts for orphan uploads.
 		return nil, &ServiceError{Message: "voice session not found", StatusCode: 404}
 	}
+	binding, err = s.refreshBindingAccount(binding)
+	if err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(binding.AccessToken) == "" {
 		return nil, &ServiceError{Message: "voice session has no sticky account token", StatusCode: 404}
 	}
 
-	status, body, err := s.postFilesCreateOnce(binding.AccessToken, binding.Proxy, meta)
+	status, body, err := s.postFilesCreateOnce(binding.AccessToken, binding.Proxy, binding.DeviceID, meta)
 	if err != nil {
 		s.logger.Warn("image_upload_create_failed", "voice_session_id", sessionID, "error", err)
 		return nil, &ServiceError{
@@ -177,11 +181,15 @@ func (s *Service) CompleteImageUpload(owner, voiceSessionID, fileID string) (*Im
 	if binding == nil {
 		return nil, &ServiceError{Message: "voice session not found", StatusCode: 404}
 	}
+	binding, err := s.refreshBindingAccount(binding)
+	if err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(binding.AccessToken) == "" {
 		return nil, &ServiceError{Message: "voice session has no sticky account token", StatusCode: 404}
 	}
 
-	status, body, err := s.postFileUploadedOnce(binding.AccessToken, binding.Proxy, fileID)
+	status, body, err := s.postFileUploadedOnce(binding.AccessToken, binding.Proxy, binding.DeviceID, fileID)
 	if err != nil {
 		s.logger.Warn("image_upload_complete_failed", "voice_session_id", sessionID, "file_id", fileID, "error", err)
 		return nil, &ServiceError{
@@ -200,7 +208,7 @@ func (s *Service) CompleteImageUpload(owner, voiceSessionID, fileID string) (*Im
 		// done
 	default:
 		// Fallback used by some ChatGPT deployments when /uploaded is unavailable.
-		processStatus, processBody, processErr := s.postProcessUploadStreamOnce(binding.AccessToken, binding.Proxy, fileID)
+		processStatus, processBody, processErr := s.postProcessUploadStreamOnce(binding.AccessToken, binding.Proxy, binding.DeviceID, fileID)
 		if processErr != nil {
 			return nil, &ServiceError{
 				Message:    "upstream file complete failed",
@@ -313,7 +321,7 @@ func validUpstreamFileID(id string) bool {
 	return true
 }
 
-func (s *Service) postFilesCreateOnce(token, proxy string, meta ImageUploadRequest) (status int, text string, err error) {
+func (s *Service) postFilesCreateOnce(token, proxy, deviceID string, meta ImageUploadRequest) (status int, text string, err error) {
 	client := httpclient.New(s.httpOptions, proxy)
 	client.Timeout = filesUploadTimeout
 	payload := map[string]any{
@@ -339,7 +347,7 @@ func (s *Service) postFilesCreateOnce(token, proxy string, meta ImageUploadReque
 	if err != nil {
 		return 0, "", err
 	}
-	req.Header = s.authHeaders(token, map[string]string{
+	req.Header = s.authHeaders(token, deviceID, map[string]string{
 		"content-type": "application/json",
 		"accept":       "application/json",
 	})
@@ -352,7 +360,7 @@ func (s *Service) postFilesCreateOnce(token, proxy string, meta ImageUploadReque
 	return resp.StatusCode, string(body), nil
 }
 
-func (s *Service) postFileUploadedOnce(token, proxy, fileID string) (status int, text string, err error) {
+func (s *Service) postFileUploadedOnce(token, proxy, deviceID, fileID string) (status int, text string, err error) {
 	client := httpclient.New(s.httpOptions, proxy)
 	client.Timeout = filesUploadTimeout
 	endpoint := strings.TrimRight(s.filesURL(), "/") + "/" + fileID + "/uploaded"
@@ -360,7 +368,7 @@ func (s *Service) postFileUploadedOnce(token, proxy, fileID string) (status int,
 	if err != nil {
 		return 0, "", err
 	}
-	req.Header = s.authHeaders(token, map[string]string{
+	req.Header = s.authHeaders(token, deviceID, map[string]string{
 		"content-type": "application/json",
 		"accept":       "application/json",
 	})
@@ -373,7 +381,7 @@ func (s *Service) postFileUploadedOnce(token, proxy, fileID string) (status int,
 	return resp.StatusCode, string(body), nil
 }
 
-func (s *Service) postProcessUploadStreamOnce(token, proxy, fileID string) (status int, text string, err error) {
+func (s *Service) postProcessUploadStreamOnce(token, proxy, deviceID, fileID string) (status int, text string, err error) {
 	client := httpclient.New(s.httpOptions, proxy)
 	client.Timeout = filesUploadTimeout
 	payload, _ := json.Marshal(map[string]any{
@@ -387,7 +395,7 @@ func (s *Service) postProcessUploadStreamOnce(token, proxy, fileID string) (stat
 	if err != nil {
 		return 0, "", err
 	}
-	req.Header = s.authHeaders(token, map[string]string{
+	req.Header = s.authHeaders(token, deviceID, map[string]string{
 		"content-type": "application/json",
 		"accept":       "application/json",
 	})

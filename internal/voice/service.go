@@ -80,6 +80,7 @@ type sessionBinding struct {
 	AccountID              int64
 	AccessToken            string
 	Proxy                  string
+	DeviceID               string
 	UpstreamVoiceSessionID string
 	ConversationID         string
 	ParentMessageID        string
@@ -95,6 +96,8 @@ type Service struct {
 	records     CallSessionStore
 	logger      *slog.Logger
 
+	// realtimeURL overrides the voice endpoint in tests.
+	realtimeURL string
 	// settingsUserURL overrides the account probe endpoint in tests.
 	settingsUserURL string
 	// conversationURLPrefix overrides the conversation metadata endpoint in tests.
@@ -223,6 +226,7 @@ func (s *Service) bindVoiceSession(owner, sessionID, token string, account accou
 		AccountID:              account.ID,
 		AccessToken:            token,
 		Proxy:                  account.Proxy,
+		DeviceID:               account.DeviceID,
 		UpstreamVoiceSessionID: merged.UpstreamVoiceSessionID,
 		ConversationID:         merged.ConversationID,
 		ParentMessageID:        merged.ParentMessageID,
@@ -367,13 +371,22 @@ func (s *Service) FetchUpstreamTitle(owner, voiceSessionID, conversationID strin
 		return nil, &ServiceError{Message: "voice session does not belong to caller", StatusCode: 403}
 	}
 
+	if binding != nil {
+		var err error
+		binding, err = s.refreshBindingAccount(binding)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	// Rehydrate sticky account from durable metadata when memory was released.
-	var accessToken, proxy string
+	var accessToken, proxy, deviceID string
 	var accountID int64
 	var storedConversationID string
 	if binding != nil {
 		accessToken = binding.AccessToken
 		proxy = binding.Proxy
+		deviceID = binding.DeviceID
 		accountID = binding.AccountID
 		storedConversationID = binding.ConversationID
 	} else if s.records != nil {
@@ -396,6 +409,7 @@ func (s *Service) FetchUpstreamTitle(owner, voiceSessionID, conversationID strin
 		}
 		accessToken = token
 		proxy = account.Proxy
+		deviceID = account.DeviceID
 		accountID = account.ID
 		storedConversationID = row.UpstreamConversationID
 	} else {
@@ -420,7 +434,7 @@ func (s *Service) FetchUpstreamTitle(owner, voiceSessionID, conversationID strin
 		}
 	}
 
-	status, contentType, body, err := s.getConversationOnce(accessToken, proxy, upstreamID)
+	status, contentType, body, err := s.getConversationOnce(accessToken, proxy, upstreamID, deviceID)
 	if err != nil {
 		s.logger.Warn("upstream_title_fetch_failed", "voice_session_id", sessionID, "error", err)
 		return nil, &ServiceError{
@@ -472,7 +486,7 @@ func (s *Service) FetchUpstreamTitle(owner, voiceSessionID, conversationID strin
 	return result, nil
 }
 
-func (s *Service) getConversationOnce(token, proxy, conversationID string) (status int, contentType, text string, err error) {
+func (s *Service) getConversationOnce(token, proxy, conversationID, deviceID string) (status int, contentType, text string, err error) {
 	client := httpclient.New(s.httpOptions, proxy)
 	client.Timeout = titleFetchTimeout
 	prefix := s.conversationURLPrefix
@@ -484,7 +498,7 @@ func (s *Service) getConversationOnce(token, proxy, conversationID string) (stat
 	if err != nil {
 		return 0, "", "", err
 	}
-	req.Header = s.authHeaders(token, map[string]string{
+	req.Header = s.authHeaders(token, deviceID, map[string]string{
 		"accept": "application/json, text/plain, */*",
 	})
 	resp, err := client.Do(req)
@@ -590,6 +604,23 @@ func (s *Service) boundVoiceSession(owner, voiceSessionID string) (binding *sess
 	return &cp, false
 }
 
+// refreshBindingAccount reads current credentials and transport policy so edits
+// cannot leave live sessions using an obsolete device ID or proxy route.
+func (s *Service) refreshBindingAccount(binding *sessionBinding) (*sessionBinding, error) {
+	if s.pool == nil {
+		return binding, nil
+	}
+	account, err := s.pool.Get(binding.AccountID)
+	if err != nil {
+		return nil, &ServiceError{Message: "voice session account unavailable", StatusCode: 503}
+	}
+	refreshed := *binding
+	refreshed.AccessToken = account.AccessToken
+	refreshed.Proxy = account.Proxy
+	refreshed.DeviceID = account.DeviceID
+	return &refreshed, nil
+}
+
 func normalizeSessionOwner(owner string) string {
 	owner = strings.TrimSpace(owner)
 	if owner == "" {
@@ -663,7 +694,7 @@ func buildSessionJSON(voice, voiceMode, languageCode string, upstream UpstreamCo
 	return string(data)
 }
 
-func (s *Service) authHeaders(token string, extra map[string]string) http.Header {
+func (s *Service) authHeaders(token, deviceID string, extra map[string]string) http.Header {
 	// Header set aligned with ChatGPT2API-GO UpstreamClient.headers (Edge 143 persona).
 	h := http.Header{}
 	h.Set("accept", "*/*")
@@ -686,7 +717,7 @@ func (s *Service) authHeaders(token string, extra map[string]string) http.Header
 	h.Set("sec-fetch-dest", "empty")
 	h.Set("sec-fetch-mode", "cors")
 	h.Set("sec-fetch-site", "same-origin")
-	h.Set("oai-device-id", s.cfg.DeviceID)
+	h.Set("oai-device-id", firstNonEmpty(deviceID, s.cfg.DeviceID))
 	h.Set("oai-session-id", s.cfg.SessionID)
 	h.Set("oai-language", "zh-CN")
 	h.Set("oai-client-version", s.cfg.ClientVersion)
@@ -698,17 +729,17 @@ func (s *Service) authHeaders(token string, extra map[string]string) http.Header
 	return h
 }
 
-func (s *Service) postWMOnce(token, offerSDP, sessionJSON, proxy string) (status int, contentType, text string, err error) {
+func (s *Service) postWMOnce(token, offerSDP, sessionJSON, proxy, deviceID string) (status int, contentType, text string, err error) {
 	client := httpclient.New(s.httpOptions, proxy)
 	body, ct := encodeMultipart([][2]string{
 		{"sdp", offerSDP},
 		{"session", sessionJSON},
 	})
-	req, err := http.NewRequest(http.MethodPost, wmURL, bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, firstNonEmpty(s.realtimeURL, wmURL), bytes.NewReader(body))
 	if err != nil {
 		return 0, "", "", err
 	}
-	req.Header = s.authHeaders(token, map[string]string{"content-type": ct})
+	req.Header = s.authHeaders(token, deviceID, map[string]string{"content-type": ct})
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -756,10 +787,10 @@ func (s *Service) ProbeAccountToken(accountID int64) (*ProbeResult, error) {
 		}
 	}
 
-	status, contentType, body, err := s.getSettingsUserOnce(account.AccessToken, account.Proxy)
+	status, contentType, body, err := s.getSettingsUserOnce(account.AccessToken, account.Proxy, account.DeviceID)
 	if err != nil {
 		result.Detail = probeNetworkDetail(err, account.Proxy)
-		s.logger.Warn("account_probe_failed", "account_id", account.ID, "proxy", account.Proxy != "", "error", err)
+		s.logger.Warn("account_probe_failed", "account_id", account.ID, "proxy", account.Proxy != "" && account.Proxy != httpclient.ProxyDirect, "error", err)
 		return result, nil
 	}
 	result.StatusCode = status
@@ -795,7 +826,7 @@ func (s *Service) ProbeAccountToken(accountID int64) (*ProbeResult, error) {
 	return result, nil
 }
 
-func (s *Service) getSettingsUserOnce(token, proxy string) (status int, contentType, text string, err error) {
+func (s *Service) getSettingsUserOnce(token, proxy, deviceID string) (status int, contentType, text string, err error) {
 	client := httpclient.New(s.httpOptions, proxy)
 	client.Timeout = probeTimeout
 	if transport, ok := client.Transport.(*http.Transport); ok {
@@ -817,7 +848,7 @@ func (s *Service) getSettingsUserOnce(token, proxy string) (status int, contentT
 	if err != nil {
 		return 0, "", "", err
 	}
-	req.Header = s.authHeaders(token, map[string]string{
+	req.Header = s.authHeaders(token, deviceID, map[string]string{
 		"accept": "application/json, text/plain, */*",
 	})
 	resp, err := client.Do(req)
@@ -839,6 +870,9 @@ func probeNetworkDetail(err error, accountProxy string) string {
 		strings.Contains(lower, "deadline exceeded") ||
 		strings.Contains(lower, "i/o timeout")
 	if timedOut {
+		if strings.TrimSpace(accountProxy) == httpclient.ProxyDirect {
+			return "upstream timeout on explicit direct connection; check direct network reachability"
+		}
 		if strings.TrimSpace(accountProxy) != "" {
 			return "upstream timeout via account proxy; check proxy reachability"
 		}
@@ -919,24 +953,13 @@ type CreateSessionRequest struct {
 	UpstreamVoiceSessionID  string
 }
 
-// pickAccountForSession prefers a live binding token, then a sticky account id
-// from SQLite, then falls back to LRU pool selection.
+// pickAccountForSession preserves stable account identity across token edits.
+// A token retained by a live binding may have been reassigned to another account.
 func (s *Service) pickAccountForSession(preferredToken string, preferredAccountID int64, excluded map[string]struct{}) (string, accounts.Account, error) {
-	if token := strings.TrimSpace(preferredToken); token != "" {
-		token, account, err := s.pool.Pick(token, excluded)
-		if err == nil {
-			return token, account, nil
-		}
-		// Preferred token failed; try sticky id before giving up when both set.
-	}
 	if preferredAccountID > 0 {
 		return s.pool.PickByID(preferredAccountID, excluded)
 	}
-	if token := strings.TrimSpace(preferredToken); token != "" {
-		// Surface the preferred-token failure rather than silently rotating.
-		return s.pool.Pick(token, excluded)
-	}
-	return s.pool.Pick("", excluded)
+	return s.pool.Pick(strings.TrimSpace(preferredToken), excluded)
 }
 
 // CreateSession POSTs offer SDP to /realtime/wm and returns answer SDP.
@@ -1064,15 +1087,14 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 		excluded[token] = struct{}{}
 
 		explicitProxy := account.Proxy
-		if explicitProxy == "" && bound != nil {
-			explicitProxy = bound.Proxy
-		}
 		proxySource := "process_environment_or_direct"
-		if strings.TrimSpace(explicitProxy) != "" {
+		if strings.TrimSpace(explicitProxy) == httpclient.ProxyDirect {
+			proxySource = "account_direct"
+		} else if strings.TrimSpace(explicitProxy) != "" {
 			proxySource = "account"
 		}
 
-		status, contentType, text, err := s.postWMOnce(token, offerSDP, sessionJSON, explicitProxy)
+		status, contentType, text, err := s.postWMOnce(token, offerSDP, sessionJSON, explicitProxy, account.DeviceID)
 		if err != nil {
 			s.logger.Error("upstream_realtime_request_failed", "account_id", account.ID, "attempt", attempt, "error", err)
 			return nil, &ServiceError{

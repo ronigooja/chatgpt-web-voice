@@ -1,5 +1,12 @@
 # chatgpt-web-voice
 
+This is the [ronigooja fork](https://github.com/ronigooja/chatgpt-web-voice),
+maintained for llm-auth-bridge credential synchronization and Zoe integration.
+See [fork provenance and verification](docs/FORK.md) and the
+[bridge-v1 API](docs/BRIDGE_V1.md). The upstream usage documentation follows.
+The upstream GHCR badge and examples below describe upstream artifacts; they do
+not identify a build containing this fork's changes.
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/go-1.22%2B-00ADD8)](https://go.dev/)
 [![GHCR](https://img.shields.io/badge/ghcr.io-space3044%2Fchatgpt--web--voice-2496ED)](https://github.com/Space3044/chatgpt-web-voice/pkgs/container/chatgpt-web-voice)
