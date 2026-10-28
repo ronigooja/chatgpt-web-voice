@@ -3708,6 +3708,12 @@
 
   async function ensureRemotePlaybackGraph(stream) {
     if (!stream) return false;
+    // Safari can expose a Web Audio MediaStreamSource for a WebRTC stream but
+    // fail to render that graph. Keep the native media element as the audible
+    // path there; the graph would otherwise set the element volume to zero.
+    if (/Safari\//.test(navigator.userAgent) && !/Chrome\//.test(navigator.userAgent) && !/Chromium\//.test(navigator.userAgent)) {
+      return false;
+    }
     await ensureCtx();
     if (!audioCtx) return false;
     // Rebuild when the remote MediaStream identity changes.
