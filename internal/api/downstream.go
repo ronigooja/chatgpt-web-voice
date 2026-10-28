@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -64,6 +65,7 @@ func (s *Server) downstreamSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"answer_sdp":               result.AnswerSDP,
 		"voice_session_id":         result.VoiceSessionID,
+		"account_id":               fmt.Sprintf("account-%d", result.AccountID),
 		"account_lease_id":         result.AccountLeaseID,
 		"account_lease_generation": result.AccountLeaseGeneration,
 		"voice":                    result.Voice,

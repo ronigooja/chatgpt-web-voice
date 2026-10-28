@@ -1221,23 +1221,11 @@ func (s *Service) ReleaseAccountLease(owner, leaseID string, generation int64, s
 	if s.records == nil {
 		return nil, &ServiceError{Message: "account lease persistence is unavailable", StatusCode: 503}
 	}
-	row, err := s.records.Get(normalizeSessionOwner(owner), sessionID)
-	if err != nil {
-		return nil, &ServiceError{Message: "voice session not found", StatusCode: 404}
-	}
-	if row.AccountID <= 0 || accountLeaseID(row.AccountID, sessionID) != leaseID {
-		return nil, &ServiceError{Message: "account lease identity does not match voice session", StatusCode: 409}
-	}
-	if row.Status != callsessions.StatusReleased && !s.ReleaseSession(owner, sessionID) {
-		// A restart may have dropped the in-memory binding; durable release still
-		// succeeds only when the row is already terminal.
-		row, err = s.records.Get(normalizeSessionOwner(owner), sessionID)
-		if err != nil || row.Status != callsessions.StatusReleased {
-			return nil, &ServiceError{Message: "voice session release is unresolved", StatusCode: 503}
-		}
-	}
-	evidence := sha256.Sum256([]byte(fmt.Sprintf("%s:%d:%s:%d", leaseID, generation, sessionID, sessionGeneration)))
-	return &AccountLeaseRelease{AccountID: fmt.Sprintf("account-%d", row.AccountID), LeaseID: leaseID, Generation: generation, SessionID: sessionID, SessionGeneration: sessionGeneration, Terminated: true, EvidenceID: fmt.Sprintf("release-%x", evidence[:16]), ObservedAt: time.Now().UTC().Format(time.RFC3339Nano)}, nil
+	// The gateway can drop its bookkeeping binding, but it cannot observe the
+	// browser's WebRTC PeerConnection or prove that upstream media has ended.
+	// Keep Zoe's account pool fenced until a deployment-specific media observer
+	// supplies exact terminal evidence.
+	return nil, &ServiceError{Message: "upstream WebRTC termination evidence is unavailable", StatusCode: 503}
 }
 
 func truncate(s string, n int) string {
