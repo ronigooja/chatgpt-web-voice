@@ -45,6 +45,13 @@ func (s *downstreamVoiceStub) ReleaseSession(owner, id string) bool {
 	return owner == "api_key:1" && id == "vs_test"
 }
 
+func (s *downstreamVoiceStub) ReleaseAccountLease(owner, leaseID string, generation int64, sessionID string, sessionGeneration int64) (*voice.AccountLeaseRelease, error) {
+	if owner != "api_key:1" || leaseID == "" || generation != 1 || sessionID != "vs_test" || sessionGeneration != 1 {
+		return nil, &voice.ServiceError{Message: "invalid lease", StatusCode: http.StatusConflict}
+	}
+	return &voice.AccountLeaseRelease{AccountID: "account-9", LeaseID: leaseID, Generation: 1, SessionID: sessionID, SessionGeneration: 1, Terminated: true, EvidenceID: "evidence", ObservedAt: "2026-01-01T00:00:00Z"}, nil
+}
+
 func (s *downstreamVoiceStub) UpdateSessionContext(owner, id string, patch voice.UpstreamContext) (voice.UpstreamContext, error) {
 	if owner != "api_key:1" || id != "vs_test" {
 		return voice.UpstreamContext{}, &voice.ServiceError{Message: "voice session not found", StatusCode: http.StatusNotFound}

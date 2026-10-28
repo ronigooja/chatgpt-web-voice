@@ -62,11 +62,13 @@ func (s *Server) downstreamSession(w http.ResponseWriter, r *http.Request) {
 	// Public contract: only signaling + session handle. Pool account and
 	// upstream continuity stay server-side.
 	writeJSON(w, http.StatusOK, map[string]any{
-		"answer_sdp":       result.AnswerSDP,
-		"voice_session_id": result.VoiceSessionID,
-		"voice":            result.Voice,
-		"voice_mode":       result.VoiceMode,
-		"language_code":    result.LanguageCode,
+		"answer_sdp":               result.AnswerSDP,
+		"voice_session_id":         result.VoiceSessionID,
+		"account_lease_id":         result.AccountLeaseID,
+		"account_lease_generation": result.AccountLeaseGeneration,
+		"voice":                    result.Voice,
+		"voice_mode":               result.VoiceMode,
+		"language_code":            result.LanguageCode,
 	})
 }
 

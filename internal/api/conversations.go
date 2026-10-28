@@ -18,7 +18,7 @@ type createConversationRequest struct {
 }
 
 type updateConversationRequest struct {
-	Title                   string  `json:"title"`
+	Title string `json:"title"`
 	// TitleLocked, when non-nil, updates whether hangup may overwrite the title.
 	// true = user renamed; hangup skips upstream title fetch.
 	TitleLocked             *bool   `json:"title_locked"`

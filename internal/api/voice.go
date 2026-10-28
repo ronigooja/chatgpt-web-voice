@@ -213,6 +213,38 @@ type releaseRequest struct {
 	SessionID      string `json:"session_id"`
 }
 
+type accountLeaseReleaseRequest struct {
+	VoiceSessionID         string `json:"voice_session_id"`
+	VoiceSessionGeneration int64  `json:"voice_session_generation"`
+	AccountLeaseGeneration int64  `json:"account_lease_generation"`
+}
+
+func (s *Server) downstreamReleaseAccountLease(w http.ResponseWriter, r *http.Request) {
+	if s.voice == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": map[string]any{"error": "voice service unavailable"}})
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	var body accountLeaseReleaseRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": map[string]any{"error": "invalid json body"}})
+		return
+	}
+	owner := auth.APIKeyOwner(r.Context())
+	if owner == "" {
+		writeDownstreamError(w, http.StatusUnauthorized, "invalid_api_key", "valid Bearer API key required")
+		return
+	}
+	result, err := s.voice.ReleaseAccountLease(owner, r.PathValue("lease_id"), body.AccountLeaseGeneration, body.VoiceSessionID, body.VoiceSessionGeneration)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (s *Server) release(w http.ResponseWriter, r *http.Request) {
 	if s.voice == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{

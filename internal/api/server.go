@@ -45,6 +45,7 @@ type APIKeyStore interface {
 type VoiceService interface {
 	CreateSession(req voice.CreateSessionRequest) (*voice.SessionResult, error)
 	ReleaseSession(owner, voiceSessionID string) bool
+	ReleaseAccountLease(owner, leaseID string, generation int64, sessionID string, sessionGeneration int64) (*voice.AccountLeaseRelease, error)
 	UpdateSessionContext(owner, voiceSessionID string, patch voice.UpstreamContext) (voice.UpstreamContext, error)
 	FetchUpstreamTitle(owner, voiceSessionID, conversationID string) (*voice.UpstreamTitleResult, error)
 	CreateImageUploadCredential(owner, voiceSessionID string, req voice.ImageUploadRequest) (*voice.ImageUploadCredential, error)
@@ -121,6 +122,7 @@ func (s *Server) RegisterDownstream(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/voice/sessions/{id}/uploads", s.downstreamImageUpload)
 	mux.HandleFunc("POST /v1/voice/sessions/{id}/uploads/{file_id}/complete", s.downstreamImageUploadComplete)
 	mux.HandleFunc("DELETE /v1/voice/sessions/{id}", s.downstreamRelease)
+	mux.HandleFunc("POST /v1/voice/account-leases/{lease_id}/release", s.downstreamReleaseAccountLease)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

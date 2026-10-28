@@ -2,6 +2,7 @@ package voice
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -142,6 +143,8 @@ type SessionResult struct {
 	SessionID               string `json:"session_id"`
 	VoiceSessionID          string `json:"voice_session_id"`
 	AccountID               int64  `json:"account_id,omitempty"`
+	AccountLeaseID          string `json:"account_lease_id,omitempty"`
+	AccountLeaseGeneration  int64  `json:"account_lease_generation,omitempty"`
 	UpstreamVoiceSessionID  string `json:"upstream_voice_session_id,omitempty"`
 	UpstreamConversationID  string `json:"upstream_conversation_id,omitempty"`
 	UpstreamParentMessageID string `json:"upstream_parent_message_id,omitempty"`
@@ -1169,6 +1172,8 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 			SessionID:               voiceSessionID,
 			VoiceSessionID:          voiceSessionID,
 			AccountID:               account.ID,
+			AccountLeaseID:          accountLeaseID(account.ID, voiceSessionID),
+			AccountLeaseGeneration:  1,
 			Voice:                   voice,
 			VoiceMode:               options.VoiceMode,
 			LanguageCode:            options.LanguageCode,
@@ -1187,6 +1192,52 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 		StatusCode: code,
 		Detail:     lastDetail,
 	}
+}
+
+func accountLeaseID(accountID int64, sessionID string) string {
+	h := sha256.Sum256([]byte(fmt.Sprintf("%d:%s", accountID, sessionID)))
+	return "lease-" + fmt.Sprintf("%x", h[:16])
+}
+
+// AccountLeaseRelease is the terminal observation returned to a trusted
+// downstream caller. It is valid only for the exact account/session lease.
+type AccountLeaseRelease struct {
+	AccountID         string `json:"account_id"`
+	LeaseID           string `json:"account_lease_id"`
+	Generation        int64  `json:"account_lease_generation"`
+	SessionID         string `json:"voice_session_id"`
+	SessionGeneration int64  `json:"voice_session_generation"`
+	Terminated        bool   `json:"terminated"`
+	EvidenceID        string `json:"evidence_id"`
+	ObservedAt        string `json:"observed_at"`
+}
+
+// ReleaseAccountLease releases one exact voice binding and returns durable
+// evidence that the gateway no longer owns its account/session binding.
+func (s *Service) ReleaseAccountLease(owner, leaseID string, generation int64, sessionID string, sessionGeneration int64) (*AccountLeaseRelease, error) {
+	if generation != 1 || sessionGeneration != 1 || strings.TrimSpace(leaseID) == "" || strings.TrimSpace(sessionID) == "" {
+		return nil, &ServiceError{Message: "account lease identity is incomplete", StatusCode: 400}
+	}
+	if s.records == nil {
+		return nil, &ServiceError{Message: "account lease persistence is unavailable", StatusCode: 503}
+	}
+	row, err := s.records.Get(normalizeSessionOwner(owner), sessionID)
+	if err != nil {
+		return nil, &ServiceError{Message: "voice session not found", StatusCode: 404}
+	}
+	if row.AccountID <= 0 || accountLeaseID(row.AccountID, sessionID) != leaseID {
+		return nil, &ServiceError{Message: "account lease identity does not match voice session", StatusCode: 409}
+	}
+	if row.Status != callsessions.StatusReleased && !s.ReleaseSession(owner, sessionID) {
+		// A restart may have dropped the in-memory binding; durable release still
+		// succeeds only when the row is already terminal.
+		row, err = s.records.Get(normalizeSessionOwner(owner), sessionID)
+		if err != nil || row.Status != callsessions.StatusReleased {
+			return nil, &ServiceError{Message: "voice session release is unresolved", StatusCode: 503}
+		}
+	}
+	evidence := sha256.Sum256([]byte(fmt.Sprintf("%s:%d:%s:%d", leaseID, generation, sessionID, sessionGeneration)))
+	return &AccountLeaseRelease{AccountID: fmt.Sprintf("account-%d", row.AccountID), LeaseID: leaseID, Generation: generation, SessionID: sessionID, SessionGeneration: sessionGeneration, Terminated: true, EvidenceID: fmt.Sprintf("release-%x", evidence[:16]), ObservedAt: time.Now().UTC().Format(time.RFC3339Nano)}, nil
 }
 
 func truncate(s string, n int) string {
