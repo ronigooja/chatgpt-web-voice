@@ -4,9 +4,9 @@ package accounts
 // with AES-256-GCM before it is written to SQLite; domain code always sees
 // the plaintext form after decryption.
 //
-// Upstream browser fingerprint (device id, session id, UA) is process-global
-// configuration, not per-account state.
+// Bridge accounts may override the process-global device fingerprint.
 type Account struct {
+	DeviceID    string  `json:"-"`
 	ID          int64   `json:"id,omitempty"`
 	Email       string  `json:"email"`
 	AccessToken string  `json:"access_token"`

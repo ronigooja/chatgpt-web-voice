@@ -55,6 +55,14 @@ func (t *curlRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	if proxy := resolveCurlProxy(t.accountProxy, req); proxy != "" {
 		args = append(args, "--proxy", proxy)
 	}
+	if strings.TrimSpace(t.accountProxy) == ProxyDirect {
+		// Block curl environment fallback, including ALL_PROXY. Empty native
+		// account policy intentionally retains curl's legacy inheritance.
+		args = append(args, "--proxy", "", "--noproxy", "*")
+	} else if strings.TrimSpace(t.accountProxy) != "" {
+		// An explicit account proxy takes precedence over process NO_PROXY.
+		args = append(args, "--noproxy", "")
+	}
 	// Prefer ChatGPT2API-GO-style header order when present.
 	for _, key := range headerKeys(req.Header) {
 		for _, value := range req.Header.Values(key) {
@@ -238,7 +246,9 @@ func findCurlBinaryInDir(dir string, candidates []string) string {
 }
 
 func resolveCurlProxy(accountProxy string, req *http.Request) string {
-	if proxy := strings.TrimSpace(accountProxy); proxy != "" {
+	if proxy := strings.TrimSpace(accountProxy); proxy == ProxyDirect {
+		return ""
+	} else if proxy != "" {
 		return proxy
 	}
 	// Mirror Go's ProxyFromEnvironment for the curl process.

@@ -44,8 +44,9 @@ func FromConfig(cfg config.Config) Options {
 // New builds an HTTP client for upstream ChatGPT traffic.
 //
 // Proxy selection:
-//  1. non-empty account proxy wins (per-account override)
-//  2. otherwise use process proxy environment variables
+//  1. "direct" disables proxies, including process environment proxies
+//  2. non-empty account proxy wins (per-account override)
+//  3. otherwise use process proxy environment variables
 //     (HTTP_PROXY / HTTPS_PROXY and NO_PROXY, including lowercase variants)
 //
 // Transport selection (aligned with ChatGPT2API-GO documented defaults):
@@ -142,7 +143,13 @@ func ResolveCurlBinary(opts Options) (string, error) {
 
 // proxyFunc returns the transport Proxy callback. Account proxy overrides
 // environment proxies; empty account proxy falls back to ProxyFromEnvironment.
+// ProxyDirect is the explicit per-account policy that bypasses all proxies.
+const ProxyDirect = "direct"
+
 func proxyFunc(accountProxy string) func(*http.Request) (*url.URL, error) {
+	if strings.TrimSpace(accountProxy) == ProxyDirect {
+		return nil
+	}
 	if accountProxy == "" {
 		return http.ProxyFromEnvironment
 	}

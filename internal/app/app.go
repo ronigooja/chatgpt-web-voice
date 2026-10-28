@@ -162,7 +162,10 @@ func newHandler(cfg config.Config, authManager *auth.Manager, apiKeyManager *aut
 	downstream := http.NewServeMux()
 	apiServer.RegisterDownstream(downstream)
 
+	bridge := http.NewServeMux()
+	apiServer.RegisterBridge(bridge)
 	root := http.NewServeMux()
+	root.Handle("/bridge/", authManager.RequireBasic(bridge))
 	// Shared CSS/assets must be public: login.html loads /static/app.css before auth.
 	registerPublicStaticAssets(root, cfg.StaticDir)
 	root.Handle("GET /login", authManager.LoginPage(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

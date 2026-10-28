@@ -111,6 +111,21 @@ func (db *DB) migrate() error {
 	if err := db.ensureConversationUpstreamColumns(); err != nil {
 		return err
 	}
+	// Created after legacy account-table rebuilds.
+	if _, err := db.conn.Exec(`CREATE TABLE IF NOT EXISTS bridge_accounts (
+		remote_id TEXT PRIMARY KEY,
+        identity TEXT NOT NULL,
+		account_id INTEGER NOT NULL UNIQUE REFERENCES accounts(id) ON DELETE CASCADE,
+		device_id TEXT NOT NULL DEFAULT '',
+		expires_at TEXT NOT NULL DEFAULT 'null'
+	)`); err != nil {
+		return fmt.Errorf("create bridge accounts: %w", err)
+	}
+	if _, err := db.conn.Exec(`CREATE TABLE IF NOT EXISTS bridge_idempotency (
+		key TEXT PRIMARY KEY, remote_id TEXT NOT NULL, payload_digest TEXT NOT NULL
+	)`); err != nil {
+		return fmt.Errorf("create bridge idempotency: %w", err)
+	}
 	return nil
 }
 
