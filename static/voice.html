@@ -4387,11 +4387,12 @@
   }
 
   function preferSpeakerOutput() {
-    // Best-effort: some Chromium mobile builds expose audioSession.type.
-    // 'playback' routes toward media/speaker instead of earpiece call route when supported.
+    // Best-effort: some mobile builds expose audioSession.type. A pure
+    // 'playback' category rejects getUserMedia() on iOS, so keep the call in
+    // the capture-compatible category while still allowing remote playback.
     try {
       if (navigator.audioSession) {
-        if ('type' in navigator.audioSession) navigator.audioSession.type = 'playback';
+        if ('type' in navigator.audioSession) navigator.audioSession.type = 'play-and-record';
       }
     } catch (e) {}
     try {
