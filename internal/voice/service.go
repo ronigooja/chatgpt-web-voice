@@ -1409,11 +1409,17 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 			}
 			if s.cfg.RelayHandoffEnabled {
 				call.transcript = newTranscriptTail(s.cfg.RelayHandoffMaxChars)
-				media.SetEventObserver(call.transcript.Observe)
 			}
 		}
 		voiceSessionID := s.bindVoiceSessionMedia(owner, targetSessionID, token, account, upstreamForWM, media, mediaID, call)
 		if media != nil {
+			boundMedia, boundCall := media, call
+			media.SetEventObserver(func(data []byte) {
+				if boundCall.transcript != nil {
+					boundCall.transcript.Observe(data)
+				}
+				s.learnUpstreamIDs(voiceSessionID, func(b *sessionBinding) bool { return b.media == boundMedia }, data)
+			})
 			s.startRebuildLoop(owner, voiceSessionID, media, call)
 		}
 		// Re-read binding so response fields match what was actually stored.
