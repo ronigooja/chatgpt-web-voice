@@ -92,6 +92,8 @@ type rig struct {
 	other      *webrtc.DataChannel // client's extra channel
 	clientEv   chan string
 	eventsOpen chan struct{}
+
+	upstreamEvents *webrtc.DataChannel // fake upstream's negotiated oai-events
 }
 
 func newRelay(t *testing.T, max int) *PionRelay {
@@ -108,10 +110,17 @@ func connect(t *testing.T, r *PionRelay) *rig {
 	t.Helper()
 	g := &rig{relay: r, client: newPeer(t), upstream: newPeer(t), clientEv: make(chan string, 64)}
 	var err error
-	g.events, err = g.client.pc.CreateDataChannel(realtimeDataChannelLabel, nil)
+	neg, id0 := true, uint16(0)
+	negotiated := &webrtc.DataChannelInit{Negotiated: &neg, ID: &id0}
+	g.events, err = g.client.pc.CreateDataChannel(realtimeDataChannelLabel, negotiated)
 	if err != nil {
 		t.Fatal(err)
 	}
+	g.upstreamEvents, err = g.upstream.pc.CreateDataChannel(realtimeDataChannelLabel, negotiated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.upstreamEvents.OnMessage(func(m webrtc.DataChannelMessage) { g.upstream.events <- string(m.Data) })
 	g.events.OnMessage(func(m webrtc.DataChannelMessage) { g.clientEv <- string(m.Data) })
 	g.eventsOpen = make(chan struct{})
 	g.events.OnOpen(func() { close(g.eventsOpen) })
@@ -222,17 +231,7 @@ func recv(t *testing.T, ch <-chan string, want string) {
 
 func TestBidirectionalEvents(t *testing.T) {
 	g := connect(t, newRelay(t, 2))
-	var upstreamDC *webrtc.DataChannel
-	for upstreamDC == nil {
-		select {
-		case dc := <-g.upstream.chanIn:
-			if dc.Label() == realtimeDataChannelLabel {
-				upstreamDC = dc
-			}
-		case <-time.After(testWait):
-			t.Fatal("upstream never saw oai-events")
-		}
-	}
+	upstreamDC := g.upstreamEvents
 	// the upstream channel is open once the relay is ready
 	if err := g.events.SendText("from-client"); err != nil {
 		t.Fatal(err)
@@ -329,7 +328,8 @@ func TestRepeatedCloseFiresHandlerOnce(t *testing.T) {
 func TestConcurrencyLimit(t *testing.T) {
 	r := newRelay(t, 1)
 	c := newPeer(t)
-	if _, err := c.pc.CreateDataChannel(realtimeDataChannelLabel, nil); err != nil {
+	neg, id0 := true, uint16(0)
+	if _, err := c.pc.CreateDataChannel(realtimeDataChannelLabel, &webrtc.DataChannelInit{Negotiated: &neg, ID: &id0}); err != nil {
 		t.Fatal(err)
 	}
 	done := webrtc.GatheringCompletePromise(c.pc)

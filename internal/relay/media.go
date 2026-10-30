@@ -353,21 +353,27 @@ func (r *PionRelay) NewSession(ctx context.Context, clientOffer string, route Ro
 		}
 		go session.relayRTP("b-to-a", track, toClient)
 	})
+	// The web client and /realtime/wm both use a pre-negotiated oai-events
+	// channel (negotiated, id 0), so neither peer ever sees OnDataChannel for it.
+	negotiated := true
+	channelID := uint16(0)
+	channelOptions := &webrtc.DataChannelInit{Negotiated: &negotiated, ID: &channelID}
+	clientChannel, err := downstream.CreateDataChannel(realtimeDataChannelLabel, channelOptions)
+	if err != nil {
+		return fail("create peer A DataChannel", err)
+	}
+	session.bridge.attachDownstream(clientChannel)
 	downstream.OnDataChannel(func(channel *webrtc.DataChannel) {
-		if channel.Label() != realtimeDataChannelLabel {
-			if err := channel.Close(); err != nil {
-				session.logger.Debug("relay: close unsupported peer A DataChannel", "error", err)
-			}
-			return
+		if err := channel.Close(); err != nil {
+			session.logger.Debug("relay: close unsupported peer A DataChannel", "error", err)
 		}
-		session.bridge.attachDownstream(channel)
 	})
 	upstream.OnDataChannel(func(channel *webrtc.DataChannel) {
 		if err := channel.Close(); err != nil {
 			session.logger.Debug("relay: close unsupported peer B DataChannel", "error", err)
 		}
 	})
-	upstreamChannel, err := upstream.CreateDataChannel(realtimeDataChannelLabel, nil)
+	upstreamChannel, err := upstream.CreateDataChannel(realtimeDataChannelLabel, channelOptions)
 	if err != nil {
 		return fail("create peer B DataChannel", err)
 	}
