@@ -102,9 +102,7 @@ func (s *Service) CreateImageUploadCredential(owner, voiceSessionID string, req 
 	}
 	switch status {
 	case http.StatusUnauthorized:
-		if markErr := s.pool.MarkInvalid(binding.AccessToken); markErr != nil {
-			s.logger.Error("account_mark_invalid_failed", "account_id", binding.AccountID, "error", markErr)
-		}
+		s.reportOutcome(binding.AccessToken, time.Time{}, status, "", body, "", nil)
 		return nil, &ServiceError{Message: "account token invalid", StatusCode: 401, Detail: truncate(body, 300)}
 	case http.StatusForbidden:
 		return nil, &ServiceError{Message: "upstream files request forbidden", StatusCode: 403, Detail: truncate(body, 300)}
@@ -200,9 +198,7 @@ func (s *Service) CompleteImageUpload(owner, voiceSessionID, fileID string) (*Im
 	}
 	switch status {
 	case http.StatusUnauthorized:
-		if markErr := s.pool.MarkInvalid(binding.AccessToken); markErr != nil {
-			s.logger.Error("account_mark_invalid_failed", "account_id", binding.AccountID, "error", markErr)
-		}
+		s.reportOutcome(binding.AccessToken, time.Time{}, status, "", body, "", nil)
 		return nil, &ServiceError{Message: "account token invalid", StatusCode: 401, Detail: truncate(body, 300)}
 	case http.StatusOK, http.StatusCreated:
 		// done

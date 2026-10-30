@@ -92,6 +92,14 @@ type Config struct {
 	TLSCertDir             string
 	LogFormat              string
 	LogLevel               string
+
+	// Account pool health. Zero values fall back to pool defaults; a negative
+	// expiry guard disables the guard.
+	AccountExpiryGuardSeconds          int
+	AccountBackoffBaseSeconds          int
+	AccountBackoffMaxSeconds           int
+	AccountTransientCooldownSeconds    int
+	AccountUnauthorizedCooldownSeconds int
 }
 
 func env(name, def string) string {
@@ -213,6 +221,12 @@ func Load() Config {
 		TLSCertDir:  env("VOICE_TLS_CERT_DIR", filepath.Join(dataDir, "certs")),
 		LogFormat:   env("VOICE_LOG_FORMAT", "json"),
 		LogLevel:    env("VOICE_LOG_LEVEL", "info"),
+
+		AccountExpiryGuardSeconds:          envInt("VOICE_ACCOUNT_EXPIRY_GUARD_SECONDS", 300),
+		AccountBackoffBaseSeconds:          envInt("VOICE_ACCOUNT_BACKOFF_BASE_SECONDS", 30),
+		AccountBackoffMaxSeconds:           envInt("VOICE_ACCOUNT_BACKOFF_MAX_SECONDS", 30*60),
+		AccountTransientCooldownSeconds:    envInt("VOICE_ACCOUNT_TRANSIENT_COOLDOWN_SECONDS", 15),
+		AccountUnauthorizedCooldownSeconds: envInt("VOICE_ACCOUNT_UNAUTHORIZED_COOLDOWN_SECONDS", 60),
 	}
 }
 
@@ -243,6 +257,13 @@ func (c Config) Validate() error {
 	}
 	if c.LoginLockoutSeconds < 1 {
 		return fmt.Errorf("VOICE_LOGIN_LOCKOUT_SECONDS must be greater than zero")
+	}
+	if c.AccountBackoffBaseSeconds < 0 || c.AccountBackoffMaxSeconds < 0 ||
+		c.AccountTransientCooldownSeconds < 0 || c.AccountUnauthorizedCooldownSeconds < 0 {
+		return fmt.Errorf("VOICE_ACCOUNT_* cooldown settings must not be negative")
+	}
+	if c.AccountBackoffMaxSeconds > 0 && c.AccountBackoffBaseSeconds > c.AccountBackoffMaxSeconds {
+		return fmt.Errorf("VOICE_ACCOUNT_BACKOFF_BASE_SECONDS must not exceed VOICE_ACCOUNT_BACKOFF_MAX_SECONDS")
 	}
 	if strings.TrimSpace(c.DatabaseFile) == "" {
 		return fmt.Errorf("VOICE_DATABASE_FILE is required")

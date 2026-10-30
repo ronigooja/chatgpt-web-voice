@@ -111,6 +111,9 @@ func (db *DB) migrate() error {
 	if err := db.ensureConversationUpstreamColumns(); err != nil {
 		return err
 	}
+	if err := db.ensureAccountHealthColumns(); err != nil {
+		return err
+	}
 	// Created after legacy account-table rebuilds.
 	if _, err := db.conn.Exec(`CREATE TABLE IF NOT EXISTS bridge_accounts (
 		remote_id TEXT PRIMARY KEY,
@@ -175,6 +178,28 @@ func (db *DB) ensureConversationUpstreamColumns() error {
 			`ALTER TABLE conversations ADD COLUMN title_locked INTEGER NOT NULL DEFAULT 0`,
 		); err != nil {
 			return fmt.Errorf("add conversations.title_locked: %w", err)
+		}
+	}
+	return nil
+}
+
+// ensureAccountHealthColumns adds cooldown and token-expiry state so a restart
+// does not erase it. cooldown_until and outcome_at are unix milliseconds;
+// expires_at is the JWT exp in unix seconds (0 = unknown).
+func (db *DB) ensureAccountHealthColumns() error {
+	for _, column := range []string{
+		"cooldown_until", "failure_count", "unauthorized_count", "expires_at", "outcome_at",
+	} {
+		has, err := db.hasColumn("accounts", column)
+		if err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		statement := fmt.Sprintf(`ALTER TABLE accounts ADD COLUMN %s INTEGER NOT NULL DEFAULT 0`, column)
+		if _, err := db.conn.Exec(statement); err != nil {
+			return fmt.Errorf("add accounts.%s: %w", column, err)
 		}
 	}
 	return nil

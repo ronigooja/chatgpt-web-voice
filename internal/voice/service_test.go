@@ -274,7 +274,7 @@ func TestProbeAccountTokenAlive(t *testing.T) {
 	}
 }
 
-func TestProbeAccountTokenUnauthorizedMarksInvalid(t *testing.T) {
+func TestProbeAccountTokenRepeatedUnauthorizedMarksInvalid(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
@@ -291,6 +291,13 @@ func TestProbeAccountTokenUnauthorizedMarksInvalid(t *testing.T) {
 	svc := New(config.Config{}, pool, nil)
 	svc.settingsUserURL = upstream.URL
 
+	first, err := svc.ProbeAccountToken(account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Status != "unauthorized" || first.MarkedInvalid {
+		t.Fatalf("first 401 must only cool down: %+v", first)
+	}
 	result, err := svc.ProbeAccountToken(account.ID)
 	if err != nil {
 		t.Fatal(err)

@@ -14,7 +14,8 @@ import (
 const accountSelectColumns = `
 	id, email, access_token, token_hash, proxy, status, disabled, invalid_at,
 	COALESCE(last_used_at, ''), created_at, updated_at,
-	COALESCE((SELECT device_id FROM bridge_accounts WHERE account_id = accounts.id), '')`
+	COALESCE((SELECT device_id FROM bridge_accounts WHERE account_id = accounts.id), ''),
+	cooldown_until, failure_count, unauthorized_count, expires_at, outcome_at`
 
 // Pool is the SQLite-backed account repository. Selection and invalidation are
 // serialized through the shared store mutex. Access tokens are sealed at rest
@@ -23,6 +24,8 @@ type Pool struct {
 	db     *store.DB
 	box    *secretbox.Box
 	ownsDB bool
+	health HealthConfig
+	clock  func() time.Time
 }
 
 // NewPool opens a SQLite database and returns an account pool. Prefer
@@ -191,10 +194,11 @@ func (p *Pool) Create(account Account) (Account, error) {
 	}
 	result, err := p.db.Conn().Exec(`
 		INSERT INTO accounts
-			(email, access_token, token_hash, proxy, status, disabled, invalid_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+			(email, access_token, token_hash, proxy, status, disabled, invalid_at, expires_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
 		account.Email, stored, hash,
-		storedProxy, account.Status, boolInt(account.Disabled), account.InvalidAt)
+		storedProxy, account.Status, boolInt(account.Disabled), account.InvalidAt,
+		tokenExpiry(account.AccessToken))
 	if err != nil {
 		return Account{}, fmt.Errorf("create account: %w", err)
 	}
@@ -251,11 +255,13 @@ func (p *Pool) Update(id int64, update AccountUpdate) (Account, error) {
 	}
 	_, err = p.db.Conn().Exec(`
 		UPDATE accounts SET
+			cooldown_until = 0, failure_count = 0, unauthorized_count = 0, outcome_at = ?,
 			email = ?, access_token = ?, token_hash = ?, proxy = ?,
-			status = ?, disabled = ?, invalid_at = ?, updated_at = CURRENT_TIMESTAMP
+			status = ?, disabled = ?, invalid_at = ?, expires_at = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?`,
-		current.Email, stored, hash,
-		storedProxy, current.Status, boolInt(current.Disabled), invalidAt, id)
+		p.now().UnixMilli(), current.Email, stored, hash,
+		storedProxy, current.Status, boolInt(current.Disabled), invalidAt,
+		tokenExpiry(current.AccessToken), id)
 	if err != nil {
 		return Account{}, fmt.Errorf("update account: %w", err)
 	}
@@ -321,10 +327,11 @@ func (p *Pool) Upsert(account Account) error {
 	case errors.Is(err, sql.ErrNoRows):
 		_, err = p.db.Conn().Exec(`
 			INSERT INTO accounts
-				(email, access_token, token_hash, proxy, status, disabled, invalid_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+				(email, access_token, token_hash, proxy, status, disabled, invalid_at, expires_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
 			account.Email, stored, hash,
-			storedProxy, account.Status, boolInt(account.Disabled), account.InvalidAt)
+			storedProxy, account.Status, boolInt(account.Disabled), account.InvalidAt,
+			tokenExpiry(account.AccessToken))
 		if err != nil {
 			return fmt.Errorf("upsert account: %w", err)
 		}
@@ -335,10 +342,11 @@ func (p *Pool) Upsert(account Account) error {
 		_, err = p.db.Conn().Exec(`
 			UPDATE accounts SET
 				email = ?, access_token = ?, token_hash = ?, proxy = ?,
-				status = ?, disabled = ?, invalid_at = ?, updated_at = CURRENT_TIMESTAMP
+				status = ?, disabled = ?, invalid_at = ?, expires_at = ?, updated_at = CURRENT_TIMESTAMP
 			WHERE id = ?`,
 			account.Email, stored, hash, storedProxy,
-			account.Status, boolInt(account.Disabled), account.InvalidAt, existingID)
+			account.Status, boolInt(account.Disabled), account.InvalidAt,
+			tokenExpiry(account.AccessToken), existingID)
 		if err != nil {
 			return fmt.Errorf("upsert account: %w", err)
 		}
@@ -368,7 +376,7 @@ func (p *Pool) PickByID(id int64, excluded map[string]struct{}) (string, Account
 	if account.Disabled || account.Status == "禁用" {
 		return "", Account{}, &Error{Message: "preferred account is unavailable"}
 	}
-	if _, skip := excluded[account.AccessToken]; skip {
+	if _, skip := excluded[account.AccessToken]; skip || !p.usable(account) {
 		return "", Account{}, &Error{Message: "preferred account is unavailable"}
 	}
 	if _, err := p.db.Conn().Exec(
@@ -416,7 +424,7 @@ func (p *Pool) Pick(preferredToken string, excluded map[string]struct{}) (string
 			_ = rows.Close()
 			return "", Account{}, fmt.Errorf("read selected account: %w", scanErr)
 		}
-		if _, skip := excluded[account.AccessToken]; skip {
+		if _, skip := excluded[account.AccessToken]; skip || !p.usable(account) {
 			continue
 		}
 		selected = account
@@ -476,6 +484,8 @@ func (p *Pool) scanAccount(row store.Scanner) (Account, error) {
 		&account.ID, &account.Email, &storedToken, &tokenHash,
 		&account.Proxy, &account.Status, &disabled, &account.InvalidAt,
 		&account.LastUsedAt, &account.CreatedAt, &account.UpdatedAt, &storedDevice,
+		&account.CooldownUntil, &account.FailureCount, &account.UnauthorizedCount,
+		&account.ExpiresAt, &account.OutcomeAt,
 	); err != nil {
 		return Account{}, err
 	}
@@ -484,6 +494,9 @@ func (p *Pool) scanAccount(row store.Scanner) (Account, error) {
 		return Account{}, fmt.Errorf("decrypt account %d access token: %w", account.ID, err)
 	}
 	account.AccessToken = plain
+	if account.ExpiresAt == 0 {
+		account.ExpiresAt = tokenExpiry(plain)
+	}
 	if account.Proxy != "" {
 		account.Proxy, err = p.box.Open(account.Proxy)
 		if err != nil {
