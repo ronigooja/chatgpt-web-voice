@@ -2,6 +2,7 @@ package voice
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -21,6 +22,7 @@ import (
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/callsessions"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/config"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/httpclient"
+	"github.com/dyhhhhhh/chatgpt-web-voice/internal/relay"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/tokenutil"
 )
 
@@ -59,6 +61,9 @@ type CallSessionStore interface {
 	Get(owner, voiceSessionID string) (callsessions.Session, error)
 }
 
+// relayAcceptTimeout bounds applying the upstream answer and gathering peer A candidates.
+const relayAcceptTimeout = 20 * time.Second
+
 // ServiceError is a typed gateway error with HTTP status.
 type ServiceError struct {
 	Message    string
@@ -87,6 +92,8 @@ type sessionBinding struct {
 	ParentMessageID        string
 	CreatedAt              time.Time
 	UpdatedAt              time.Time
+	// media is the gateway-terminated media session, nil in client-direct mode.
+	media relay.Session
 }
 
 // Service is the ChatGPT web voice gateway.
@@ -106,6 +113,9 @@ type Service struct {
 	// filesAPIURL overrides POST /backend-api/files in tests (image upload credentials).
 	filesAPIURL string
 
+	// relay, when set, terminates media in the gateway (peers A and B).
+	relay relay.Relay
+
 	mu       sync.Mutex
 	bindings map[string]*sessionBinding
 }
@@ -124,6 +134,26 @@ func New(cfg config.Config, pool AccountRepository, logger *slog.Logger) *Servic
 		conversationURLPrefix: conversationURLPrefix,
 		bindings:              make(map[string]*sessionBinding),
 	}
+}
+
+// WithRelay enables gateway media termination. A nil relay keeps client-direct mode.
+func (s *Service) WithRelay(r relay.Relay) *Service {
+	if s != nil {
+		s.relay = r
+	}
+	return s
+}
+
+// relayRoute returns the proxy the relay's upstream peer should use for media.
+// Signaling keeps using the account proxy regardless of this setting.
+func (s *Service) relayRoute(account accounts.Account) relay.Route {
+	if s.cfg.RelayMediaRoute == config.RelayMediaRouteDirect {
+		return relay.Route{}
+	}
+	if strings.TrimSpace(account.Proxy) == httpclient.ProxyDirect {
+		return relay.Route{}
+	}
+	return relay.Route{ProxyURL: account.Proxy}
 }
 
 // WithCallSessions attaches durable call-session metadata storage.
@@ -173,6 +203,7 @@ func (s *Service) cleanupBindingsLocked(now time.Time) {
 	type expiredBinding struct {
 		owner     string
 		sessionID string
+		media     relay.Session
 	}
 	var expired []expiredBinding
 	for id, item := range s.bindings {
@@ -181,12 +212,24 @@ func (s *Service) cleanupBindingsLocked(now time.Time) {
 			base = item.CreatedAt
 		}
 		if now.Sub(base) > ttl {
-			expired = append(expired, expiredBinding{owner: item.Owner, sessionID: id})
+			// Media-backed bindings live as long as their peers; the close
+			// handler reclaims them. Idle TTL must not cut a live call.
+			if item.media != nil {
+				if _, closed := item.media.Termination(); !closed {
+					continue
+				}
+			}
+			expired = append(expired, expiredBinding{owner: item.Owner, sessionID: id, media: item.media})
 			delete(s.bindings, id)
 		}
 	}
 	// Persist expiry so admin call_sessions does not remain "active" after the
 	// in-memory binding is reaped by TTL.
+	for _, item := range expired {
+		if item.media != nil {
+			go s.closeMedia(item.media, "binding_ttl")
+		}
+	}
 	if s.records == nil {
 		return
 	}
@@ -198,6 +241,10 @@ func (s *Service) cleanupBindingsLocked(now time.Time) {
 }
 
 func (s *Service) bindVoiceSession(owner, sessionID, token string, account accounts.Account, upstream UpstreamContext) string {
+	return s.bindVoiceSessionMedia(owner, sessionID, token, account, upstream, nil)
+}
+
+func (s *Service) bindVoiceSessionMedia(owner, sessionID, token string, account accounts.Account, upstream UpstreamContext, media relay.Session) string {
 	owner = normalizeSessionOwner(owner)
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
@@ -224,7 +271,12 @@ func (s *Service) bindVoiceSession(owner, sessionID, token string, account accou
 		merged.UpstreamVoiceSessionID = newUpstreamVoiceSessionID()
 	}
 
+	var replaced relay.Session
+	if prev != nil && prev.media != nil && prev.media != media {
+		replaced = prev.media
+	}
 	s.bindings[sessionID] = &sessionBinding{
+		media:                  media,
 		Owner:                  owner,
 		AccountID:              account.ID,
 		AccessToken:            token,
@@ -236,7 +288,44 @@ func (s *Service) bindVoiceSession(owner, sessionID, token string, account accou
 		CreatedAt:              createdAt,
 		UpdatedAt:              now,
 	}
+	if replaced != nil {
+		// A re-exchange supersedes the previous media; do not leak its peers.
+		go s.closeMedia(replaced, "superseded")
+	}
+	if media != nil {
+		media.SetCloseHandler(func(reason string) { s.onMediaClosed(owner, sessionID, media, reason) })
+	}
 	return sessionID
+}
+
+// onMediaClosed drops the binding when its own media ends (peer failure, client
+// gone, or a deliberate close). A binding already re-pointed at newer media is kept.
+func (s *Service) onMediaClosed(owner, sessionID string, media relay.Session, reason string) {
+	s.mu.Lock()
+	item, ok := s.bindings[sessionID]
+	current := ok && item.Owner == owner && item.media == media
+	if current {
+		delete(s.bindings, sessionID)
+	}
+	s.mu.Unlock()
+	if !current {
+		return
+	}
+	s.logger.Info("relay_media_closed", "voice_session_id", sessionID, "media_session_id", media.ID(), "reason", reason)
+	if s.records != nil {
+		if err := s.records.MarkReleased(owner, sessionID); err != nil {
+			s.logger.Warn("call_session_release_persist_failed", "voice_session_id", sessionID, "error", err)
+		}
+	}
+}
+
+func (s *Service) closeMedia(media relay.Session, reason string) {
+	if media == nil {
+		return
+	}
+	if err := media.CloseWithReason(reason); err != nil {
+		s.logger.Warn("relay_media_close_failed", "media_session_id", media.ID(), "reason", reason, "error", err)
+	}
 }
 
 func (b *sessionBinding) upstreamContext() UpstreamContext {
@@ -571,11 +660,14 @@ func (s *Service) ReleaseSession(owner, voiceSessionID string) bool {
 	s.mu.Lock()
 	item, ok := s.bindings[sessionID]
 	released := false
+	var media relay.Session
 	if ok && item.Owner == owner {
+		media = item.media
 		delete(s.bindings, sessionID)
 		released = true
 	}
 	s.mu.Unlock()
+	s.closeMedia(media, "released")
 	if s.records != nil {
 		if err := s.records.MarkReleased(owner, sessionID); err != nil {
 			s.logger.Warn("call_session_release_persist_failed", "voice_session_id", sessionID, "error", err)
@@ -1098,10 +1190,32 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 			proxySource = "account"
 		}
 
+		// With a relay, the upstream receives peer B's offer, never the client's.
+		wmOffer := offerSDP
+		var media relay.Session
+		if s.relay != nil {
+			var relayErr error
+			media, wmOffer, relayErr = s.relay.NewSession(context.Background(), offerSDP, s.relayRoute(account))
+			if relayErr != nil {
+				s.logger.Error("relay_session_create_failed", "account_id", account.ID, "attempt", attempt, "error", relayErr)
+				if errors.Is(relayErr, relay.ErrCapacity) {
+					return nil, &ServiceError{Message: "media relay capacity exhausted", StatusCode: 503}
+				}
+				return nil, &ServiceError{Message: "media relay unavailable", StatusCode: 502, Detail: truncate(relayErr.Error(), 300)}
+			}
+		}
+		closeMediaOnFailure := func(reason string) {
+			if media != nil {
+				s.closeMedia(media, reason)
+				media = nil
+			}
+		}
+
 		wmStarted := time.Now()
-		status, contentType, text, retryAfter, err := s.postWMResponse(token, offerSDP, sessionJSON, explicitProxy, account.DeviceID)
+		status, contentType, text, retryAfter, err := s.postWMResponse(token, wmOffer, sessionJSON, explicitProxy, account.DeviceID)
 		health := s.reportOutcome(token, wmStarted, status, contentType, text, retryAfter, err)
 		if err != nil {
+			closeMediaOnFailure("upstream_request_failed")
 			s.logger.Error("upstream_realtime_request_failed", "account_id", account.ID, "attempt", attempt, "error", err)
 			return nil, &ServiceError{
 				Message:    "realtime/wm network failed",
@@ -1111,6 +1225,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 		}
 
 		if status == 401 && classifyProbeBody(contentType, text) != "html" {
+			closeMediaOnFailure("upstream_unauthorized")
 			lastStatus = status
 			lastError = "account token invalid"
 			lastDetail = truncate(text, 300)
@@ -1136,6 +1251,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 		}
 
 		if (status != 200 && status != 201) || !strings.HasPrefix(strings.TrimLeft(text, " \t\r\n"), "v=0") {
+			closeMediaOnFailure("upstream_rejected")
 			kind := classifyProbeBody(contentType, text)
 			s.logger.Warn("upstream_realtime_rejected", "account_id", account.ID, "upstream_status", status, "content_kind", kind, "attempt", attempt)
 			msg := fmt.Sprintf("realtime/wm failed status=%d", status)
@@ -1149,7 +1265,20 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 			}
 		}
 
-		voiceSessionID := s.bindVoiceSession(owner, req.VoiceSessionID, token, account, upstreamForWM)
+		answerSDP := text
+		if media != nil {
+			acceptCtx, cancelAccept := context.WithTimeout(context.Background(), relayAcceptTimeout)
+			clientAnswer, acceptErr := media.AcceptUpstreamAnswer(acceptCtx, text)
+			cancelAccept()
+			if acceptErr != nil {
+				closeMediaOnFailure("accept_answer_failed")
+				s.logger.Error("relay_accept_answer_failed", "account_id", account.ID, "attempt", attempt, "error", acceptErr)
+				return nil, &ServiceError{Message: "media relay negotiation failed", StatusCode: 502, Detail: truncate(acceptErr.Error(), 300)}
+			}
+			answerSDP = clientAnswer
+		}
+
+		voiceSessionID := s.bindVoiceSessionMedia(owner, req.VoiceSessionID, token, account, upstreamForWM, media)
 		// Re-read binding so response fields match what was actually stored.
 		stored, _ := s.boundVoiceSession(owner, voiceSessionID)
 		upstreamOut := upstreamForWM
@@ -1168,7 +1297,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 			"upstream_voice_session_id", upstreamOut.UpstreamVoiceSessionID,
 		)
 		return &SessionResult{
-			AnswerSDP:               text,
+			AnswerSDP:               answerSDP,
 			SessionID:               voiceSessionID,
 			VoiceSessionID:          voiceSessionID,
 			AccountID:               account.ID,

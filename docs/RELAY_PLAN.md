@@ -1,6 +1,7 @@
 # Gateway media relay and account rotation plan
 
-Status: proposed plan. No relay code exists yet. This document applies to work
+Status: phases 0 (local part), 1, 2, and the account-pool half of 4 are
+implemented. Phase 3 and the rest of phase 4 are not. This document applies to work
 in this fork that changes how voice media is terminated, how account leases are
 released, and how pool accounts are selected for continuous voice.
 
@@ -100,6 +101,24 @@ What this does not establish:
 - It does not predict stability; the endpoint is an internal web interface and
   can change.
 
+## Live probe (2026-10-30, phase 0 follow-up)
+
+A second one-off probe ran in the production gateway container (account database
+copy, container's own key, one pool account, synthetic speech audio). Output
+was structural only. The probe binary and database copy were removed afterwards.
+
+| Check | Result |
+|---|---|
+| Cause of the earlier `error` event | Gateway bug, not upstream rejection. `/realtime/wm` and the web client use a pre-negotiated `oai-events` channel (`negotiated`, id 0). A normally negotiated channel produced an SCTP PPID error. Fixed in `internal/relay`. |
+| Direct media, about 40 s of audio | `/realtime/wm` 201; peer B ready in about 0.5 s; about 2,200 inbound RTP packets; `state_update`, `session_bootstrap`, `thinking_update`, `chat_message_delta`, `conversation_update`, `usage_update` events |
+| Local close | All four components closed without error |
+| Immediate new session on the same account after close | Accepted. This does not show the upstream released the account |
+| Media through the stored account proxy (IPv6 egress) | Failed. The proxy refused TCP 443 to the upstream candidate; peer B ended `peer_b_failed`. Direct TCP 443 from the host worked |
+| Media through an IPv4-egress SOCKS5 proxy, `socks5://` and `socks5h://` | Worked; peer B ready in about 9 s; about 2,200 inbound RTP packets |
+
+Still not established: more than one account, runs longer than about 50 s,
+conversation continuity across accounts, and upstream release of the account.
+
 ## Termination evidence
 
 Report `terminated=true` only when all of the following hold:
@@ -170,7 +189,7 @@ Changes:
 |---|---|---|
 | 0 | Decode the probe `error` event; repeat the probe with audio and a realistic `session`; record the `wm` request and response shape with a local fixture | `internal/voice/service.go`, tests |
 | 1 | Port the Pion bridge into `internal/relay`; replace logrus, Gin, and CLIProxyAPI config; keep copyright notices | `internal/relay/*`, `go.mod` |
-| 2 | Route `CreateSession` through peers A and B; return peer A's answer, not the upstream answer | `internal/voice/service.go` |
+| 2 | Route `CreateSession` through peers A and B; return peer A's answer, not the upstream answer. Done behind `VOICE_RELAY_ENABLED` with the `VOICE_RELAY_MEDIA_ROUTE` switch | `internal/voice/service.go` |
 | 3 | Lease identity, generations, evidence tables, idempotent release; make `Capabilities()` truthful | `internal/store/schema.go`, `internal/callsessions`, `internal/api/voice.go` |
 | 4 | Cooldown, expiry guard, generation rebuild, restart recovery of unknown state | `internal/accounts/*`, `internal/config/config.go`, `internal/voice/service.go` |
 

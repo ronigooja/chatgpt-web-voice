@@ -20,6 +20,9 @@ const (
 	TransportCurlImpersonate = "curl-impersonate"
 	TransportGo              = "go"
 
+	RelayMediaRouteAccount = "account"
+	RelayMediaRouteDirect  = "direct"
+
 	// Defaults mirror ChatGPT2API-GO account fingerprint + upstream headers
 	// (Edge 143 browser persona + curl edge_101).
 	//
@@ -100,6 +103,18 @@ type Config struct {
 	AccountBackoffMaxSeconds           int
 	AccountTransientCooldownSeconds    int
 	AccountUnauthorizedCooldownSeconds int
+
+	// RelayEnabled terminates voice media in the gateway (two PeerConnections
+	// per call) instead of proxying only the SDP exchange. Off by default.
+	RelayEnabled bool
+	// RelayMediaRoute selects how the relay's upstream peer reaches ChatGPT
+	// media: "account" uses the account proxy (default), "direct" bypasses it.
+	// Signaling (/realtime/wm) always follows the account proxy.
+	RelayMediaRoute  string
+	RelayMaxSessions int
+	RelayUDPPortMin  int
+	RelayUDPPortMax  int
+	RelayPublicIP    string
 }
 
 func env(name, def string) string {
@@ -227,6 +242,13 @@ func Load() Config {
 		AccountBackoffMaxSeconds:           envInt("VOICE_ACCOUNT_BACKOFF_MAX_SECONDS", 30*60),
 		AccountTransientCooldownSeconds:    envInt("VOICE_ACCOUNT_TRANSIENT_COOLDOWN_SECONDS", 15),
 		AccountUnauthorizedCooldownSeconds: envInt("VOICE_ACCOUNT_UNAUTHORIZED_COOLDOWN_SECONDS", 60),
+
+		RelayEnabled:     envBool("VOICE_RELAY_ENABLED", false),
+		RelayMediaRoute:  strings.ToLower(env("VOICE_RELAY_MEDIA_ROUTE", RelayMediaRouteAccount)),
+		RelayMaxSessions: envInt("VOICE_RELAY_MAX_SESSIONS", 0),
+		RelayUDPPortMin:  envInt("VOICE_RELAY_UDP_PORT_MIN", 0),
+		RelayUDPPortMax:  envInt("VOICE_RELAY_UDP_PORT_MAX", 0),
+		RelayPublicIP:    env("VOICE_RELAY_PUBLIC_IP", ""),
 	}
 }
 
@@ -264,6 +286,20 @@ func (c Config) Validate() error {
 	}
 	if c.AccountBackoffMaxSeconds > 0 && c.AccountBackoffBaseSeconds > c.AccountBackoffMaxSeconds {
 		return fmt.Errorf("VOICE_ACCOUNT_BACKOFF_BASE_SECONDS must not exceed VOICE_ACCOUNT_BACKOFF_MAX_SECONDS")
+	}
+	switch c.RelayMediaRoute {
+	case "", RelayMediaRouteAccount, RelayMediaRouteDirect:
+	default:
+		return fmt.Errorf("VOICE_RELAY_MEDIA_ROUTE must be account or direct")
+	}
+	if c.RelayMaxSessions < 0 {
+		return fmt.Errorf("VOICE_RELAY_MAX_SESSIONS must not be negative")
+	}
+	if c.RelayUDPPortMin < 0 || c.RelayUDPPortMax < 0 || c.RelayUDPPortMin > 65535 || c.RelayUDPPortMax > 65535 {
+		return fmt.Errorf("VOICE_RELAY_UDP_PORT_MIN/MAX must be between 0 and 65535")
+	}
+	if (c.RelayUDPPortMin == 0) != (c.RelayUDPPortMax == 0) || c.RelayUDPPortMin > c.RelayUDPPortMax {
+		return fmt.Errorf("VOICE_RELAY_UDP_PORT_MIN and VOICE_RELAY_UDP_PORT_MAX must be set together with min <= max")
 	}
 	if strings.TrimSpace(c.DatabaseFile) == "" {
 		return fmt.Errorf("VOICE_DATABASE_FILE is required")

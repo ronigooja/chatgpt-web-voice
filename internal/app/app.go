@@ -19,6 +19,7 @@ import (
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/config"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/conversations"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/logging"
+	"github.com/dyhhhhhh/chatgpt-web-voice/internal/relay"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/secretbox"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/store"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/voice"
@@ -42,6 +43,8 @@ func Run() error {
 		"upstream_tls_profile", cfg.TLSProfile,
 		"upstream_impersonate", cfg.Impersonate,
 		"upstream_skip_ssl_verify", cfg.SkipSSLVerify,
+		"relay_enabled", cfg.RelayEnabled,
+		"relay_media_route", cfg.RelayMediaRoute,
 		"log_format", cfg.LogFormat,
 		"log_level", cfg.LogLevel,
 	)
@@ -107,6 +110,19 @@ func Run() error {
 	).WithSessionStore(auth.NewSessionStore(db))
 	apiKeyManager := auth.NewAPIKeyManager(apiKeyStore, logger)
 	voiceService := voice.New(cfg, accountPool, logger).WithCallSessions(callSessionStore)
+	if cfg.RelayEnabled {
+		mediaRelay, err := relay.New(relay.Config{
+			MaxSessions: cfg.RelayMaxSessions,
+			UDPPortMin:  uint16(cfg.RelayUDPPortMin),
+			UDPPortMax:  uint16(cfg.RelayUDPPortMax),
+			PublicIP:    cfg.RelayPublicIP,
+		}, logger)
+		if err != nil {
+			return fmt.Errorf("media relay setup failed: %w", err)
+		}
+		voiceService.WithRelay(mediaRelay)
+		logger.Info("media_relay_enabled", "media_route", cfg.RelayMediaRoute, "max_sessions", relay.Config{MaxSessions: cfg.RelayMaxSessions}.EffectiveMaxSessions())
+	}
 	apiServer := api.New(api.Dependencies{
 		Voice:         voiceService,
 		Accounts:      accountPool,

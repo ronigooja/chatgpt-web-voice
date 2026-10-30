@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Gateway media relay (phase 2, off by default): with `VOICE_RELAY_ENABLED=true`, `CreateSession` terminates media in the gateway. The upstream `/realtime/wm` receives peer B's offer and the client receives peer A's answer. Releasing a session, superseding it with a new exchange, or the media ending closes both peers; idle `VOICE_SESSION_TTL_SECONDS` no longer cuts a live relayed call. Termination evidence and `Capabilities()` are unchanged (phase 3).
+- `VOICE_RELAY_MEDIA_ROUTE` (`account` default, or `direct`) chooses whether the relay's upstream media follows the account proxy. Signaling to `/realtime/wm` always follows the account proxy. Also added `VOICE_RELAY_MAX_SESSIONS`, `VOICE_RELAY_UDP_PORT_MIN/MAX`, and `VOICE_RELAY_PUBLIC_IP`.
+- Relay fix: the `oai-events` DataChannel is pre-negotiated (id 0) on both peers, as `/realtime/wm` and the web client expect.
 - Voice page titles: first user utterance during a call; fetch chatgpt.com title once on hangup only. Manual renames persist `conversations.title_locked` so hangup never overwrites after refresh.
 - Downstream image upload credentials: `POST /v1/voice/sessions/{id}/uploads` issues a sticky-account Azure SAS ticket for the live `voice_session_id`; clients PUT image bytes directly (never through the gateway). `POST .../uploads/{file_id}/complete` finalizes via chatgpt.com without storing `file_id` or image bytes. Admin mirrors: `/api/voice/session/uploads` and `.../complete`.
 - Voice page: AI playback volume slider (0–300%) with Web Audio `GainNode` software boost, so mobile in-call routes that ignore media volume keys can still be made louder; preference is stored in `localStorage`.
