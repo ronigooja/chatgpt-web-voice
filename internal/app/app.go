@@ -19,6 +19,7 @@ import (
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/config"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/conversations"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/logging"
+	"github.com/dyhhhhhh/chatgpt-web-voice/internal/mediaevidence"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/relay"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/secretbox"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/store"
@@ -109,7 +110,16 @@ func Run() error {
 		logger,
 	).WithSessionStore(auth.NewSessionStore(db))
 	apiKeyManager := auth.NewAPIKeyManager(apiKeyStore, logger)
-	voiceService := voice.New(cfg, accountPool, logger).WithCallSessions(callSessionStore)
+	mediaEvidenceStore := mediaevidence.NewStore(db)
+	// A restart cannot show that peers from the previous process were closed.
+	unknownMedia, err := mediaEvidenceStore.RecoverUnfinished()
+	if err != nil {
+		return fmt.Errorf("recover media sessions failed: %w", err)
+	}
+	if unknownMedia > 0 {
+		logger.Warn("media_sessions_unknown_after_restart", "count", unknownMedia)
+	}
+	voiceService := voice.New(cfg, accountPool, logger).WithCallSessions(callSessionStore).WithMediaEvidence(mediaEvidenceStore)
 	if cfg.RelayEnabled {
 		mediaRelay, err := relay.New(relay.Config{
 			MaxSessions: cfg.RelayMaxSessions,

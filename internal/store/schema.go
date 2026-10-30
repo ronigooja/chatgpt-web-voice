@@ -114,6 +114,9 @@ func (db *DB) migrate() error {
 	if err := db.ensureAccountHealthColumns(); err != nil {
 		return err
 	}
+	if err := db.ensureMediaEvidenceTables(); err != nil {
+		return err
+	}
 	// Created after legacy account-table rebuilds.
 	if _, err := db.conn.Exec(`CREATE TABLE IF NOT EXISTS bridge_accounts (
 		remote_id TEXT PRIMARY KEY,
@@ -385,4 +388,57 @@ func (db *DB) hasColumn(table, column string) (bool, error) {
 // PRAGMA output, not from user input.
 func quoteIdent(name string) string {
 	return `"` + name + `"`
+}
+
+// ensureMediaEvidenceTables creates the gateway-attested media termination
+// tables. Evidence is unique per (session, media generation, lease, lease
+// generation) so it can never be overwritten for the same lease generation.
+func (db *DB) ensureMediaEvidenceTables() error {
+	for _, statement := range []string{
+		`CREATE TABLE IF NOT EXISTS voice_media_sessions (
+			voice_session_id TEXT NOT NULL,
+			media_generation INTEGER NOT NULL,
+			owner TEXT NOT NULL DEFAULT '',
+			account_id INTEGER NOT NULL,
+			lease_id TEXT NOT NULL,
+			lease_generation INTEGER NOT NULL,
+			relay_session_id TEXT NOT NULL DEFAULT '',
+			state TEXT NOT NULL CHECK (state IN ('active', 'closing', 'terminated', 'unknown')),
+			peer_a_closed INTEGER NOT NULL DEFAULT 0,
+			peer_b_closed INTEGER NOT NULL DEFAULT 0,
+			data_channels_closed INTEGER NOT NULL DEFAULT 0,
+			tunnels_closed INTEGER NOT NULL DEFAULT 0,
+			close_reason TEXT NOT NULL DEFAULT '',
+			evidence_id TEXT NOT NULL DEFAULT '',
+			evidence_error TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			terminated_at TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (voice_session_id, media_generation)
+		)`,
+		"CREATE INDEX IF NOT EXISTS idx_voice_media_sessions_state ON voice_media_sessions(state, updated_at)",
+		`CREATE TABLE IF NOT EXISTS voice_termination_evidence (
+			evidence_id TEXT PRIMARY KEY,
+			voice_session_id TEXT NOT NULL,
+			media_generation INTEGER NOT NULL,
+			account_id INTEGER NOT NULL,
+			lease_id TEXT NOT NULL,
+			lease_generation INTEGER NOT NULL,
+			observed_at TEXT NOT NULL,
+			reason TEXT NOT NULL DEFAULT '',
+			UNIQUE (voice_session_id, media_generation, lease_id, lease_generation)
+		)`,
+		// Evidence rows are append-only.
+		`CREATE TRIGGER IF NOT EXISTS voice_termination_evidence_no_update
+			BEFORE UPDATE ON voice_termination_evidence
+			BEGIN SELECT RAISE(ABORT, 'termination evidence is immutable'); END`,
+		`CREATE TRIGGER IF NOT EXISTS voice_termination_evidence_no_delete
+			BEFORE DELETE ON voice_termination_evidence
+			BEGIN SELECT RAISE(ABORT, 'termination evidence is immutable'); END`,
+	} {
+		if _, err := db.conn.Exec(statement); err != nil {
+			return fmt.Errorf("create media evidence tables: %w", err)
+		}
+	}
+	return nil
 }

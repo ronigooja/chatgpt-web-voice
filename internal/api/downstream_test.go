@@ -22,6 +22,7 @@ type downstreamVoiceStub struct {
 	releaseOwner  string
 	releaseID     string
 	createError   error
+	generation    int64
 }
 
 func (s *downstreamVoiceStub) CreateSession(req voice.CreateSessionRequest) (*voice.SessionResult, error) {
@@ -30,12 +31,13 @@ func (s *downstreamVoiceStub) CreateSession(req voice.CreateSessionRequest) (*vo
 		return nil, s.createError
 	}
 	return &voice.SessionResult{
-		AnswerSDP:      "v=0\r\nanswer\r\n",
-		VoiceSessionID: "vs_test",
-		AccountID:      9,
-		Voice:          "cove",
-		VoiceMode:      "wingman",
-		LanguageCode:   "zh-cn",
+		AnswerSDP:              "v=0\r\nanswer\r\n",
+		VoiceSessionID:         "vs_test",
+		AccountID:              9,
+		VoiceSessionGeneration: s.generation,
+		Voice:                  "cove",
+		VoiceMode:              "wingman",
+		LanguageCode:           "zh-cn",
 	}, nil
 }
 
@@ -279,5 +281,36 @@ func TestDownstreamHidesUpstreamErrorDetail(t *testing.T) {
 	}
 	if strings.Contains(resp.Body.String(), "secret-account-token") || strings.Contains(resp.Body.String(), "realtime/wm") {
 		t.Fatalf("downstream error leaked upstream detail: %s", resp.Body.String())
+	}
+}
+
+func TestDownstreamSessionGenerationOnlyWhenMediaIsRelayed(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		generation int64
+		want       bool
+	}{
+		{"client-direct has no generation", 0, false},
+		{"relayed media advertises its generation", 3, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			voiceStub := &downstreamVoiceStub{generation: tc.generation}
+			handler, secret := newDownstreamTestHandler(t, voiceStub)
+			resp := performDownstreamRequest(t, handler, http.MethodPost, "/v1/voice/sessions", secret, map[string]any{"offer_sdp": "v=0\r\noffer\r\n"})
+			if resp.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+			}
+			var body map[string]any
+			if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			got, present := body["voice_session_generation"]
+			if present != tc.want {
+				t.Fatalf("voice_session_generation present=%v want %v: %s", present, tc.want, resp.Body.String())
+			}
+			if tc.want && got != float64(tc.generation) {
+				t.Fatalf("generation=%v want %d", got, tc.generation)
+			}
+		})
 	}
 }

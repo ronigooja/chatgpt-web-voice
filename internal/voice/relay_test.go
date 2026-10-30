@@ -62,6 +62,8 @@ type fakeMedia struct {
 	closeErr error
 	handler  func(string)
 	closed   bool
+	// termination, when set, replaces the default all-clean close record.
+	termination *relay.Termination
 }
 
 func (m *fakeMedia) ID() string { return m.id }
@@ -98,7 +100,22 @@ func (m *fakeMedia) CloseWithReason(reason string) error {
 func (m *fakeMedia) Termination() (relay.Termination, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return relay.Termination{}, m.closed
+	if !m.closed {
+		return relay.Termination{}, false
+	}
+	if m.termination != nil {
+		t := *m.termination
+		if t.Reason == "" && len(m.reasons) > 0 {
+			t.Reason = m.reasons[0]
+		}
+		return t, true
+	}
+	reason := ""
+	if len(m.reasons) > 0 {
+		reason = m.reasons[0]
+	}
+	ok := relay.ComponentResult{Closed: true}
+	return relay.Termination{SessionID: m.id, Reason: reason, PeerA: ok, PeerB: ok, DataChannels: ok, Tunnels: ok}, true
 }
 func (m *fakeMedia) Ready() <-chan struct{} { return make(chan struct{}) }
 

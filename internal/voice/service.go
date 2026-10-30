@@ -22,6 +22,7 @@ import (
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/callsessions"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/config"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/httpclient"
+	"github.com/dyhhhhhh/chatgpt-web-voice/internal/mediaevidence"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/relay"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/tokenutil"
 )
@@ -61,6 +62,18 @@ type CallSessionStore interface {
 	Get(owner, voiceSessionID string) (callsessions.Session, error)
 }
 
+// MediaEvidenceStore persists media sessions and gateway-attested termination
+// evidence. Concrete type is *mediaevidence.Store.
+type MediaEvidenceStore interface {
+	Register(owner, relaySession string, id mediaevidence.Identity) error
+	MarkClosing(id mediaevidence.Identity, reason string) error
+	Close(id mediaevidence.Identity, c mediaevidence.Components, reason string) (mediaevidence.MediaSession, error)
+	Current(voiceSessionID string) (mediaevidence.MediaSession, error)
+	Get(voiceSessionID string, generation int64) (mediaevidence.MediaSession, error)
+	Evidence(id mediaevidence.Identity) (mediaevidence.Evidence, error)
+	NextGeneration(voiceSessionID string) (int64, error)
+}
+
 // relayAcceptTimeout bounds applying the upstream answer and gathering peer A candidates.
 const relayAcceptTimeout = 20 * time.Second
 
@@ -94,6 +107,8 @@ type sessionBinding struct {
 	UpdatedAt              time.Time
 	// media is the gateway-terminated media session, nil in client-direct mode.
 	media relay.Session
+	// mediaID is the evidence identity of media; zero when evidence is not tracked.
+	mediaID mediaevidence.Identity
 }
 
 // Service is the ChatGPT web voice gateway.
@@ -115,6 +130,8 @@ type Service struct {
 
 	// relay, when set, terminates media in the gateway (peers A and B).
 	relay relay.Relay
+	// evidence, when set, records media sessions and termination evidence.
+	evidence MediaEvidenceStore
 
 	mu       sync.Mutex
 	bindings map[string]*sessionBinding
@@ -144,6 +161,14 @@ func (s *Service) WithRelay(r relay.Relay) *Service {
 	return s
 }
 
+// WithMediaEvidence enables durable media-session and termination-evidence records.
+func (s *Service) WithMediaEvidence(store MediaEvidenceStore) *Service {
+	if s != nil {
+		s.evidence = store
+	}
+	return s
+}
+
 // relayRoute returns the proxy the relay's upstream peer should use for media.
 // Signaling keeps using the account proxy regardless of this setting.
 func (s *Service) relayRoute(account accounts.Account) relay.Route {
@@ -166,15 +191,18 @@ func (s *Service) WithCallSessions(records CallSessionStore) *Service {
 
 // SessionResult is returned by CreateSession.
 type SessionResult struct {
-	AnswerSDP               string `json:"answer_sdp"`
-	Voice                   string `json:"voice"`
-	VoiceMode               string `json:"voice_mode"`
-	LanguageCode            string `json:"language_code"`
-	SessionID               string `json:"session_id"`
-	VoiceSessionID          string `json:"voice_session_id"`
-	AccountID               int64  `json:"account_id,omitempty"`
-	AccountLeaseID          string `json:"account_lease_id,omitempty"`
-	AccountLeaseGeneration  int64  `json:"account_lease_generation,omitempty"`
+	AnswerSDP              string `json:"answer_sdp"`
+	Voice                  string `json:"voice"`
+	VoiceMode              string `json:"voice_mode"`
+	LanguageCode           string `json:"language_code"`
+	SessionID              string `json:"session_id"`
+	VoiceSessionID         string `json:"voice_session_id"`
+	AccountID              int64  `json:"account_id,omitempty"`
+	AccountLeaseID         string `json:"account_lease_id,omitempty"`
+	AccountLeaseGeneration int64  `json:"account_lease_generation,omitempty"`
+	// VoiceSessionGeneration is the media generation when termination evidence
+	// is tracked; zero otherwise.
+	VoiceSessionGeneration  int64  `json:"voice_session_generation,omitempty"`
 	UpstreamVoiceSessionID  string `json:"upstream_voice_session_id,omitempty"`
 	UpstreamConversationID  string `json:"upstream_conversation_id,omitempty"`
 	UpstreamParentMessageID string `json:"upstream_parent_message_id,omitempty"`
@@ -204,6 +232,7 @@ func (s *Service) cleanupBindingsLocked(now time.Time) {
 		owner     string
 		sessionID string
 		media     relay.Session
+		mediaID   mediaevidence.Identity
 	}
 	var expired []expiredBinding
 	for id, item := range s.bindings {
@@ -219,7 +248,7 @@ func (s *Service) cleanupBindingsLocked(now time.Time) {
 					continue
 				}
 			}
-			expired = append(expired, expiredBinding{owner: item.Owner, sessionID: id, media: item.media})
+			expired = append(expired, expiredBinding{owner: item.Owner, sessionID: id, media: item.media, mediaID: item.mediaID})
 			delete(s.bindings, id)
 		}
 	}
@@ -227,7 +256,7 @@ func (s *Service) cleanupBindingsLocked(now time.Time) {
 	// in-memory binding is reaped by TTL.
 	for _, item := range expired {
 		if item.media != nil {
-			go s.closeMedia(item.media, "binding_ttl")
+			go s.closeTracked(item.media, item.mediaID, "binding_ttl")
 		}
 	}
 	if s.records == nil {
@@ -241,10 +270,10 @@ func (s *Service) cleanupBindingsLocked(now time.Time) {
 }
 
 func (s *Service) bindVoiceSession(owner, sessionID, token string, account accounts.Account, upstream UpstreamContext) string {
-	return s.bindVoiceSessionMedia(owner, sessionID, token, account, upstream, nil)
+	return s.bindVoiceSessionMedia(owner, sessionID, token, account, upstream, nil, mediaevidence.Identity{})
 }
 
-func (s *Service) bindVoiceSessionMedia(owner, sessionID, token string, account accounts.Account, upstream UpstreamContext, media relay.Session) string {
+func (s *Service) bindVoiceSessionMedia(owner, sessionID, token string, account accounts.Account, upstream UpstreamContext, media relay.Session, mediaID mediaevidence.Identity) string {
 	owner = normalizeSessionOwner(owner)
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
@@ -272,11 +301,13 @@ func (s *Service) bindVoiceSessionMedia(owner, sessionID, token string, account 
 	}
 
 	var replaced relay.Session
+	var replacedID mediaevidence.Identity
 	if prev != nil && prev.media != nil && prev.media != media {
-		replaced = prev.media
+		replaced, replacedID = prev.media, prev.mediaID
 	}
 	s.bindings[sessionID] = &sessionBinding{
 		media:                  media,
+		mediaID:                mediaID,
 		Owner:                  owner,
 		AccountID:              account.ID,
 		AccessToken:            token,
@@ -290,17 +321,19 @@ func (s *Service) bindVoiceSessionMedia(owner, sessionID, token string, account 
 	}
 	if replaced != nil {
 		// A re-exchange supersedes the previous media; do not leak its peers.
-		go s.closeMedia(replaced, "superseded")
+		go s.closeTracked(replaced, replacedID, "superseded")
 	}
 	if media != nil {
-		media.SetCloseHandler(func(reason string) { s.onMediaClosed(owner, sessionID, media, reason) })
+		media.SetCloseHandler(func(reason string) { s.onMediaClosed(owner, sessionID, media, mediaID, reason) })
 	}
 	return sessionID
 }
 
-// onMediaClosed drops the binding when its own media ends (peer failure, client
-// gone, or a deliberate close). A binding already re-pointed at newer media is kept.
-func (s *Service) onMediaClosed(owner, sessionID string, media relay.Session, reason string) {
+// onMediaClosed runs once when a media session closes for any reason. It first
+// records the local termination observation, then drops the binding if it still
+// points at this media (a binding already re-pointed at newer media is kept).
+func (s *Service) onMediaClosed(owner, sessionID string, media relay.Session, mediaID mediaevidence.Identity, reason string) {
+	s.finalizeMedia(media, mediaID, reason)
 	s.mu.Lock()
 	item, ok := s.bindings[sessionID]
 	current := ok && item.Owner == owner && item.media == media
@@ -317,6 +350,46 @@ func (s *Service) onMediaClosed(owner, sessionID string, media relay.Session, re
 			s.logger.Warn("call_session_release_persist_failed", "voice_session_id", sessionID, "error", err)
 		}
 	}
+}
+
+// finalizeMedia turns the relay's close record into a durable evidence row. The
+// row is a gateway-local observation; any failure leaves the lease blocked.
+func (s *Service) finalizeMedia(media relay.Session, mediaID mediaevidence.Identity, reason string) {
+	if s.evidence == nil || mediaID.VoiceSessionID == "" {
+		return
+	}
+	var comps mediaevidence.Components
+	if term, ok := media.Termination(); ok {
+		comps = mediaevidence.Components{
+			PeerAClosed:        term.PeerA.Closed && term.PeerA.Err == nil,
+			PeerBClosed:        term.PeerB.Closed && term.PeerB.Err == nil,
+			DataChannelsClosed: term.DataChannels.Closed && term.DataChannels.Err == nil,
+			TunnelsClosed:      term.Tunnels.Closed && term.Tunnels.Err == nil,
+		}
+		if term.Reason != "" {
+			reason = term.Reason
+		}
+	}
+	row, err := s.evidence.Close(mediaID, comps, reason)
+	if err != nil {
+		s.logger.Error("media_evidence_close_failed", "voice_session_id", mediaID.VoiceSessionID, "media_generation", mediaID.MediaGeneration, "error", err)
+		return
+	}
+	s.logger.Info("media_termination_recorded", "voice_session_id", mediaID.VoiceSessionID, "media_generation", mediaID.MediaGeneration, "state", row.State, "reason", reason)
+}
+
+// closeTracked marks a tracked media session closing (so a crash mid-close is
+// recoverable as unknown) and closes it. Evidence is written by the close handler.
+func (s *Service) closeTracked(media relay.Session, mediaID mediaevidence.Identity, reason string) {
+	if media == nil {
+		return
+	}
+	if s.evidence != nil && mediaID.VoiceSessionID != "" {
+		if err := s.evidence.MarkClosing(mediaID, reason); err != nil {
+			s.logger.Warn("media_mark_closing_failed", "voice_session_id", mediaID.VoiceSessionID, "error", err)
+		}
+	}
+	s.closeMedia(media, reason)
 }
 
 func (s *Service) closeMedia(media relay.Session, reason string) {
@@ -661,13 +734,14 @@ func (s *Service) ReleaseSession(owner, voiceSessionID string) bool {
 	item, ok := s.bindings[sessionID]
 	released := false
 	var media relay.Session
+	var mediaID mediaevidence.Identity
 	if ok && item.Owner == owner {
-		media = item.media
+		media, mediaID = item.media, item.mediaID
 		delete(s.bindings, sessionID)
 		released = true
 	}
 	s.mu.Unlock()
-	s.closeMedia(media, "released")
+	s.closeTracked(media, mediaID, "released")
 	if s.records != nil {
 		if err := s.records.MarkReleased(owner, sessionID); err != nil {
 			s.logger.Warn("call_session_release_persist_failed", "voice_session_id", sessionID, "error", err)
@@ -1147,6 +1221,11 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 	}
 
 	sessionJSON := buildSessionJSON(voice, options.VoiceMode, options.LanguageCode, upstreamForWM)
+	// Fixed before any attempt so media evidence can be keyed to the final id.
+	targetSessionID := strings.TrimSpace(req.VoiceSessionID)
+	if targetSessionID == "" {
+		targetSessionID = newVoiceSessionID()
+	}
 	excluded := map[string]struct{}{}
 	var lastError string
 	var lastDetail any
@@ -1278,7 +1357,29 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 			answerSDP = clientAnswer
 		}
 
-		voiceSessionID := s.bindVoiceSessionMedia(owner, req.VoiceSessionID, token, account, upstreamForWM, media)
+		var mediaID mediaevidence.Identity
+		if media != nil && s.evidence != nil {
+			generation, genErr := s.evidence.NextGeneration(targetSessionID)
+			if genErr == nil {
+				mediaID = mediaevidence.Identity{
+					VoiceSessionID:  targetSessionID,
+					MediaGeneration: generation,
+					AccountID:       account.ID,
+					LeaseID:         accountLeaseID(account.ID, targetSessionID),
+					LeaseGeneration: 1,
+				}
+				genErr = s.evidence.Register(owner, media.ID(), mediaID)
+			}
+			if genErr != nil {
+				// Without a durable record the lease could never be released
+				// with evidence, so do not hand out a session.
+				closeMediaOnFailure("evidence_register_failed")
+				s.logger.Error("media_evidence_register_failed", "voice_session_id", targetSessionID, "error", genErr)
+				return nil, &ServiceError{Message: "media evidence unavailable", StatusCode: 503}
+			}
+		}
+
+		voiceSessionID := s.bindVoiceSessionMedia(owner, targetSessionID, token, account, upstreamForWM, media, mediaID)
 		// Re-read binding so response fields match what was actually stored.
 		stored, _ := s.boundVoiceSession(owner, voiceSessionID)
 		upstreamOut := upstreamForWM
@@ -1303,6 +1404,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 			AccountID:               account.ID,
 			AccountLeaseID:          accountLeaseID(account.ID, voiceSessionID),
 			AccountLeaseGeneration:  1,
+			VoiceSessionGeneration:  mediaID.MediaGeneration,
 			Voice:                   voice,
 			VoiceMode:               options.VoiceMode,
 			LanguageCode:            options.LanguageCode,
@@ -1341,20 +1443,90 @@ type AccountLeaseRelease struct {
 	ObservedAt        string `json:"observed_at"`
 }
 
-// ReleaseAccountLease releases one exact voice binding and returns durable
-// evidence that the gateway no longer owns its account/session binding.
+// errNoTerminationEvidence is the fail-closed answer: the lease stays blocked.
+func errNoTerminationEvidence(detail string) *ServiceError {
+	return &ServiceError{Message: "upstream WebRTC termination evidence is unavailable", StatusCode: 503, Detail: detail}
+}
+
+// ReleaseAccountLease closes the exact media session behind a lease and returns
+// its termination evidence. It reports Terminated=true only when all of these
+// hold: the voice session id and media generation match a recorded media
+// session; the lease id and lease generation match it; peer A, peer B, the
+// DataChannel bridge, and any TCP tunnels all closed without error; and the
+// evidence row was written durably before this response.
+//
+// The evidence is a gateway-attested local observation. It does not prove the
+// upstream service reclaimed the account. Everything else, including a session
+// that was never relayed, a close error, a restart, or a lost evidence write,
+// stays blocked with 503.
 func (s *Service) ReleaseAccountLease(owner, leaseID string, generation int64, sessionID string, sessionGeneration int64) (*AccountLeaseRelease, error) {
-	if generation != 1 || sessionGeneration != 1 || strings.TrimSpace(leaseID) == "" || strings.TrimSpace(sessionID) == "" {
+	leaseID, sessionID = strings.TrimSpace(leaseID), strings.TrimSpace(sessionID)
+	if generation < 1 || sessionGeneration < 1 || leaseID == "" || sessionID == "" {
 		return nil, &ServiceError{Message: "account lease identity is incomplete", StatusCode: 400}
 	}
-	if s.records == nil {
+	if s.records == nil || s.evidence == nil {
 		return nil, &ServiceError{Message: "account lease persistence is unavailable", StatusCode: 503}
 	}
-	// The gateway can drop its bookkeeping binding, but it cannot observe the
-	// browser's WebRTC PeerConnection or prove that upstream media has ended.
-	// Keep Zoe's account pool fenced until a deployment-specific media observer
-	// supplies exact terminal evidence.
-	return nil, &ServiceError{Message: "upstream WebRTC termination evidence is unavailable", StatusCode: 503}
+	owner = normalizeSessionOwner(owner)
+
+	row, err := s.evidence.Get(sessionID, sessionGeneration)
+	if err != nil {
+		if errors.Is(err, mediaevidence.ErrNotFound) {
+			// Client-direct media, or an unknown session: nothing to attest.
+			return nil, errNoTerminationEvidence("no gateway-terminated media for this session")
+		}
+		s.logger.Error("media_evidence_lookup_failed", "voice_session_id", sessionID, "error", err)
+		return nil, &ServiceError{Message: "account lease persistence is unavailable", StatusCode: 503}
+	}
+	if row.Owner != owner {
+		// Same answer as an unknown session so ownership is not disclosed.
+		return nil, errNoTerminationEvidence("no gateway-terminated media for this session")
+	}
+	if row.LeaseID != leaseID || row.LeaseGeneration != generation {
+		return nil, &ServiceError{Message: "account lease identity does not match voice session", StatusCode: 409}
+	}
+
+	if row.State == mediaevidence.StateActive || row.State == mediaevidence.StateClosing {
+		s.mu.Lock()
+		item := s.bindings[sessionID]
+		owned := item != nil && item.Owner == owner && item.mediaID.MediaGeneration == row.MediaGeneration
+		s.mu.Unlock()
+		if !owned {
+			// Another goroutine is closing this generation (for example a
+			// supersede). Do not guess; the caller may retry.
+			return nil, errNoTerminationEvidence("media close is still in progress")
+		}
+		s.ReleaseSession(owner, sessionID)
+		row, err = s.evidence.Get(sessionID, sessionGeneration)
+		if err != nil {
+			return nil, &ServiceError{Message: "account lease persistence is unavailable", StatusCode: 503}
+		}
+	}
+
+	if row.State != mediaevidence.StateTerminated || !row.Components.Clean() || row.EvidenceID == "" {
+		return nil, errNoTerminationEvidence("media close was not observed cleanly")
+	}
+	identity := mediaevidence.Identity{
+		VoiceSessionID:  row.VoiceSessionID,
+		MediaGeneration: row.MediaGeneration,
+		AccountID:       row.AccountID,
+		LeaseID:         row.LeaseID,
+		LeaseGeneration: row.LeaseGeneration,
+	}
+	ev, err := s.evidence.Evidence(identity)
+	if err != nil || ev.EvidenceID != row.EvidenceID {
+		return nil, errNoTerminationEvidence("termination evidence row is missing")
+	}
+	return &AccountLeaseRelease{
+		AccountID:         fmt.Sprintf("account-%d", row.AccountID),
+		LeaseID:           row.LeaseID,
+		Generation:        row.LeaseGeneration,
+		SessionID:         row.VoiceSessionID,
+		SessionGeneration: row.MediaGeneration,
+		Terminated:        true,
+		EvidenceID:        ev.EvidenceID,
+		ObservedAt:        ev.ObservedAt,
+	}, nil
 }
 
 func truncate(s string, n int) string {

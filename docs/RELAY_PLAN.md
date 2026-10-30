@@ -1,7 +1,8 @@
 # Gateway media relay and account rotation plan
 
-Status: phases 0 (local part), 1, 2, and the account-pool half of 4 are
-implemented. Phase 3 and the rest of phase 4 are not. This document applies to work
+Status: phases 0 (local part), 1, 2, 3, and the account-pool half of 4 are
+implemented. Media generation rebuild and restart recovery of rebuilt state (the
+rest of phase 4) are not. This document applies to work
 in this fork that changes how voice media is terminated, how account leases are
 released, and how pool accounts are selected for continuous voice.
 
@@ -19,7 +20,9 @@ so continuous voice and automatic account change both fail.
 - `DELETE /v1/voice/sessions/{id}` only drops the gateway binding and marks the
   call session released (`ReleaseSession`). It cannot show that the peer stopped.
 - `ReleaseAccountLease` returns "cannot obtain upstream WebRTC termination
-  evidence" while `Capabilities()` still advertises support. These two disagree.
+  evidence". (An earlier draft of this plan also said a `Capabilities()` function
+  advertised support; no such function exists in this repository, and
+  `/bridge/v1/capabilities` makes no termination claim.)
 - A consumer that requires trusted termination evidence (Zoe) therefore blocks
   the whole account pool after each session.
 
@@ -190,7 +193,7 @@ Changes:
 | 0 | Decode the probe `error` event; repeat the probe with audio and a realistic `session`; record the `wm` request and response shape with a local fixture | `internal/voice/service.go`, tests |
 | 1 | Port the Pion bridge into `internal/relay`; replace logrus, Gin, and CLIProxyAPI config; keep copyright notices | `internal/relay/*`, `go.mod` |
 | 2 | Route `CreateSession` through peers A and B; return peer A's answer, not the upstream answer. Done behind `VOICE_RELAY_ENABLED` with the `VOICE_RELAY_MEDIA_ROUTE` switch | `internal/voice/service.go` |
-| 3 | Lease identity, generations, evidence tables, idempotent release; make `Capabilities()` truthful | `internal/store/schema.go`, `internal/callsessions`, `internal/api/voice.go` |
+| 3 | Lease identity, generations, evidence tables, idempotent release. Done in `internal/mediaevidence`; generations are persisted but stay at lease generation 1 until phase 4 rebuilds media | `internal/store/schema.go`, `internal/callsessions`, `internal/api/voice.go` |
 | 4 | Cooldown, expiry guard, generation rebuild, restart recovery of unknown state | `internal/accounts/*`, `internal/config/config.go`, `internal/voice/service.go` |
 
 Phase 3 depends on phases 1 and 2. Phase 4 depends on phase 3. Phase 0 gates

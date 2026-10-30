@@ -61,7 +61,7 @@ func (s *Server) downstreamSession(w http.ResponseWriter, r *http.Request) {
 	)
 	// Public contract: only signaling + session handle. Pool account and
 	// upstream continuity stay server-side.
-	writeJSON(w, http.StatusOK, map[string]any{
+	response := map[string]any{
 		"answer_sdp":               result.AnswerSDP,
 		"voice_session_id":         result.VoiceSessionID,
 		"account_lease_id":         result.AccountLeaseID,
@@ -69,7 +69,12 @@ func (s *Server) downstreamSession(w http.ResponseWriter, r *http.Request) {
 		"voice":                    result.Voice,
 		"voice_mode":               result.VoiceMode,
 		"language_code":            result.LanguageCode,
-	})
+	}
+	if result.VoiceSessionGeneration > 0 {
+		// Present only when the gateway terminates media and can attest closure.
+		response["voice_session_generation"] = result.VoiceSessionGeneration
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) downstreamSessionContext(w http.ResponseWriter, r *http.Request) {

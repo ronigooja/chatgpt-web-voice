@@ -11,6 +11,8 @@ import (
 
 	"github.com/pion/webrtc/v4"
 
+	"github.com/dyhhhhhh/chatgpt-web-voice/internal/callsessions"
+	"github.com/dyhhhhhh/chatgpt-web-voice/internal/mediaevidence"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/relay"
 )
 
@@ -80,6 +82,8 @@ func TestRelayEndToEndWithRealPeers(t *testing.T) {
 	}
 	f.svc.WithRelay(rl)
 	f.svc.cfg.SessionTTLSeconds = 180
+	evStore := mediaevidence.NewStore(f.pool.DB())
+	f.svc.WithMediaEvidence(evStore).WithCallSessions(callsessions.NewStore(f.pool.DB()))
 
 	client, err := mkAPI().NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
@@ -148,7 +152,21 @@ func TestRelayEndToEndWithRealPeers(t *testing.T) {
 		t.Fatal("client received the upstream answer instead of peer A's answer")
 	}
 
-	if !f.svc.ReleaseSession("api_key:1", res.VoiceSessionID) {
-		t.Fatal("release failed")
+	// Real peers: the lease release must close both PeerConnections, the
+	// DataChannel bridge, and the tunnels, and return durable evidence.
+	out, err := f.svc.ReleaseAccountLease("api_key:1", res.AccountLeaseID, res.AccountLeaseGeneration, res.VoiceSessionID, res.VoiceSessionGeneration)
+	if err != nil {
+		t.Fatalf("lease release with real peers: %v", err)
+	}
+	if !out.Terminated || out.EvidenceID == "" {
+		t.Fatalf("expected terminated evidence: %+v", out)
+	}
+	row, err := evStore.Get(res.VoiceSessionID, res.VoiceSessionGeneration)
+	if err != nil || row.State != mediaevidence.StateTerminated || !row.Components.Clean() {
+		t.Fatalf("real close was not recorded cleanly: %+v %v", row, err)
+	}
+	again, err := f.svc.ReleaseAccountLease("api_key:1", res.AccountLeaseID, res.AccountLeaseGeneration, res.VoiceSessionID, res.VoiceSessionGeneration)
+	if err != nil || *again != *out {
+		t.Fatalf("repeat release must return the same evidence: %+v %v", again, err)
 	}
 }
