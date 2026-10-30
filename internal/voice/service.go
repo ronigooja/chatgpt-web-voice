@@ -72,6 +72,7 @@ type MediaEvidenceStore interface {
 	Get(voiceSessionID string, generation int64) (mediaevidence.MediaSession, error)
 	Evidence(id mediaevidence.Identity) (mediaevidence.Evidence, error)
 	NextGeneration(voiceSessionID string) (int64, error)
+	RecordLegSwap(id mediaevidence.Identity, newAccountID int64, clean bool) error
 }
 
 // relayAcceptTimeout bounds applying the upstream answer and gathering peer A candidates.
@@ -109,6 +110,8 @@ type sessionBinding struct {
 	media relay.Session
 	// mediaID is the evidence identity of media; zero when evidence is not tracked.
 	mediaID mediaevidence.Identity
+	// call holds in-memory per-call data for rebuilds; nil for client-direct media.
+	call *callState
 }
 
 // Service is the ChatGPT web voice gateway.
@@ -233,6 +236,7 @@ func (s *Service) cleanupBindingsLocked(now time.Time) {
 		sessionID string
 		media     relay.Session
 		mediaID   mediaevidence.Identity
+		call      *callState
 	}
 	var expired []expiredBinding
 	for id, item := range s.bindings {
@@ -248,7 +252,7 @@ func (s *Service) cleanupBindingsLocked(now time.Time) {
 					continue
 				}
 			}
-			expired = append(expired, expiredBinding{owner: item.Owner, sessionID: id, media: item.media, mediaID: item.mediaID})
+			expired = append(expired, expiredBinding{owner: item.Owner, sessionID: id, media: item.media, mediaID: item.mediaID, call: item.call})
 			delete(s.bindings, id)
 		}
 	}
@@ -256,6 +260,9 @@ func (s *Service) cleanupBindingsLocked(now time.Time) {
 	// in-memory binding is reaped by TTL.
 	for _, item := range expired {
 		if item.media != nil {
+			if item.call != nil {
+				item.call.halt()
+			}
 			go s.closeTracked(item.media, item.mediaID, "binding_ttl")
 		}
 	}
@@ -270,10 +277,10 @@ func (s *Service) cleanupBindingsLocked(now time.Time) {
 }
 
 func (s *Service) bindVoiceSession(owner, sessionID, token string, account accounts.Account, upstream UpstreamContext) string {
-	return s.bindVoiceSessionMedia(owner, sessionID, token, account, upstream, nil, mediaevidence.Identity{})
+	return s.bindVoiceSessionMedia(owner, sessionID, token, account, upstream, nil, mediaevidence.Identity{}, nil)
 }
 
-func (s *Service) bindVoiceSessionMedia(owner, sessionID, token string, account accounts.Account, upstream UpstreamContext, media relay.Session, mediaID mediaevidence.Identity) string {
+func (s *Service) bindVoiceSessionMedia(owner, sessionID, token string, account accounts.Account, upstream UpstreamContext, media relay.Session, mediaID mediaevidence.Identity, call *callState) string {
 	owner = normalizeSessionOwner(owner)
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
@@ -302,12 +309,14 @@ func (s *Service) bindVoiceSessionMedia(owner, sessionID, token string, account 
 
 	var replaced relay.Session
 	var replacedID mediaevidence.Identity
+	var replacedCall *callState
 	if prev != nil && prev.media != nil && prev.media != media {
-		replaced, replacedID = prev.media, prev.mediaID
+		replaced, replacedID, replacedCall = prev.media, prev.mediaID, prev.call
 	}
 	s.bindings[sessionID] = &sessionBinding{
 		media:                  media,
 		mediaID:                mediaID,
+		call:                   call,
 		Owner:                  owner,
 		AccountID:              account.ID,
 		AccessToken:            token,
@@ -321,6 +330,9 @@ func (s *Service) bindVoiceSessionMedia(owner, sessionID, token string, account 
 	}
 	if replaced != nil {
 		// A re-exchange supersedes the previous media; do not leak its peers.
+		if replacedCall != nil {
+			replacedCall.halt()
+		}
 		go s.closeTracked(replaced, replacedID, "superseded")
 	}
 	if media != nil {
@@ -337,10 +349,15 @@ func (s *Service) onMediaClosed(owner, sessionID string, media relay.Session, me
 	s.mu.Lock()
 	item, ok := s.bindings[sessionID]
 	current := ok && item.Owner == owner && item.media == media
+	var call *callState
 	if current {
+		call = item.call
 		delete(s.bindings, sessionID)
 	}
 	s.mu.Unlock()
+	if call != nil {
+		call.halt()
+	}
 	if !current {
 		return
 	}
@@ -735,12 +752,16 @@ func (s *Service) ReleaseSession(owner, voiceSessionID string) bool {
 	released := false
 	var media relay.Session
 	var mediaID mediaevidence.Identity
+	var call *callState
 	if ok && item.Owner == owner {
-		media, mediaID = item.media, item.mediaID
+		media, mediaID, call = item.media, item.mediaID, item.call
 		delete(s.bindings, sessionID)
 		released = true
 	}
 	s.mu.Unlock()
+	if call != nil {
+		call.halt()
+	}
 	s.closeTracked(media, mediaID, "released")
 	if s.records != nil {
 		if err := s.records.MarkReleased(owner, sessionID); err != nil {
@@ -1379,7 +1400,22 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 			}
 		}
 
-		voiceSessionID := s.bindVoiceSessionMedia(owner, targetSessionID, token, account, upstreamForWM, media, mediaID)
+		var call *callState
+		if media != nil {
+			call = &callState{
+				voice: voice, voiceMode: options.VoiceMode, language: options.LanguageCode,
+				accountID: account.ID, token: token, proxy: account.Proxy, deviceID: account.DeviceID,
+				stop: make(chan struct{}),
+			}
+			if s.cfg.RelayHandoffEnabled {
+				call.transcript = newTranscriptTail(s.cfg.RelayHandoffMaxChars)
+				media.SetEventObserver(call.transcript.Observe)
+			}
+		}
+		voiceSessionID := s.bindVoiceSessionMedia(owner, targetSessionID, token, account, upstreamForWM, media, mediaID, call)
+		if media != nil {
+			s.startRebuildLoop(owner, voiceSessionID, media, call)
+		}
 		// Re-read binding so response fields match what was actually stored.
 		stored, _ := s.boundVoiceSession(owner, voiceSessionID)
 		upstreamOut := upstreamForWM

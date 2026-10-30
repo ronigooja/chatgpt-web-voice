@@ -440,5 +440,23 @@ func (db *DB) ensureMediaEvidenceTables() error {
 			return fmt.Errorf("create media evidence tables: %w", err)
 		}
 	}
+	// Upstream legs replaced while the call stayed up. A call is only attested
+	// clean when every retired leg also closed cleanly.
+	for _, column := range []struct{ name, ddl string }{
+		{"retired_legs", "INTEGER NOT NULL DEFAULT 0"},
+		{"retired_legs_unclean", "INTEGER NOT NULL DEFAULT 0"},
+		{"current_account_id", "INTEGER NOT NULL DEFAULT 0"},
+	} {
+		has, err := db.hasColumn("voice_media_sessions", column.name)
+		if err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		if _, err := db.conn.Exec("ALTER TABLE voice_media_sessions ADD COLUMN " + column.name + " " + column.ddl); err != nil {
+			return fmt.Errorf("add voice_media_sessions.%s: %w", column.name, err)
+		}
+	}
 	return nil
 }

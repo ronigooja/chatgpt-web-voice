@@ -56,16 +56,22 @@ func (c Components) Clean() bool {
 // MediaSession is one row of voice_media_sessions.
 type MediaSession struct {
 	Identity
-	Owner         string
-	RelaySession  string
-	State         string
-	Components    Components
-	CloseReason   string
-	CreatedAt     string
-	UpdatedAt     string
-	TerminatedAt  string
-	EvidenceID    string
-	EvidenceError string
+	Owner        string
+	RelaySession string
+	State        string
+	Components   Components
+	CloseReason  string
+	// RetiredLegs counts upstream legs replaced during the call;
+	// RetiredLegsUnclean counts those that did not close cleanly.
+	RetiredLegs        int
+	RetiredLegsUnclean int
+	// CurrentAccountID is the account of the leg now carrying the call.
+	CurrentAccountID int64
+	CreatedAt        string
+	UpdatedAt        string
+	TerminatedAt     string
+	EvidenceID       string
+	EvidenceError    string
 }
 
 // Evidence is one row of voice_termination_evidence.
@@ -154,6 +160,12 @@ func (s *Store) Close(id Identity, c Components, reason string) (MediaSession, e
 	}
 
 	now := ts(s.now())
+	if current.RetiredLegsUnclean > 0 {
+		if err := s.markUnknownUnlocked(id, c, reason, now, "a replaced upstream leg did not close cleanly"); err != nil {
+			return MediaSession{}, err
+		}
+		return s.getUnlocked(id.VoiceSessionID, id.MediaGeneration)
+	}
 	if c.Clean() {
 		if _, err := s.terminateUnlocked(id, c, reason, now); err == nil {
 			return s.getUnlocked(id.VoiceSessionID, id.MediaGeneration)
@@ -222,6 +234,37 @@ func (s *Store) markUnknownUnlocked(id Identity, c Components, reason, now, why 
 		id.VoiceSessionID, id.MediaGeneration, StateActive, StateClosing)
 	if err != nil {
 		return fmt.Errorf("mark media session unknown: %w", err)
+	}
+	return nil
+}
+
+// RecordLegSwap records that the active upstream leg was replaced by one on
+// newAccountID. clean says whether the retired leg closed without error. Only an
+// active row can change; a closing or finished row is left alone.
+func (s *Store) RecordLegSwap(id Identity, newAccountID int64, clean bool) error {
+	if err := id.valid(); err != nil {
+		return err
+	}
+	unclean := 0
+	if !clean {
+		unclean = 1
+	}
+	s.db.Lock()
+	defer s.db.Unlock()
+	res, err := s.db.Conn().Exec(`
+		UPDATE voice_media_sessions SET
+			retired_legs = retired_legs + 1,
+			retired_legs_unclean = retired_legs_unclean + ?,
+			current_account_id = ?,
+			updated_at = ?
+		WHERE voice_session_id = ? AND media_generation = ? AND lease_id = ? AND lease_generation = ? AND state = ?`,
+		unclean, newAccountID, ts(s.now()),
+		id.VoiceSessionID, id.MediaGeneration, id.LeaseID, id.LeaseGeneration, StateActive)
+	if err != nil {
+		return fmt.Errorf("record leg swap: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return errors.New("media session is not active")
 	}
 	return nil
 }
@@ -319,7 +362,8 @@ func (s *Store) NextGeneration(voiceSessionID string) (int64, error) {
 const mediaSelect = `
 	SELECT voice_session_id, media_generation, owner, account_id, lease_id, lease_generation,
 		relay_session_id, state, peer_a_closed, peer_b_closed, data_channels_closed, tunnels_closed,
-		close_reason, created_at, updated_at, terminated_at, evidence_id, evidence_error
+		close_reason, created_at, updated_at, terminated_at, evidence_id, evidence_error,
+		retired_legs, retired_legs_unclean, current_account_id
 	FROM voice_media_sessions`
 
 func (s *Store) getUnlocked(voiceSessionID string, generation int64) (MediaSession, error) {
@@ -336,7 +380,8 @@ func scanMedia(row store.Scanner) (MediaSession, error) {
 	var pa, pb, dc, tn int
 	if err := row.Scan(&m.VoiceSessionID, &m.MediaGeneration, &m.Owner, &m.AccountID, &m.LeaseID, &m.LeaseGeneration,
 		&m.RelaySession, &m.State, &pa, &pb, &dc, &tn,
-		&m.CloseReason, &m.CreatedAt, &m.UpdatedAt, &m.TerminatedAt, &m.EvidenceID, &m.EvidenceError); err != nil {
+		&m.CloseReason, &m.CreatedAt, &m.UpdatedAt, &m.TerminatedAt, &m.EvidenceID, &m.EvidenceError,
+		&m.RetiredLegs, &m.RetiredLegsUnclean, &m.CurrentAccountID); err != nil {
 		return MediaSession{}, err
 	}
 	m.Components = Components{PeerAClosed: pa == 1, PeerBClosed: pb == 1, DataChannelsClosed: dc == 1, TunnelsClosed: tn == 1}

@@ -115,6 +115,17 @@ type Config struct {
 	RelayUDPPortMin  int
 	RelayUDPPortMax  int
 	RelayPublicIP    string
+
+	// RelayRebuildMinutes is how often a relayed call replaces its upstream leg
+	// (0 disables rebuilds). RelayRebuildReadySeconds bounds how long a new leg
+	// may take to become ready before the old one is kept.
+	RelayRebuildMinutes      int
+	RelayRebuildReadySeconds int
+	// RelayHandoffEnabled keeps the recent conversation text in memory so a
+	// forced account change can hand it to the new session as a text message.
+	// RelayHandoffMaxChars bounds what is kept and sent. Nothing is persisted.
+	RelayHandoffEnabled  bool
+	RelayHandoffMaxChars int
 }
 
 func env(name, def string) string {
@@ -249,6 +260,11 @@ func Load() Config {
 		RelayUDPPortMin:  envInt("VOICE_RELAY_UDP_PORT_MIN", 0),
 		RelayUDPPortMax:  envInt("VOICE_RELAY_UDP_PORT_MAX", 0),
 		RelayPublicIP:    env("VOICE_RELAY_PUBLIC_IP", ""),
+
+		RelayRebuildMinutes:      envInt("VOICE_RELAY_REBUILD_MINUTES", 45),
+		RelayRebuildReadySeconds: envInt("VOICE_RELAY_REBUILD_READY_SECONDS", 30),
+		RelayHandoffEnabled:      envBool("VOICE_RELAY_HANDOFF", true),
+		RelayHandoffMaxChars:     envInt("VOICE_RELAY_HANDOFF_MAX_CHARS", 6000),
 	}
 }
 
@@ -300,6 +316,15 @@ func (c Config) Validate() error {
 	}
 	if (c.RelayUDPPortMin == 0) != (c.RelayUDPPortMax == 0) || c.RelayUDPPortMin > c.RelayUDPPortMax {
 		return fmt.Errorf("VOICE_RELAY_UDP_PORT_MIN and VOICE_RELAY_UDP_PORT_MAX must be set together with min <= max")
+	}
+	if c.RelayRebuildMinutes < 0 || c.RelayRebuildMinutes > 0 && c.RelayRebuildMinutes < 5 {
+		return fmt.Errorf("VOICE_RELAY_REBUILD_MINUTES must be 0 (off) or at least 5")
+	}
+	if c.RelayRebuildReadySeconds < 5 && c.RelayRebuildMinutes > 0 {
+		return fmt.Errorf("VOICE_RELAY_REBUILD_READY_SECONDS must be at least 5")
+	}
+	if c.RelayHandoffEnabled && (c.RelayHandoffMaxChars < 500 || c.RelayHandoffMaxChars > 50000) {
+		return fmt.Errorf("VOICE_RELAY_HANDOFF_MAX_CHARS must be between 500 and 50000")
 	}
 	if strings.TrimSpace(c.DatabaseFile) == "" {
 		return fmt.Errorf("VOICE_DATABASE_FILE is required")

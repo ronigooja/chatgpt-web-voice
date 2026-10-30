@@ -289,3 +289,47 @@ func TestValidateRejectsBadRelaySettings(t *testing.T) {
 		}
 	}
 }
+
+func TestRelayRebuildAndHandoffDefaultsAndValidation(t *testing.T) {
+	cfg := Load()
+	if cfg.RelayRebuildMinutes != 45 || cfg.RelayRebuildReadySeconds != 30 || !cfg.RelayHandoffEnabled || cfg.RelayHandoffMaxChars != 6000 {
+		t.Fatalf("unexpected defaults: %+v", cfg)
+	}
+	t.Setenv("VOICE_RELAY_REBUILD_MINUTES", "60")
+	t.Setenv("VOICE_RELAY_HANDOFF", "false")
+	t.Setenv("VOICE_RELAY_HANDOFF_MAX_CHARS", "9000")
+	cfg = Load()
+	if cfg.RelayRebuildMinutes != 60 || cfg.RelayHandoffEnabled || cfg.RelayHandoffMaxChars != 9000 {
+		t.Fatalf("overrides not applied: %+v", cfg)
+	}
+
+	t.Setenv("VOICE_AUTH_USERNAME", "admin")
+	t.Setenv("VOICE_AUTH_PASSWORD", "secret")
+	t.Setenv("VOICE_TOKEN_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	base := Load()
+	if err := base.Validate(); err != nil {
+		t.Fatalf("baseline invalid: %v", err)
+	}
+	for name, mutate := range map[string]func(*Config){
+		"negative rebuild":      func(c *Config) { c.RelayRebuildMinutes = -1 },
+		"rebuild too frequent":  func(c *Config) { c.RelayRebuildMinutes = 2 },
+		"ready timeout too low": func(c *Config) { c.RelayRebuildReadySeconds = 1 },
+		"handoff too small":     func(c *Config) { c.RelayHandoffEnabled, c.RelayHandoffMaxChars = true, 100 },
+		"handoff too large":     func(c *Config) { c.RelayHandoffEnabled, c.RelayHandoffMaxChars = true, 100000 },
+	} {
+		bad := base
+		mutate(&bad)
+		if bad.Validate() == nil {
+			t.Fatalf("%s must fail validation", name)
+		}
+	}
+	off := base
+	off.RelayRebuildMinutes, off.RelayRebuildReadySeconds = 0, 0
+	if err := off.Validate(); err != nil {
+		t.Fatalf("rebuild off must not require a ready timeout: %v", err)
+	}
+	off.RelayHandoffEnabled, off.RelayHandoffMaxChars = false, 0
+	if err := off.Validate(); err != nil {
+		t.Fatalf("handoff off must not constrain its size: %v", err)
+	}
+}

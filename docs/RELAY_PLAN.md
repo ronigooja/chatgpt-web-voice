@@ -1,8 +1,8 @@
 # Gateway media relay and account rotation plan
 
-Status: phases 0 (local part), 1, 2, 3, and the account-pool half of 4 are
-implemented. Media generation rebuild and restart recovery of rebuilt state (the
-rest of phase 4) are not. This document applies to work
+Status: phases 0 to 4 are implemented and tested locally with loopback peers. Not
+yet exercised: a rebuild against the real upstream, runs longer than about 50
+seconds, and anything over 24 hours. This document applies to work
 in this fork that changes how voice media is terminated, how account leases are
 released, and how pool accounts are selected for continuous voice.
 
@@ -119,8 +119,14 @@ was structural only. The probe binary and database copy were removed afterwards.
 | Media through the stored account proxy (IPv6 egress) | Failed. The proxy refused TCP 443 to the upstream candidate; peer B ended `peer_b_failed`. Direct TCP 443 from the host worked |
 | Media through an IPv4-egress SOCKS5 proxy, `socks5://` and `socks5h://` | Worked; peer B ready in about 9 s; about 2,200 inbound RTP packets |
 
-Still not established: more than one account, runs longer than about 50 s,
-conversation continuity across accounts, and upstream release of the account.
+| Same account, two simultaneous sessions | Accepted; first session undisturbed |
+| Same account, resume with `conversation_id` + `parent_message_id` | Same conversation; earlier content known |
+| Other account, resume with the first account's ids | Refused 3 of 3: `goodbye` (`reason=error`, `detail=internal_error`) about 1 s after ready, then close |
+| Other account, fresh session | Normal |
+| Fresh session, earlier history sent as one user text message | Accepted (`relay_message_processed`); no unprompted speech; later question about the history answered correctly. Without the text, the same question was not answerable |
+
+Still not established: runs longer than about 50 s, a rebuild against the real
+upstream, and upstream release of the account.
 
 ## Termination evidence
 
@@ -154,17 +160,46 @@ evidence reference.
 
 ## Continuous operation
 
-- Rebuild media every 30 to 60 minutes (tunable). Create the next generation
-  first, release the old one only after the new one is connected and its
-  DataChannel is ready. If the new generation fails, keep the old one.
-- Increment the media generation and the lease generation on each rebuild.
-  Size the relay capacity for steady sessions plus generations being replaced.
-- Replace the 180 second binding TTL behavior. Expiry must mark the session
-  `closing`, close both peers, then write evidence. Deleting the in-memory binding
-  is not a close.
-- Whether a conversation can continue across an account change is not known and
-  must be tested. Until it is, state that a rebuild onto a different account may
-  start a new upstream conversation.
+Implemented: `internal/relay/swap.go`, `internal/voice/rebuild.go`,
+`internal/voice/transcript.go`. Settings are in the README table.
+
+- Only the upstream leg (peer B) is replaced. The client leg (peer A) and its
+  channel never change, so the client sees no reconnect. Interval:
+  `VOICE_RELAY_REBUILD_MINUTES`; the new leg must be ready within
+  `VOICE_RELAY_REBUILD_READY_SECONDS`.
+- Order: build new leg, wait until connected and its `oai-events` is open, send
+  handoff text if needed, commit, then close the old leg. Any failure before
+  commit keeps the old leg and the call.
+- Audio from a retired or pending leg is dropped. Client-facing RTP sequence and
+  timestamp are re-based so the stream stays continuous.
+- One lease for the whole call. Media generation and lease generation stay at the
+  values handed out at creation; Zoe needs no change. Each retired leg is counted
+  in `voice_media_sessions`. If any retired leg closed uncleanly, the call can
+  never be attested `terminated`.
+- Account choice: same account first (keeps the conversation via
+  `conversation_id`); another account only when the current one is unusable
+  (cooldown, token expiry guard).
+- Binding TTL: a relayed call is not cut by idle TTL; its close handler reclaims
+  the binding.
+
+### Account change and context
+
+Measured 2026-10-30 (see "Live probe"): a different account cannot resume the
+conversation; upstream sends `goodbye` (`reason=error`, `detail=internal_error`)
+and closes (3 of 3). The same account resumes normally and may hold two sessions
+at once.
+
+So a forced account change starts a new upstream conversation. To soften it, the
+gateway keeps the most recent turns in memory (`VOICE_RELAY_HANDOFF`, on by
+default, `VOICE_RELAY_HANDOFF_MAX_CHARS`) and sends them to the new session as one
+user text message (same envelope as typed text in `static/voice.html`). Probe:
+the new session answered a question about earlier content, and did not start
+speaking on receiving the text. Limits: one short history, one account, one run;
+voice and tone are not carried over. If delivering the text fails, the rebuild is
+aborted and the old leg stays.
+
+The conversation text exists only in memory, is bounded, is never logged or
+persisted, and is dropped with the call. Disable with `VOICE_RELAY_HANDOFF=false`.
 
 ## Account pool
 
@@ -193,8 +228,8 @@ Changes:
 | 0 | Decode the probe `error` event; repeat the probe with audio and a realistic `session`; record the `wm` request and response shape with a local fixture | `internal/voice/service.go`, tests |
 | 1 | Port the Pion bridge into `internal/relay`; replace logrus, Gin, and CLIProxyAPI config; keep copyright notices | `internal/relay/*`, `go.mod` |
 | 2 | Route `CreateSession` through peers A and B; return peer A's answer, not the upstream answer. Done behind `VOICE_RELAY_ENABLED` with the `VOICE_RELAY_MEDIA_ROUTE` switch | `internal/voice/service.go` |
-| 3 | Lease identity, generations, evidence tables, idempotent release. Done in `internal/mediaevidence`; generations are persisted but stay at lease generation 1 until phase 4 rebuilds media | `internal/store/schema.go`, `internal/callsessions`, `internal/api/voice.go` |
-| 4 | Cooldown, expiry guard, generation rebuild, restart recovery of unknown state | `internal/accounts/*`, `internal/config/config.go`, `internal/voice/service.go` |
+| 3 | Lease identity, generations, evidence tables, idempotent release. Done in `internal/mediaevidence`; generations are persisted and stay at 1; phase 4 swaps only the upstream leg, so they do not change | `internal/store/schema.go`, `internal/callsessions`, `internal/api/voice.go` |
+| 4 | Cooldown, expiry guard (done); upstream leg rebuild with text handoff (done, see "Continuous operation"); restart recovery of unknown state (done in phase 3) | `internal/accounts/*`, `internal/relay/swap.go`, `internal/voice/rebuild.go` |
 
 Phase 3 depends on phases 1 and 2. Phase 4 depends on phase 3. Phase 0 gates
 phase 2.

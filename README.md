@@ -177,6 +177,10 @@ docker compose down
 | `VOICE_RELAY_MAX_SESSIONS` | `16` | Concurrent relayed calls (`0` uses the default) |
 | `VOICE_RELAY_UDP_PORT_MIN` / `VOICE_RELAY_UDP_PORT_MAX` | unset | Restrict the relay's UDP port range; set both or neither |
 | `VOICE_RELAY_PUBLIC_IP` | unset | Advertise this address as the relay's host candidate |
+| `VOICE_RELAY_REBUILD_MINUTES` | `45` | Replace each relayed call's upstream leg this often (`0` off, else at least `5`). The client never reconnects |
+| `VOICE_RELAY_REBUILD_READY_SECONDS` | `30` | Give up on a new leg after this long and keep the old one |
+| `VOICE_RELAY_HANDOFF` | `true` | Keep recent conversation text in memory and send it as text when a rebuild must change account. Never stored or logged |
+| `VOICE_RELAY_HANDOFF_MAX_CHARS` | `6000` | Cap on kept and sent handoff text (500 to 50000) |
 | `VOICE_MAX_ACCOUNT_ATTEMPTS` | `4` | 单次建连最多尝试账号数 |
 | `VOICE_UPSTREAM_TRANSPORT` | `tls-client` | 可换成 `curl-impersonate` |
 | `VOICE_TLS_PROFILE` | `chrome_120` | 使用 `tls-client` 时换指纹档 |

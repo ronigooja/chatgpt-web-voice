@@ -64,6 +64,21 @@ type fakeMedia struct {
 	closed   bool
 	// termination, when set, replaces the default all-clean close record.
 	termination *relay.Termination
+
+	// swap simulation
+	observer     func([]byte)
+	swapRoutes   []relay.Route
+	swapPending  bool
+	swapReady    chan struct{}
+	swapAnswers  []string
+	pendingTexts []string
+	committed    int
+	aborted      []string
+	beginErr     error
+	acceptErr    error
+	textErr      error
+	commitErr    error
+	legClose     relay.LegTermination
 }
 
 func (m *fakeMedia) ID() string { return m.id }
@@ -446,4 +461,85 @@ func TestRelayMediaRouteDoesNotChangeSignalingProxy(t *testing.T) {
 	if fr.routes[0].ProxyURL != "" {
 		t.Fatalf("direct media route must pass no proxy, got %q", fr.routes[0].ProxyURL)
 	}
+}
+
+func (m *fakeMedia) SetEventObserver(f func([]byte)) {
+	m.mu.Lock()
+	m.observer = f
+	m.mu.Unlock()
+}
+
+func (m *fakeMedia) emit(data string) {
+	m.mu.Lock()
+	f := m.observer
+	m.mu.Unlock()
+	if f != nil {
+		f([]byte(data))
+	}
+}
+
+func (m *fakeMedia) BeginUpstreamSwap(_ context.Context, route relay.Route) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.beginErr != nil {
+		return "", m.beginErr
+	}
+	if m.swapPending {
+		return "", errors.New("swap already pending")
+	}
+	m.swapPending = true
+	m.swapReady = make(chan struct{})
+	close(m.swapReady)
+	m.swapRoutes = append(m.swapRoutes, route)
+	return fakeUpstreamOffer, nil
+}
+
+func (m *fakeMedia) AcceptSwapAnswer(_ context.Context, answer string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.swapAnswers = append(m.swapAnswers, answer)
+	return m.acceptErr
+}
+
+func (m *fakeMedia) SwapReady() <-chan struct{} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.swapPending {
+		return nil
+	}
+	return m.swapReady
+}
+
+func (m *fakeMedia) SendPendingText(text string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.textErr != nil {
+		return m.textErr
+	}
+	m.pendingTexts = append(m.pendingTexts, text)
+	return nil
+}
+
+func (m *fakeMedia) CommitUpstreamSwap() (relay.LegTermination, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.commitErr != nil {
+		return relay.LegTermination{}, m.commitErr
+	}
+	m.swapPending = false
+	m.committed++
+	res := m.legClose
+	if res.Reason == "" {
+		ok := relay.ComponentResult{Closed: true}
+		res = relay.LegTermination{Reason: "swapped", PeerB: ok, DataChannels: ok, Tunnels: ok}
+	}
+	return res, nil
+}
+
+func (m *fakeMedia) AbortUpstreamSwap(reason string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.swapPending = false
+	m.aborted = append(m.aborted, reason)
+	return nil
 }

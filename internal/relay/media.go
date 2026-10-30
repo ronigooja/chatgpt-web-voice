@@ -96,11 +96,43 @@ func (l *sessionLimiter) release() {
 	l.mu.Unlock()
 }
 
+// leg is one upstream attachment: peer B with its audio track, TCP tunnels and
+// readiness. A session has one active leg; a swap builds a second one first.
+type leg struct {
+	name        string
+	pc          *webrtc.PeerConnection
+	toUpstream  *webrtc.TrackLocalStaticRTP
+	channel     *webrtc.DataChannel
+	proxyDialer proxy.ContextDialer
+	proxyScheme string
+	localOffer  string
+
+	tunnelsMu sync.Mutex
+	tunnels   []*tcpCandidateTunnel
+
+	readyMu   sync.Mutex
+	ready     chan struct{}
+	readyOnce sync.Once
+	up        bool
+	chanOpen  bool
+
+	forwardingLogOnce sync.Once
+
+	closeOnce sync.Once
+	closed    chan struct{}
+	closeRes  LegTermination
+}
+
 type pionSession struct {
 	downstream *webrtc.PeerConnection
-	upstream   *webrtc.PeerConnection
 	bridge     *dataChannelBridge
 	logger     *slog.Logger
+	toClient   *webrtc.TrackLocalStaticRTP
+
+	// relay-level builders, kept so a replacement leg can be created later.
+	upstreamAPI      *webrtc.API
+	proxyUpstreamAPI *webrtc.API
+	configuration    webrtc.Configuration
 
 	id          string
 	done        chan struct{}
@@ -115,18 +147,32 @@ type pionSession struct {
 	handlerDone bool
 	termination Termination
 
-	readyOnce        sync.Once
-	ready            chan struct{}
-	readyMu          sync.Mutex
-	upstreamUp       bool
-	upstreamChanOpen bool
+	// legMu guards active and pending.
+	legMu   sync.Mutex
+	active  *leg
+	pending *leg
+	legSeq  int
+	// toClientRewrite keeps the client-facing RTP stream continuous across legs.
+	toClientRewrite rtpRewriter
 
-	proxyDialer       proxy.ContextDialer
-	proxyScheme       string
-	forwardingLogOnce sync.Once
-	localOffer        string
-	tunnelsMu         sync.Mutex
-	tunnels           []*tcpCandidateTunnel
+	observerMu sync.RWMutex
+	observer   func([]byte)
+}
+
+// SetEventObserver implements Session.
+func (s *pionSession) SetEventObserver(observer func([]byte)) {
+	s.observerMu.Lock()
+	s.observer = observer
+	s.observerMu.Unlock()
+}
+
+func (s *pionSession) observeEvent(data []byte) {
+	s.observerMu.RLock()
+	observer := s.observer
+	s.observerMu.RUnlock()
+	if observer != nil {
+		observer(append([]byte(nil), data...))
+	}
 }
 
 type dataChannelMessage struct {
@@ -159,6 +205,9 @@ type dataChannelBridge struct {
 	downstream   *webrtc.DataChannel
 	upstreamMu   sync.Mutex
 	upstream     *webrtc.DataChannel
+
+	observeMu sync.RWMutex
+	observe   func([]byte)
 }
 
 // New creates a Pion based relay. A nil logger discards logs.
@@ -265,11 +314,9 @@ func (r *PionRelay) NewSession(ctx context.Context, clientOffer string, route Ro
 	if err := ctx.Err(); err != nil {
 		return nil, "", err
 	}
-	proxyDialer, err := buildProxyDialer(route.ProxyURL)
-	if err != nil {
+	if _, err := buildProxyDialer(route.ProxyURL); err != nil {
 		return nil, "", fmt.Errorf("configure relay remote TCP proxy: %w", err)
 	}
-	proxied := proxyDialer != nil
 	if !r.limiter.acquire() {
 		return nil, "", ErrCapacity
 	}
@@ -279,37 +326,23 @@ func (r *PionRelay) NewSession(ctx context.Context, clientOffer string, route Ro
 		releaseSlot()
 		return nil, "", fmt.Errorf("create peer A: %w", err)
 	}
-	upstreamAPI := r.upstreamAPI
-	upstreamConfiguration := r.configuration
-	if proxied {
-		upstreamAPI = r.proxyUpstreamAPI
-		upstreamConfiguration.ICEServers = nil
-	}
-	upstream, err := upstreamAPI.NewPeerConnection(upstreamConfiguration)
-	if err != nil {
-		releaseSlot()
-		if errClose := downstream.Close(); errClose != nil {
-			r.logger.Debug("relay: close peer A after setup error", "error", errClose)
-		}
-		return nil, "", fmt.Errorf("create peer B: %w", err)
-	}
 
 	id := uuid.NewString()
 	session := &pionSession{
-		downstream:  downstream,
-		upstream:    upstream,
-		done:        make(chan struct{}),
-		ready:       make(chan struct{}),
-		id:          id,
-		releaseSlot: releaseSlot,
-		proxyDialer: proxyDialer,
-		proxyScheme: proxyScheme(route.ProxyURL),
-		logger:      r.logger.With("media_session_id", id),
+		downstream:       downstream,
+		done:             make(chan struct{}),
+		id:               id,
+		releaseSlot:      releaseSlot,
+		upstreamAPI:      r.upstreamAPI,
+		proxyUpstreamAPI: r.proxyUpstreamAPI,
+		configuration:    r.configuration,
+		logger:           r.logger.With("media_session_id", id),
 	}
 	session.bridge = newDataChannelBridge(session.done, session.logger, func(err error) {
 		session.fail("data_channel_failed", err)
-	}, session.markUpstreamChannelOpen)
-	session.installStateHandlers()
+	}, session.markActiveChannelOpen)
+	session.bridge.setObserver(session.observeEvent)
+	session.installPeerAHandler()
 	session.logger.Info("relay session created")
 
 	fail := func(format string, err error) (Session, string, error) {
@@ -320,45 +353,25 @@ func (r *PionRelay) NewSession(ctx context.Context, clientOffer string, route Ro
 	if err := downstream.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: clientOffer}); err != nil {
 		return fail("set client offer on peer A", err)
 	}
-
 	toClient, err := webrtc.NewTrackLocalStaticRTP(opusCodec, "audio", "relay")
 	if err != nil {
 		return fail("create peer A audio track", err)
 	}
+	session.toClient = toClient
 	downstreamSender, err := downstream.AddTrack(toClient)
 	if err != nil {
 		return fail("add peer A audio track", err)
 	}
 	go session.drainRTCP("peer-a", downstreamSender)
-
-	toUpstream, err := webrtc.NewTrackLocalStaticRTP(opusCodec, "audio", "relay")
-	if err != nil {
-		return fail("create peer B audio track", err)
-	}
-	upstreamSender, err := upstream.AddTrack(toUpstream)
-	if err != nil {
-		return fail("add peer B audio track", err)
-	}
-	go session.drainRTCP("peer-b", upstreamSender)
-
 	downstream.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		if !strings.EqualFold(track.Codec().MimeType, webrtc.MimeTypeOpus) {
 			return
 		}
-		go session.relayRTP("a-to-b", track, toUpstream)
-	})
-	upstream.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
-		if !strings.EqualFold(track.Codec().MimeType, webrtc.MimeTypeOpus) {
-			return
-		}
-		go session.relayRTP("b-to-a", track, toClient)
+		go session.relayClientRTP(track)
 	})
 	// The web client and /realtime/wm both use a pre-negotiated oai-events
 	// channel (negotiated, id 0), so neither peer ever sees OnDataChannel for it.
-	negotiated := true
-	channelID := uint16(0)
-	channelOptions := &webrtc.DataChannelInit{Negotiated: &negotiated, ID: &channelID}
-	clientChannel, err := downstream.CreateDataChannel(realtimeDataChannelLabel, channelOptions)
+	clientChannel, err := downstream.CreateDataChannel(realtimeDataChannelLabel, eventsChannelOptions())
 	if err != nil {
 		return fail("create peer A DataChannel", err)
 	}
@@ -368,36 +381,104 @@ func (r *PionRelay) NewSession(ctx context.Context, clientOffer string, route Ro
 			session.logger.Debug("relay: close unsupported peer A DataChannel", "error", err)
 		}
 	})
-	upstream.OnDataChannel(func(channel *webrtc.DataChannel) {
+
+	first, offer, err := session.buildLeg(ctx, route)
+	if err != nil {
+		return fail("build upstream leg", err)
+	}
+	session.legMu.Lock()
+	session.active = first
+	session.legMu.Unlock()
+	session.bridge.attachUpstream(first.channel)
+	return session, offer, nil
+}
+
+func eventsChannelOptions() *webrtc.DataChannelInit {
+	negotiated := true
+	channelID := uint16(0)
+	return &webrtc.DataChannelInit{Negotiated: &negotiated, ID: &channelID}
+}
+
+// buildLeg creates peer B, its audio track and DataChannel, and the offer for
+// the upstream service. It does not attach the leg to the session.
+func (s *pionSession) buildLeg(ctx context.Context, route Route) (*leg, string, error) {
+	dialer, err := buildProxyDialer(route.ProxyURL)
+	if err != nil {
+		return nil, "", fmt.Errorf("configure relay remote TCP proxy: %w", err)
+	}
+	api, configuration := s.upstreamAPI, s.configuration
+	if dialer != nil {
+		api = s.proxyUpstreamAPI
+		configuration.ICEServers = nil
+	}
+	pc, err := api.NewPeerConnection(configuration)
+	if err != nil {
+		return nil, "", fmt.Errorf("create peer B: %w", err)
+	}
+	s.legMu.Lock()
+	s.legSeq++
+	name := fmt.Sprintf("peer-b%d", s.legSeq)
+	seq := s.legSeq
+	s.legMu.Unlock()
+	l := &leg{
+		name:        name,
+		pc:          pc,
+		proxyDialer: dialer,
+		proxyScheme: proxyScheme(route.ProxyURL),
+		ready:       make(chan struct{}),
+		closed:      make(chan struct{}),
+	}
+	failLeg := func(msg string, err error) (*leg, string, error) {
+		_ = s.closeLegPeer(l, "setup_failed")
+		return nil, "", fmt.Errorf("%s: %w", msg, err)
+	}
+	toUpstream, err := webrtc.NewTrackLocalStaticRTP(opusCodec, "audio", "relay")
+	if err != nil {
+		return failLeg("create peer B audio track", err)
+	}
+	l.toUpstream = toUpstream
+	sender, err := pc.AddTrack(toUpstream)
+	if err != nil {
+		return failLeg("add peer B audio track", err)
+	}
+	go s.drainRTCP(name, sender)
+	pc.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
+		if !strings.EqualFold(track.Codec().MimeType, webrtc.MimeTypeOpus) {
+			return
+		}
+		go s.relayUpstreamRTP(l, seq, track)
+	})
+	pc.OnDataChannel(func(channel *webrtc.DataChannel) {
 		if err := channel.Close(); err != nil {
-			session.logger.Debug("relay: close unsupported peer B DataChannel", "error", err)
+			s.logger.Debug("relay: close unsupported peer B DataChannel", "leg", name, "error", err)
 		}
 	})
-	upstreamChannel, err := upstream.CreateDataChannel(realtimeDataChannelLabel, channelOptions)
+	channel, err := pc.CreateDataChannel(realtimeDataChannelLabel, eventsChannelOptions())
 	if err != nil {
-		return fail("create peer B DataChannel", err)
+		return failLeg("create peer B DataChannel", err)
 	}
-	session.bridge.attachUpstream(upstreamChannel)
+	l.channel = channel
+	s.installLegHandlers(l)
 
-	gatherComplete := webrtc.GatheringCompletePromise(upstream)
-	offer, err := upstream.CreateOffer(nil)
+	gatherComplete := webrtc.GatheringCompletePromise(pc)
+	offer, err := pc.CreateOffer(nil)
 	if err != nil {
-		return fail("create upstream offer", err)
+		return failLeg("create upstream offer", err)
 	}
-	if err := upstream.SetLocalDescription(offer); err != nil {
-		return fail("set upstream offer", err)
+	if err := pc.SetLocalDescription(offer); err != nil {
+		return failLeg("set upstream offer", err)
 	}
 	select {
 	case <-gatherComplete:
 	case <-ctx.Done():
-		return fail("gather upstream candidates", ctx.Err())
+		return failLeg("gather upstream candidates", ctx.Err())
 	}
-	localDescription := upstream.LocalDescription()
-	if localDescription == nil || strings.TrimSpace(localDescription.SDP) == "" {
-		return fail("upstream offer", errors.New("empty"))
+	local := pc.LocalDescription()
+	if local == nil || strings.TrimSpace(local.SDP) == "" {
+		return failLeg("upstream offer", errors.New("empty"))
 	}
-	session.localOffer = localDescription.SDP
-	return session, localDescription.SDP, nil
+	l.localOffer = local.SDP
+	return l, local.SDP, nil
 }
 
 // ErrCapacity is returned by NewSession when MaxSessions sessions are active.
@@ -405,36 +486,30 @@ var ErrCapacity = errors.New("relay capacity exhausted")
 
 func (s *pionSession) ID() string { return s.id }
 
-func (s *pionSession) Ready() <-chan struct{} { return s.ready }
+func (s *pionSession) activeLeg() *leg {
+	s.legMu.Lock()
+	defer s.legMu.Unlock()
+	return s.active
+}
+
+// Ready is closed once the first leg is connected and its oai-events channel is open.
+func (s *pionSession) Ready() <-chan struct{} {
+	if l := s.activeLeg(); l != nil {
+		return l.ready
+	}
+	return nil
+}
 
 func (s *pionSession) AcceptUpstreamAnswer(ctx context.Context, upstreamAnswer string) (string, error) {
-	if s == nil || s.upstream == nil || s.downstream == nil {
+	if s == nil || s.downstream == nil {
 		return "", errors.New("relay session unavailable")
 	}
-	answerToApply := upstreamAnswer
-	if s.proxyDialer != nil {
-		rewritten, tunnels, err := prepareProxiedUpstreamAnswer(upstreamAnswer, s.localOffer, s.proxyDialer, s.logger)
-		if err != nil {
-			return "", err
-		}
-		for _, tunnel := range tunnels {
-			tunnel.setForwardingStartedHandler(s.logForwardingStarted)
-		}
-		if !s.installCandidateTunnels(tunnels) {
-			errClosed := errors.New("relay session closed while configuring TCP proxy")
-			if errClose := closeCandidateTunnels(tunnels); errClose != nil {
-				return "", errors.Join(errClosed, fmt.Errorf("close TCP candidate tunnels: %w", errClose))
-			}
-			return "", errClosed
-		}
-		answerToApply = rewritten
+	l := s.activeLeg()
+	if l == nil {
+		return "", errors.New("relay session has no upstream leg")
 	}
-	if err := s.upstream.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: answerToApply}); err != nil {
-		errSet := fmt.Errorf("set upstream answer on peer B: %w", err)
-		if errClose := s.closeCandidateTunnels(); errClose != nil {
-			return "", errors.Join(errSet, fmt.Errorf("close TCP candidate tunnels: %w", errClose))
-		}
-		return "", errSet
+	if err := s.applyLegAnswer(l, upstreamAnswer); err != nil {
+		return "", err
 	}
 	gatherComplete := webrtc.GatheringCompletePromise(s.downstream)
 	answer, err := s.downstream.CreateAnswer(nil)
@@ -456,59 +531,100 @@ func (s *pionSession) AcceptUpstreamAnswer(ctx context.Context, upstreamAnswer s
 	return localDescription.SDP, nil
 }
 
-func (s *pionSession) installCandidateTunnels(tunnels []*tcpCandidateTunnel) bool {
-	s.tunnelsMu.Lock()
-	defer s.tunnelsMu.Unlock()
+// applyLegAnswer rewrites the answer for a proxied leg and sets it on peer B.
+func (s *pionSession) applyLegAnswer(l *leg, upstreamAnswer string) error {
+	answerToApply := upstreamAnswer
+	if l.proxyDialer != nil {
+		rewritten, tunnels, err := prepareProxiedUpstreamAnswer(upstreamAnswer, l.localOffer, l.proxyDialer, s.logger)
+		if err != nil {
+			return err
+		}
+		for _, tunnel := range tunnels {
+			tunnel.setForwardingStartedHandler(func() { s.logForwardingStarted(l) })
+		}
+		if !s.installCandidateTunnels(l, tunnels) {
+			errClosed := errors.New("relay leg closed while configuring TCP proxy")
+			if errClose := closeCandidateTunnels(tunnels); errClose != nil {
+				return errors.Join(errClosed, fmt.Errorf("close TCP candidate tunnels: %w", errClose))
+			}
+			return errClosed
+		}
+		answerToApply = rewritten
+	}
+	if err := l.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: answerToApply}); err != nil {
+		errSet := fmt.Errorf("set upstream answer on %s: %w", l.name, err)
+		if errClose := closeLegTunnels(l); errClose != nil {
+			return errors.Join(errSet, fmt.Errorf("close TCP candidate tunnels: %w", errClose))
+		}
+		return errSet
+	}
+	return nil
+}
+
+func (s *pionSession) installCandidateTunnels(l *leg, tunnels []*tcpCandidateTunnel) bool {
+	l.tunnelsMu.Lock()
+	defer l.tunnelsMu.Unlock()
 	select {
 	case <-s.done:
 		return false
+	case <-l.closed:
+		return false
 	default:
 	}
-	s.tunnels = tunnels
+	l.tunnels = tunnels
 	return true
 }
 
-func (s *pionSession) closeCandidateTunnels() error {
-	s.tunnelsMu.Lock()
-	tunnels := s.tunnels
-	s.tunnels = nil
-	s.tunnelsMu.Unlock()
+func closeLegTunnels(l *leg) error {
+	l.tunnelsMu.Lock()
+	tunnels := l.tunnels
+	l.tunnels = nil
+	l.tunnelsMu.Unlock()
 	return closeCandidateTunnels(tunnels)
 }
 
-func (s *pionSession) logForwardingStarted() {
-	s.forwardingLogOnce.Do(func() {
-		s.logger.Info("relay remote media forwarding started", "connection", "via "+s.proxyScheme+" proxy")
+func (s *pionSession) logForwardingStarted(l *leg) {
+	l.forwardingLogOnce.Do(func() {
+		s.logger.Info("relay remote media forwarding started", "leg", l.name, "connection", "via "+l.proxyScheme+" proxy")
 	})
 }
 
-func (s *pionSession) markUpstreamChannelOpen() {
-	s.readyMu.Lock()
-	s.upstreamChanOpen = true
-	s.readyMu.Unlock()
-	s.checkReady()
+// markActiveChannelOpen is called when the bridge's upstream destination opens.
+func (s *pionSession) markActiveChannelOpen() {
+	if l := s.activeLeg(); l != nil {
+		s.markChannelOpen(l)
+	}
 }
 
-func (s *pionSession) markUpstreamConnected() {
-	s.readyMu.Lock()
-	s.upstreamUp = true
-	s.readyMu.Unlock()
-	s.checkReady()
+func (s *pionSession) markChannelOpen(l *leg) {
+	l.readyMu.Lock()
+	l.chanOpen = true
+	l.readyMu.Unlock()
+	s.checkLegReady(l)
 }
 
-func (s *pionSession) checkReady() {
-	s.readyMu.Lock()
-	ok := s.upstreamUp && s.upstreamChanOpen
-	s.readyMu.Unlock()
+func (s *pionSession) markLegConnected(l *leg) {
+	l.readyMu.Lock()
+	l.up = true
+	l.readyMu.Unlock()
+	s.checkLegReady(l)
+}
+
+func (s *pionSession) checkLegReady(l *leg) {
+	l.readyMu.Lock()
+	ok := l.up && l.chanOpen
+	l.readyMu.Unlock()
 	if !ok {
 		return
 	}
 	select {
 	case <-s.done:
 		return
+	case <-l.closed:
+		return
 	default:
 	}
-	s.readyOnce.Do(func() { close(s.ready) })
+	l.readyOnce.Do(func() { close(l.ready) })
 }
 
 // SetCloseHandler registers the close handler. It fires at most once; if the
@@ -536,11 +652,34 @@ func (s *pionSession) CloseWithReason(reason string) error {
 		s.logger.Info("relay session closing", "reason", reason)
 		close(s.done)
 
+		s.legMu.Lock()
+		active, pending := s.active, s.pending
+		s.pending = nil
+		s.legMu.Unlock()
+
 		result := Termination{SessionID: s.id, Reason: reason}
 		result.DataChannels = componentResult(s.bridge.close())
-		result.Tunnels = componentResult(s.closeCandidateTunnels())
+		// A pending swap leg is part of this session: any error closing it
+		// must keep the session's termination unclean.
+		var tunnelErrs, peerBErrs []error
+		for _, l := range []*leg{pending, active} {
+			if l == nil {
+				continue
+			}
+			res := s.closeLeg(l, reason)
+			if res.Tunnels.Err != nil {
+				tunnelErrs = append(tunnelErrs, res.Tunnels.Err)
+			}
+			if res.PeerB.Err != nil {
+				peerBErrs = append(peerBErrs, res.PeerB.Err)
+			}
+			if res.DataChannels.Err != nil {
+				result.DataChannels = ComponentResult{Err: errors.Join(result.DataChannels.Err, res.DataChannels.Err)}
+			}
+		}
+		result.Tunnels = componentResult(errors.Join(tunnelErrs...))
 		result.PeerA = componentResult(s.closePeerConnection("peer-a", s.downstream))
-		result.PeerB = componentResult(s.closePeerConnection("peer-b", s.upstream))
+		result.PeerB = componentResult(errors.Join(peerBErrs...))
 		result.ClosedAt = time.Now()
 		if s.releaseSlot != nil {
 			s.releaseSlot()
@@ -580,6 +719,32 @@ func (s *pionSession) CloseWithReason(reason string) error {
 	return s.closeErr
 }
 
+// closeLeg closes one upstream leg exactly once and records how it closed. Its
+// DataChannel is closed here only when it is not the bridge's active channel;
+// the bridge closes its own channels.
+func (s *pionSession) closeLeg(l *leg, reason string) LegTermination {
+	l.closeOnce.Do(func() {
+		close(l.closed)
+		res := LegTermination{Reason: reason}
+		res.Tunnels = componentResult(closeLegTunnels(l))
+		var chErr error
+		if l.channel != nil && !s.bridge.owns(l.channel) {
+			chErr = l.channel.Close()
+		}
+		res.DataChannels = componentResult(chErr)
+		res.PeerB = componentResult(s.closePeerConnection(l.name, l.pc))
+		res.ClosedAt = time.Now()
+		l.closeRes = res
+	})
+	<-l.closed
+	return l.closeRes
+}
+
+// closeLegPeer closes a leg that failed during setup.
+func (s *pionSession) closeLegPeer(l *leg, reason string) error {
+	return s.closeLeg(l, reason).PeerB.Err
+}
+
 func componentResult(err error) ComponentResult {
 	return ComponentResult{Closed: err == nil, Err: err}
 }
@@ -606,39 +771,78 @@ func (s *pionSession) closePeerConnection(peer string, connection *webrtc.PeerCo
 	return nil
 }
 
-func (s *pionSession) installStateHandlers() {
-	handle := func(peer, reasonPrefix string) func(webrtc.PeerConnectionState) {
-		return func(state webrtc.PeerConnectionState) {
-			logger := s.logger.With("peer", peer, "state", state.String())
-			switch state {
-			case webrtc.PeerConnectionStateConnecting:
-				logger.Info("relay peer connecting")
-			case webrtc.PeerConnectionStateConnected:
-				logger.Info("relay peer connected")
-				if peer == "peer-b" {
-					s.logForwardingStarted()
-					s.markUpstreamConnected()
-				}
-			case webrtc.PeerConnectionStateDisconnected:
-				logger.Warn("relay peer disconnected")
-			case webrtc.PeerConnectionStateFailed:
-				logger.Warn("relay peer failed")
-				go s.fail(reasonPrefix+"_failed", fmt.Errorf("%s failed", peer))
-			case webrtc.PeerConnectionStateClosed:
-				select {
-				case <-s.done:
-					return
-				default:
-					logger.Info("relay peer closed by remote")
-					go s.fail(reasonPrefix+"_closed", fmt.Errorf("%s closed", peer))
-				}
+func (s *pionSession) installPeerAHandler() {
+	s.downstream.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		logger := s.logger.With("peer", "peer-a", "state", state.String())
+		switch state {
+		case webrtc.PeerConnectionStateConnecting:
+			logger.Info("relay peer connecting")
+		case webrtc.PeerConnectionStateConnected:
+			logger.Info("relay peer connected")
+		case webrtc.PeerConnectionStateDisconnected:
+			logger.Warn("relay peer disconnected")
+		case webrtc.PeerConnectionStateFailed:
+			logger.Warn("relay peer failed")
+			go s.fail("peer_a_failed", errors.New("peer-a failed"))
+		case webrtc.PeerConnectionStateClosed:
+			select {
+			case <-s.done:
+				return
 			default:
-				logger.Debug("relay peer state changed")
+				logger.Info("relay peer closed by remote")
+				go s.fail("peer_a_closed", errors.New("peer-a closed"))
 			}
+		default:
+			logger.Debug("relay peer state changed")
 		}
+	})
+}
+
+// installLegHandlers wires peer B state changes for one leg. A failure of the
+// active leg fails the session; a failure of a pending leg only aborts the swap.
+func (s *pionSession) installLegHandlers(l *leg) {
+	l.pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		logger := s.logger.With("peer", l.name, "state", state.String())
+		switch state {
+		case webrtc.PeerConnectionStateConnecting:
+			logger.Info("relay peer connecting")
+		case webrtc.PeerConnectionStateConnected:
+			logger.Info("relay peer connected")
+			s.logForwardingStarted(l)
+			s.markLegConnected(l)
+		case webrtc.PeerConnectionStateDisconnected:
+			logger.Warn("relay peer disconnected")
+		case webrtc.PeerConnectionStateFailed:
+			logger.Warn("relay peer failed")
+			go s.legEnded(l, "peer_b_failed")
+		case webrtc.PeerConnectionStateClosed:
+			select {
+			case <-s.done:
+				return
+			case <-l.closed:
+				return
+			default:
+				logger.Info("relay peer closed by remote")
+				go s.legEnded(l, "peer_b_closed")
+			}
+		default:
+			logger.Debug("relay peer state changed")
+		}
+	})
+}
+
+// legEnded handles an unexpected end of a leg.
+func (s *pionSession) legEnded(l *leg, reason string) {
+	s.legMu.Lock()
+	isActive := s.active == l
+	isPending := s.pending == l
+	s.legMu.Unlock()
+	switch {
+	case isActive:
+		s.fail(reason, fmt.Errorf("%s ended", l.name))
+	case isPending:
+		_ = s.AbortUpstreamSwap("pending_" + reason)
 	}
-	s.downstream.OnConnectionStateChange(handle("peer-a", "peer_a"))
-	s.upstream.OnConnectionStateChange(handle("peer-b", "peer_b"))
 }
 
 func (s *pionSession) fail(reason string, err error) {
@@ -652,19 +856,47 @@ func (s *pionSession) fail(reason string, err error) {
 	})
 }
 
-func (s *pionSession) relayRTP(name string, source *webrtc.TrackRemote, destination *webrtc.TrackLocalStaticRTP) {
+// relayClientRTP forwards the client's audio to whichever leg is active now.
+func (s *pionSession) relayClientRTP(source *webrtc.TrackRemote) {
 	for {
 		packet, _, err := source.ReadRTP()
 		if err != nil {
 			if !isClosedMediaError(err, s.done) {
-				s.logger.Debug("relay: RTP read stopped", "direction", name, "error", err)
+				s.logger.Debug("relay: RTP read stopped", "direction", "a-to-b", "error", err)
 			}
 			return
 		}
 		normalizeRTPPacket(packet)
-		if err := destination.WriteRTP(packet); err != nil {
+		l := s.activeLeg()
+		if l == nil || l.toUpstream == nil {
+			continue
+		}
+		if err := l.toUpstream.WriteRTP(packet); err != nil && !isClosedMediaError(err, s.done) {
+			s.logger.Debug("relay: RTP write failed", "direction", "a-to-b", "leg", l.name, "error", err)
+		}
+	}
+}
+
+// relayUpstreamRTP forwards one leg's audio to the client, but only while that
+// leg is the active one. Audio from a pending or retired leg is dropped, and the
+// client-facing stream is re-based so a leg change does not break it.
+func (s *pionSession) relayUpstreamRTP(l *leg, source int, track *webrtc.TrackRemote) {
+	for {
+		packet, _, err := track.ReadRTP()
+		if err != nil {
 			if !isClosedMediaError(err, s.done) {
-				s.logger.Debug("relay: RTP write stopped", "direction", name, "error", err)
+				s.logger.Debug("relay: RTP read stopped", "direction", "b-to-a", "leg", l.name, "error", err)
+			}
+			return
+		}
+		if s.activeLeg() != l {
+			continue
+		}
+		normalizeRTPPacket(packet)
+		s.toClientRewrite.rewrite(source, packet)
+		if err := s.toClient.WriteRTP(packet); err != nil {
+			if !isClosedMediaError(err, s.done) {
+				s.logger.Debug("relay: RTP write stopped", "direction", "b-to-a", "leg", l.name, "error", err)
 			}
 			return
 		}
@@ -749,7 +981,87 @@ func (b *dataChannelBridge) attachUpstream(channel *webrtc.DataChannel) {
 	b.upstream = channel
 	b.upstreamMu.Unlock()
 	b.downToUp.setDestination(channel)
-	b.bindSource(channel, b.upToDown)
+	b.bindUpstreamSource(channel)
+}
+
+// setObserver installs the upstream-event observer used by bindUpstreamSource.
+func (b *dataChannelBridge) setObserver(observe func([]byte)) {
+	b.observeMu.Lock()
+	b.observe = observe
+	b.observeMu.Unlock()
+}
+
+// owns reports whether channel is the bridge's current upstream channel.
+func (b *dataChannelBridge) owns(channel *webrtc.DataChannel) bool {
+	b.upstreamMu.Lock()
+	defer b.upstreamMu.Unlock()
+	return b.upstream == channel
+}
+
+// current returns the bridge's current upstream channel.
+func (b *dataChannelBridge) current() *webrtc.DataChannel {
+	b.upstreamMu.Lock()
+	defer b.upstreamMu.Unlock()
+	return b.upstream
+}
+
+// bindUpstreamSource forwards events from channel to the client, but only while
+// channel is still the bridge's current upstream channel. After a swap the
+// retired channel is ignored, and its closing is not an error.
+func (b *dataChannelBridge) bindUpstreamSource(channel *webrtc.DataChannel) {
+	destination := b.upToDown
+	channel.OnMessage(func(message webrtc.DataChannelMessage) {
+		if !b.owns(channel) {
+			return
+		}
+		if len(message.Data) > mediaDataMessageMaxSize {
+			destination.reportError(fmt.Errorf("%s DataChannel message exceeds %d bytes", destination.name, mediaDataMessageMaxSize))
+			return
+		}
+		payload := append([]byte(nil), message.Data...)
+		if message.IsString {
+			b.observeMu.RLock()
+			observe := b.observe
+			b.observeMu.RUnlock()
+			if observe != nil {
+				observe(payload)
+			}
+		}
+		select {
+		case destination.queue <- dataChannelMessage{data: payload, isString: message.IsString}:
+		case <-b.done:
+		}
+	})
+	channel.OnError(func(err error) {
+		if !b.owns(channel) {
+			return
+		}
+		destination.reportError(fmt.Errorf("%s DataChannel error: %w", destination.name, err))
+	})
+	channel.OnClose(func() {
+		select {
+		case <-b.done:
+			return
+		default:
+		}
+		if !b.owns(channel) {
+			return
+		}
+		destination.reportError(fmt.Errorf("%s DataChannel closed", destination.name))
+	})
+}
+
+// swapUpstream makes next the bridge's upstream channel and returns the retired
+// one. Events already queued for the old channel are dropped on the floor by the
+// pipe's destination switch; new client events go to next.
+func (b *dataChannelBridge) swapUpstream(next *webrtc.DataChannel) *webrtc.DataChannel {
+	b.upstreamMu.Lock()
+	old := b.upstream
+	b.upstream = next
+	b.upstreamMu.Unlock()
+	b.downToUp.replaceDestination(next)
+	b.bindUpstreamSource(next)
+	return old
 }
 
 func (b *dataChannelBridge) bindSource(channel *webrtc.DataChannel, destination *dataChannelPipe) {
@@ -803,6 +1115,20 @@ func (b *dataChannelBridge) close() error {
 		b.closeErr = errors.Join(errs...)
 	})
 	return b.closeErr
+}
+
+// replaceDestination points the pipe at a new, already-open channel.
+func (p *dataChannelPipe) replaceDestination(channel *webrtc.DataChannel) {
+	p.mu.Lock()
+	p.destination = channel
+	p.mu.Unlock()
+	channel.SetBufferedAmountLowThreshold(mediaDataBufferedMaxSize / 2)
+	channel.OnBufferedAmountLow(func() {
+		select {
+		case p.writable <- struct{}{}:
+		default:
+		}
+	})
 }
 
 func (p *dataChannelPipe) setDestination(channel *webrtc.DataChannel) {
