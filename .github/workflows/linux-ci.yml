@@ -3,7 +3,27 @@ name: Linux CI
 on:
   push:
     branches: [main, 'integration/**']
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'static/**'
+      - 'Dockerfile'
+      - 'docker-compose.yml'
+      - '.github/workflows/**'
   pull_request:
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'static/**'
+      - 'Dockerfile'
+      - 'docker-compose.yml'
+      - '.github/workflows/**'
   workflow_dispatch:
 
 permissions:
@@ -21,7 +41,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        check: [tests, race, build, bridge-regressions]
+        check: [tests, race, build]
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -31,7 +51,8 @@ jobs:
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
-          cache: false
+          cache: true
+          cache-dependency-path: go.sum
       - name: Verify
         shell: bash
         env:
@@ -45,9 +66,8 @@ jobs:
           case "$CHECK" in
             tests) command=(go test -count=1 -timeout=10m ./...) ;;
             race) command=(go test -race -count=1 -timeout=15m ./...) ;;
-            build) command=(go build -o "$RUNNER_TEMP/voice-server" ./cmd/server) ;;
-            bridge-regressions)
-              command=(go test -count=1 -timeout=10m -run 'Test(Bridge|DirectTransports|CurlAccount|CurlEmpty|AccountDevice|SessionResumePrefersStableAccount)' ./internal/accounts ./internal/api ./internal/auth ./internal/httpclient ./internal/voice)
+            build)
+              command=(bash -c 'go build -buildvcs=false -o "$0" ./cmd/server && go build -buildvcs=false -o "$1" ./cmd/migrate-accounts' "$RUNNER_TEMP/voice-server" "$RUNNER_TEMP/migrate-accounts")
               ;;
             *) exit 2 ;;
           esac
@@ -63,6 +83,47 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: voice-${{ matrix.check }}-failure
+          path: ${{ runner.temp }}/voice-diagnostics/*.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  bridge-regressions:
+    name: bridge-regressions
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - name: Verify bridge regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_log="$(mktemp /tmp/voice-ci.XXXXXX.log)"
+          diagnostics="$RUNNER_TEMP/voice-diagnostics"
+          mkdir -p "$diagnostics"
+          trap 'rm -f "$task_log"' EXIT
+          command=(go test -count=1 -timeout=10m -run 'Test(Bridge|DirectTransports|CurlAccount|CurlEmpty|AccountDevice|SessionResumePrefersStableAccount)' ./internal/accounts ./internal/api ./internal/auth ./internal/httpclient ./internal/voice)
+          if "${command[@]}" >"$task_log" 2>&1; then
+            echo "bridge-regressions passed"
+          else
+            tail -c 65536 "$task_log" | tail -n 160 > "$diagnostics/bridge-regressions.log"
+            cat "$diagnostics/bridge-regressions.log"
+            exit 1
+          fi
+      - name: Retain failure excerpt
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: voice-bridge-regressions-failure
           path: ${{ runner.temp }}/voice-diagnostics/*.log
           if-no-files-found: ignore
           retention-days: 7
