@@ -1553,8 +1553,14 @@ func (s *Service) ReleaseAccountLease(owner, leaseID string, generation int64, s
 	if err != nil || ev.EvidenceID != row.EvidenceID {
 		return nil, errNoTerminationEvidence("termination evidence row is missing")
 	}
+	// After a rebuild onto another account the call ends on that account, not
+	// on the one it started with.
+	releasedAccount := row.AccountID
+	if row.CurrentAccountID > 0 {
+		releasedAccount = row.CurrentAccountID
+	}
 	return &AccountLeaseRelease{
-		AccountID:         fmt.Sprintf("account-%d", row.AccountID),
+		AccountID:         fmt.Sprintf("account-%d", releasedAccount),
 		LeaseID:           row.LeaseID,
 		Generation:        row.LeaseGeneration,
 		SessionID:         row.VoiceSessionID,

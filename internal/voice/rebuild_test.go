@@ -2,6 +2,7 @@ package voice
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -144,6 +145,13 @@ func TestRebuildAccountChangeDropsConversationAndHandsOffText(t *testing.T) {
 	row, _ := r.ev.Get(r.res.VoiceSessionID, 1)
 	if row.CurrentAccountID == 0 || row.CurrentAccountID == first || row.RetiredLegs != 1 {
 		t.Fatalf("evidence must follow the account: %+v", row)
+	}
+	rel, err := r.release(r.res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf("account-%d", row.CurrentAccountID); rel.AccountID != want {
+		t.Fatalf("release must report the account the call ended on: got %q want %q", rel.AccountID, want)
 	}
 }
 
