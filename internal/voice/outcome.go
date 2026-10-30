@@ -28,7 +28,7 @@ func classifyUpstream(status int, contentType, body, retryAfter string, err erro
 			Kind:       accounts.OutcomeRateLimited,
 			RetryAfter: accounts.ParseRetryAfter(retryAfter, now),
 		}, true
-	case status >= 500, html && status >= 400:
+	case status >= 500, html:
 		return accounts.Outcome{Kind: accounts.OutcomeTransient}, true
 	case status == http.StatusUnauthorized:
 		return accounts.Outcome{Kind: accounts.OutcomeUnauthorized}, true
