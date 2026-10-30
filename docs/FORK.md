@@ -3,7 +3,8 @@
 This fork preserves the upstream ChatGPT Web Voice gateway and imports the
 llm-auth-bridge `bridge-v1` compatibility API. Credential synchronization is
 specified in [BRIDGE_V1.md](BRIDGE_V1.md). Zoe session lease support is a separate
-integration change and is not supplied by this import.
+integration change and is not supplied by this import. The plan for gateway media
+termination, lease evidence, and account rotation is in [RELAY_PLAN.md](RELAY_PLAN.md).
 
 ## Exact imported sources
 
