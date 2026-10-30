@@ -485,7 +485,21 @@ func TestWM401RetriesNextAccount(t *testing.T) {
 	}
 }
 
-func TestWM429IsOpaque502AndKeepsAccount(t *testing.T) {
+func assertCoolingNotInvalid(t *testing.T, f *wmFixture, label string, minCooldownUntil int64) {
+	t.Helper()
+	acct, err := f.pool.Get(1)
+	if err != nil {
+		t.Fatalf("%s: %v", label, err)
+	}
+	if acct.Disabled || acct.Status == "invalid" {
+		t.Fatalf("%s must not disable the account: %+v", label, acct)
+	}
+	if acct.CooldownUntil <= time.Now().Unix() || acct.CooldownUntil < minCooldownUntil {
+		t.Fatalf("%s: expected cooldown, got until=%d", label, acct.CooldownUntil)
+	}
+}
+
+func TestWM429CoolsDownAccount(t *testing.T) {
 	f := newWMFixture(t, []string{fixtureTokenA}, 3, func(w http.ResponseWriter, _ *http.Request, _ wmCapture) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Retry-After", "37")
@@ -494,8 +508,8 @@ func TestWM429IsOpaque502AndKeepsAccount(t *testing.T) {
 	})
 	_, err := f.svc.CreateSession(CreateSessionRequest{Owner: "api_key:1", OfferSDP: readTestdata(t, "wm_offer.sdp")})
 	se := serviceError(t, err)
-	// Current behavior: no special 429 handling, Retry-After is dropped,
-	// no retry on another account, account stays in rotation.
+	// 429 is still an opaque 502 with no retry, but the account now cools down
+	// for Retry-After instead of staying in rotation.
 	if se.StatusCode != http.StatusBadGateway || se.Message != "realtime/wm failed status=429" {
 		t.Fatalf("unexpected error: %+v", se)
 	}
@@ -505,12 +519,10 @@ func TestWM429IsOpaque502AndKeepsAccount(t *testing.T) {
 	if n := len(f.requests()); n != 1 {
 		t.Fatalf("429 must not be retried, got %d requests", n)
 	}
-	if _, _, perr := f.pool.Pick("", nil); perr != nil {
-		t.Fatalf("429 must not disable the account: %v", perr)
-	}
+	assertCoolingNotInvalid(t, f, "429", time.Now().Unix()+30)
 }
 
-func TestWM5xxIs502(t *testing.T) {
+func TestWM5xxIs502AndCoolsDownAccount(t *testing.T) {
 	for _, status := range []int{http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable} {
 		f := newWMFixture(t, []string{fixtureTokenA}, 2, func(w http.ResponseWriter, _ *http.Request, _ wmCapture) {
 			w.Header().Set("Content-Type", "application/json")
@@ -525,9 +537,7 @@ func TestWM5xxIs502(t *testing.T) {
 		if n := len(f.requests()); n != 1 {
 			t.Fatalf("status %d: 5xx must not be retried, got %d requests", status, n)
 		}
-		if _, _, perr := f.pool.Pick("", nil); perr != nil {
-			t.Fatalf("status %d: account must stay in rotation: %v", status, perr)
-		}
+		assertCoolingNotInvalid(t, f, fmt.Sprintf("status %d", status), 0)
 	}
 }
 
@@ -548,9 +558,7 @@ func TestWMCloudflareChallengeClassification(t *testing.T) {
 		if n := len(f.requests()); n != 1 {
 			t.Fatalf("status %d: challenge must not be retried, got %d requests", status, n)
 		}
-		if _, _, perr := f.pool.Pick("", nil); perr != nil {
-			t.Fatalf("status %d: challenge must not disable the account: %v", status, perr)
-		}
+		assertCoolingNotInvalid(t, f, fmt.Sprintf("status %d challenge", status), 0)
 	}
 }
 
