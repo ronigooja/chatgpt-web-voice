@@ -17,6 +17,12 @@ type Account struct {
 	LastUsedAt  string  `json:"last_used_at,omitempty"`
 	CreatedAt   string  `json:"created_at,omitempty"`
 	UpdatedAt   string  `json:"updated_at,omitempty"`
+	// Health state. Times are unix milliseconds (ExpiresAt is unix seconds).
+	CooldownUntil     int64 `json:"-"`
+	FailureCount      int   `json:"-"`
+	UnauthorizedCount int   `json:"-"`
+	ExpiresAt         int64 `json:"-"`
+	OutcomeAt         int64 `json:"-"`
 }
 
 // AccountUpdate contains mutable account fields. Nil secret pointers preserve

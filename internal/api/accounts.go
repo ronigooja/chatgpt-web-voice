@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/accounts"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/logging"
@@ -31,6 +32,9 @@ type accountView struct {
 	TokenExp           int64   `json:"token_exp,omitempty"`
 	ExpiresInSeconds   *int64  `json:"expires_in_seconds,omitempty"`
 	TokenExpired       bool    `json:"token_expired,omitempty"`
+	CooldownUntil      int64   `json:"cooldown_until,omitempty"`
+	CoolingDown        bool    `json:"cooling_down,omitempty"`
+	FailureCount       int     `json:"failure_count,omitempty"`
 }
 
 type accountWriteRequest struct {
@@ -227,6 +231,11 @@ func newAccountView(account accounts.Account) accountView {
 		CreatedAt:          account.CreatedAt,
 		UpdatedAt:          account.UpdatedAt,
 	}
+	if account.CooldownUntil > time.Now().UnixMilli() {
+		view.CoolingDown = true
+		view.CooldownUntil = account.CooldownUntil / 1000
+	}
+	view.FailureCount = account.FailureCount
 	if expiry, err := tokenutil.ParseAccessTokenExpiry(account.AccessToken); err == nil {
 		view.TokenHasExp = expiry.HasExp
 		view.TokenExp = expiry.Exp

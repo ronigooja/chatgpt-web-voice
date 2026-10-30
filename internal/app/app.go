@@ -62,6 +62,13 @@ func Run() error {
 	}
 
 	accountPool := accounts.NewPoolFromDB(db).WithBox(tokenBox)
+	accountPool.WithHealth(accounts.HealthConfig{
+		ExpiryGuard:          time.Duration(cfg.AccountExpiryGuardSeconds) * time.Second,
+		BackoffBase:          time.Duration(cfg.AccountBackoffBaseSeconds) * time.Second,
+		BackoffMax:           time.Duration(cfg.AccountBackoffMaxSeconds) * time.Second,
+		TransientCooldown:    time.Duration(cfg.AccountTransientCooldownSeconds) * time.Second,
+		UnauthorizedCooldown: time.Duration(cfg.AccountUnauthorizedCooldownSeconds) * time.Second,
+	})
 	rewritten, err := accountPool.SealStoredTokens()
 	if err != nil {
 		return fmt.Errorf("seal stored access tokens failed: %w", err)

@@ -207,3 +207,44 @@ func TestValidateProductionForbidsSkipSSLVerify(t *testing.T) {
 		t.Fatalf("expected production config without skip-verify to pass: %v", err)
 	}
 }
+
+func TestLoadAccountHealthDefaultsAndOverrides(t *testing.T) {
+	for _, name := range []string{
+		"VOICE_ACCOUNT_EXPIRY_GUARD_SECONDS", "VOICE_ACCOUNT_BACKOFF_BASE_SECONDS",
+		"VOICE_ACCOUNT_BACKOFF_MAX_SECONDS", "VOICE_ACCOUNT_TRANSIENT_COOLDOWN_SECONDS",
+		"VOICE_ACCOUNT_UNAUTHORIZED_COOLDOWN_SECONDS",
+	} {
+		t.Setenv(name, "")
+	}
+	cfg := Load()
+	if cfg.AccountExpiryGuardSeconds != 300 || cfg.AccountBackoffBaseSeconds != 30 ||
+		cfg.AccountBackoffMaxSeconds != 1800 || cfg.AccountTransientCooldownSeconds != 15 ||
+		cfg.AccountUnauthorizedCooldownSeconds != 60 {
+		t.Fatalf("unexpected defaults: %+v", cfg)
+	}
+	t.Setenv("VOICE_ACCOUNT_EXPIRY_GUARD_SECONDS", "900")
+	t.Setenv("VOICE_ACCOUNT_BACKOFF_BASE_SECONDS", "bad")
+	if cfg := Load(); cfg.AccountExpiryGuardSeconds != 900 || cfg.AccountBackoffBaseSeconds != 30 {
+		t.Fatalf("override/fallback failed: %+v", cfg)
+	}
+}
+
+func TestValidateRejectsBadAccountHealthSettings(t *testing.T) {
+	t.Setenv("VOICE_AUTH_USERNAME", "admin")
+	t.Setenv("VOICE_AUTH_PASSWORD", "secret")
+	t.Setenv("VOICE_TOKEN_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	cfg := Load()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("baseline config invalid: %v", err)
+	}
+	bad := cfg
+	bad.AccountTransientCooldownSeconds = -1
+	if bad.Validate() == nil {
+		t.Fatal("negative cooldown must fail")
+	}
+	bad = cfg
+	bad.AccountBackoffBaseSeconds, bad.AccountBackoffMaxSeconds = 100, 10
+	if bad.Validate() == nil {
+		t.Fatal("base above max must fail")
+	}
+}

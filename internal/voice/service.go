@@ -454,9 +454,8 @@ func (s *Service) FetchUpstreamTitle(owner, voiceSessionID, conversationID strin
 	}
 	switch {
 	case status == http.StatusUnauthorized:
-		if markErr := s.pool.MarkInvalid(accessToken); markErr != nil {
-			s.logger.Error("account_mark_invalid_failed", "account_id", accountID, "error", markErr)
-		}
+		health := s.reportOutcome(accessToken, time.Time{}, status, contentType, body, "", nil)
+		s.logger.Warn("upstream_title_unauthorized", "account_id", accountID, "marked_invalid", health.Invalidated)
 		return nil, &ServiceError{Message: "account token invalid", StatusCode: 401, Detail: truncate(body, 300)}
 	case status == http.StatusNotFound:
 		return nil, &ServiceError{Message: "upstream conversation not found", StatusCode: 404}
@@ -733,6 +732,11 @@ func (s *Service) authHeaders(token, deviceID string, extra map[string]string) h
 }
 
 func (s *Service) postWMOnce(token, offerSDP, sessionJSON, proxy, deviceID string) (status int, contentType, text string, err error) {
+	status, contentType, text, _, err = s.postWMResponse(token, offerSDP, sessionJSON, proxy, deviceID)
+	return status, contentType, text, err
+}
+
+func (s *Service) postWMResponse(token, offerSDP, sessionJSON, proxy, deviceID string) (status int, contentType, text, retryAfter string, err error) {
 	client := httpclient.New(s.httpOptions, proxy)
 	body, ct := encodeMultipart([][2]string{
 		{"sdp", offerSDP},
@@ -740,17 +744,17 @@ func (s *Service) postWMOnce(token, offerSDP, sessionJSON, proxy, deviceID strin
 	})
 	req, err := http.NewRequest(http.MethodPost, firstNonEmpty(s.realtimeURL, wmURL), bytes.NewReader(body))
 	if err != nil {
-		return 0, "", "", err
+		return 0, "", "", "", err
 	}
 	req.Header = s.authHeaders(token, deviceID, map[string]string{"content-type": ct})
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, "", "", err
+		return 0, "", "", "", err
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-	return resp.StatusCode, resp.Header.Get("content-type"), string(raw), nil
+	return resp.StatusCode, resp.Header.Get("content-type"), string(raw), resp.Header.Get("Retry-After"), nil
 }
 
 // ProbeResult is the outcome of a lightweight account liveness check.
@@ -790,7 +794,9 @@ func (s *Service) ProbeAccountToken(accountID int64) (*ProbeResult, error) {
 		}
 	}
 
+	probeStarted := time.Now()
 	status, contentType, body, err := s.getSettingsUserOnce(account.AccessToken, account.Proxy, account.DeviceID)
+	health := s.reportOutcome(account.AccessToken, probeStarted, status, contentType, body, "", err)
 	if err != nil {
 		result.Detail = probeNetworkDetail(err, account.Proxy)
 		s.logger.Warn("account_probe_failed", "account_id", account.ID, "proxy", account.Proxy != "" && account.Proxy != httpclient.ProxyDirect, "error", err)
@@ -800,16 +806,11 @@ func (s *Service) ProbeAccountToken(accountID int64) (*ProbeResult, error) {
 	result.ContentKind = classifyProbeBody(contentType, body)
 
 	switch {
-	case status == http.StatusUnauthorized:
+	case status == http.StatusUnauthorized && result.ContentKind != "html":
 		result.Status = "unauthorized"
 		result.Alive = false
 		result.Detail = truncate(probeDetail(body), 300)
-		if markErr := s.pool.MarkInvalid(account.AccessToken); markErr != nil {
-			s.logger.Error("account_mark_invalid_failed", "account_id", account.ID, "error", markErr)
-			result.Detail = truncate(markErr.Error(), 300)
-		} else {
-			result.MarkedInvalid = true
-		}
+		result.MarkedInvalid = health.Invalidated
 		s.logger.Warn("account_probe_unauthorized", "account_id", account.ID, "status", status)
 	case status == http.StatusOK && result.ContentKind == "json":
 		result.Status = "alive"
@@ -1097,7 +1098,9 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 			proxySource = "account"
 		}
 
-		status, contentType, text, err := s.postWMOnce(token, offerSDP, sessionJSON, explicitProxy, account.DeviceID)
+		wmStarted := time.Now()
+		status, contentType, text, retryAfter, err := s.postWMResponse(token, offerSDP, sessionJSON, explicitProxy, account.DeviceID)
+		health := s.reportOutcome(token, wmStarted, status, contentType, text, retryAfter, err)
 		if err != nil {
 			s.logger.Error("upstream_realtime_request_failed", "account_id", account.ID, "attempt", attempt, "error", err)
 			return nil, &ServiceError{
@@ -1107,14 +1110,11 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 			}
 		}
 
-		if status == 401 {
+		if status == 401 && classifyProbeBody(contentType, text) != "html" {
 			lastStatus = status
 			lastError = "account token invalid"
 			lastDetail = truncate(text, 300)
-			if markErr := s.pool.MarkInvalid(token); markErr != nil {
-				s.logger.Error("account_mark_invalid_failed", "account_id", account.ID, "error", markErr)
-			}
-			s.logger.Warn("upstream_account_rejected", "account_id", account.ID, "upstream_status", status, "attempt", attempt)
+			s.logger.Warn("upstream_account_rejected", "account_id", account.ID, "upstream_status", status, "attempt", attempt, "marked_invalid", health.Invalidated)
 			if bound != nil && token == bound.AccessToken {
 				s.ReleaseSession(owner, req.VoiceSessionID)
 			}
