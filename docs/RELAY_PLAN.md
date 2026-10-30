@@ -1,8 +1,8 @@
 # Gateway media relay and account rotation plan
 
-Status: phases 0 to 4 are implemented and tested locally with loopback peers. Not
-yet exercised: a rebuild against the real upstream, runs longer than about 50
-seconds, and anything over 24 hours. This document applies to work
+Status: phases 0 to 4 are implemented. Rebuilds were run against the real upstream
+for about 6 minutes (see "Live rebuild test"). Not yet exercised: longer runs,
+24 hours, rebuilds over the account proxy path. This document applies to work
 in this fork that changes how voice media is terminated, how account leases are
 released, and how pool accounts are selected for continuous voice.
 
@@ -96,7 +96,8 @@ What this does not establish:
   be either. This must be resolved in phase 0 before any relay code depends on
   it.
 - It did not exercise sustained audio in either direction, barge-in, or any
-  conversation event the gateway reads today (`UpdateSessionContext`).
+  conversation event the gateway reads today (`UpdateSessionContext`). A relayed
+  call also learns both ids from its own events.
 - It did not show that closing peer B ends the upstream session or releases the
   account. Local close success is not remote termination.
 - It ran from one host and one account. TCP candidate handling (the answer
@@ -125,8 +126,41 @@ was structural only. The probe binary and database copy were removed afterwards.
 | Other account, fresh session | Normal |
 | Fresh session, earlier history sent as one user text message | Accepted (`relay_message_processed`); no unprompted speech; later question about the history answered correctly. Without the text, the same question was not answerable |
 
-Still not established: runs longer than about 50 s, a rebuild against the real
-upstream, and upstream release of the account.
+Still not established: upstream release of the account (see "Termination
+evidence").
+
+## Live rebuild test (2026-10-30)
+
+One call, about 6 minutes, in the production container with the real relay, a
+copy of the account database, direct media, rebuild interval 5 minutes, two pool
+accounts (both account proxies `socks5h://`, used for signaling). The test client
+sent synthetic silence and typed text. The test binary was built on a GitHub
+runner. Output was structural plus the assistant's short replies.
+
+| Check | Result |
+|---|---|
+| Same-account rebuild (manual) | Swapped; old leg closed cleanly; assistant answered a question about earlier content |
+| Scheduled rebuild after 5 minutes | Fired on time; swapped; assistant still knew the earlier content |
+| Forced account change with text handoff | Account 1 to 2; swapped; assistant on account 2 answered correctly from the handoff text |
+| Client `oai-events` channel | Stayed open for the whole call |
+| Client audio | About 17,000 packets; sequence never went backward; 18 gaps, largest 8 packets (about 160 ms), near leg switches. Not checked by ear |
+| Release after three rebuilds | `terminated`, reported account is the one the call ended on; 3 retired legs, 0 unclean; all four components closed |
+
+Finding: the gateway relied on the client calling `UpdateSessionContext` to learn
+`conversation_id` and `parent_message_id`. A client that does not report them
+made every rebuild start a new conversation (assistant did not know earlier
+content). The gateway now reads both ids from the active leg's events
+(`internal/voice/upstream_ids.go`, same rule as `static/voice.html`) and keeps
+them in memory. After that change a same-account rebuild resumed correctly with
+no client report.
+
+Account 2 failed signaling while its proxy was `socks5://` (curl error
+`SOCKS5 connection ... (5)`) and worked as `socks5h://`. The cause was not
+isolated: both proxies exit over IPv6, and `socks5h` makes the proxy resolve
+the name. Use `socks5h` for account proxies.
+
+Limits: one run, one short history, 6 minutes, direct media only, no listening
+check, token expiry untested.
 
 ## Termination evidence
 
