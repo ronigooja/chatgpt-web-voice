@@ -35,6 +35,9 @@ type eventLog struct {
 	bytes int
 	textFrames int
 	binaryFrames int
+	rawTypes []string
+	rawTexts []string
+	functionCalls []map[string]string
 }
 
 func (l *eventLog) add(raw []byte) {
@@ -53,6 +56,35 @@ func (l *eventLog) add(raw []byte) {
 		if s := findText(inner); s != "" && len(s) <= 300 { l.texts = append(l.texts, s) }
 	}
 	l.mu.Unlock()
+}
+
+func (l *eventLog) addRaw(data []byte, isString bool) {
+	if !isString { return }
+	var outer struct { Type string `json:"type"`; Data string `json:"data"` }
+	if json.Unmarshal(data, &outer) != nil { return }
+	innerRaw := outer.Data; if innerRaw == "" { innerRaw = string(data) }
+	var inner map[string]any
+	if json.Unmarshal([]byte(innerRaw), &inner) != nil { return }
+	t, _ := inner["type"].(string); if t == "" { t = outer.Type }
+	l.mu.Lock(); l.rawTypes = append(l.rawTypes, t)
+	if isConversationLike(t) { if text := findText(inner); text != "" && len(text) <= 400 { l.rawTexts = append(l.rawTexts, text) } }
+	collectFunctionCalls(inner, &l.functionCalls)
+	if t == "error" || t == "goodbye" { l.unsafe = true }
+	l.mu.Unlock()
+}
+
+func isConversationLike(t string) bool { return strings.Contains(t, "chat") || strings.Contains(t, "conversation") || strings.Contains(t, "transcript") || strings.Contains(t, "function_call") || strings.Contains(t, "response") }
+
+func collectFunctionCalls(v any, out *[]map[string]string) {
+	switch x := v.(type) {
+	case map[string]any:
+		if typ, _ := x["type"].(string); typ == "function_call" || strings.Contains(typ, "function_call") {
+			item := map[string]string{}; for _, k := range []string{"call_id", "id", "name", "arguments"} { if s, ok := x[k].(string); ok { item[k] = s } }; *out = append(*out, item)
+		}
+		for _, y := range x { collectFunctionCalls(y, out) }
+	case []any:
+		for _, y := range x { collectFunctionCalls(y, out) }
+	}
 }
 
 func findText(v any) string {
@@ -117,7 +149,7 @@ func runCall(cfg config.Config, pool *accounts.Pool, rl relay.Relay, clientTools
 	stop := make(chan struct{}); defer close(stop)
 	logEvents := &eventLog{}
 	diagnostics := relay.Diagnostics{
-		OnFrame: func(side string, data []byte, isString bool) { logEvents.mu.Lock(); logEvents.frames++; logEvents.bytes += len(data); if isString { logEvents.textFrames++ } else { logEvents.binaryFrames++ }; n := logEvents.frames; logEvents.mu.Unlock(); if isString { fmt.Printf("raw_frame side=%s kind=text bytes=%d index=%d prefix=%q\n", side, len(data), n, redactFrame(data)) } else { fmt.Printf("raw_frame side=%s kind=binary bytes=%d index=%d\n", side, len(data), n) } },
+		OnFrame: func(side string, data []byte, isString bool) { if side == "upstream" { logEvents.addRaw(data, isString) }; logEvents.mu.Lock(); logEvents.frames++; logEvents.bytes += len(data); if isString { logEvents.textFrames++ } else { logEvents.binaryFrames++ }; n := logEvents.frames; logEvents.mu.Unlock(); if isString { fmt.Printf("raw_frame side=%s kind=text bytes=%d index=%d prefix=%q\n", side, len(data), n, redactFrame(data)) } else { fmt.Printf("raw_frame side=%s kind=binary bytes=%d index=%d\n", side, len(data), n) } },
 		OnState: func(side, layer, state string) { fmt.Printf("peer_state side=%s layer=%s state=%s\n", side, layer, state) },
 		OnChannel: func(side, state string) { fmt.Printf("channel_state side=%s state=%s\n", side, state) },
 	}
@@ -134,8 +166,9 @@ func runCall(cfg config.Config, pool *accounts.Pool, rl relay.Relay, clientTools
 	payloadTypes := audioPayloadTypes(res.AnswerSDP); payloadType := uint8(111); if len(payloadTypes) > 0 { var n int; if _, err := fmt.Sscanf(payloadTypes[0], "%d", &n); err == nil && n >= 0 && n <= 127 { payloadType = uint8(n) } }; go silence(track, payloadType, stop)
 	open := make(chan struct{}); dc.OnOpen(func(){ close(open) }); select { case <-open: case <-time.After(25*time.Second): return 0, fmt.Errorf("client data channel timeout") }
 	time.Sleep(15 * time.Second)
-	logEvents.mu.Lock(); fmt.Printf("initial_counts frames=%d bytes=%d text=%d binary=%d observer_types=%s\n", logEvents.frames, logEvents.bytes, logEvents.textFrames, logEvents.binaryFrames, strings.Join(logEvents.types, ",")); logEvents.mu.Unlock()
-	step := func(name string, x any, wait time.Duration) error { logEvents.mu.Lock(); before := len(logEvents.types); textBefore := len(logEvents.texts); logEvents.mu.Unlock(); fmt.Printf("sent %s %s\n", name, safeSent(x)); if err := send(dc, x); err != nil { return err }; time.Sleep(wait); logEvents.mu.Lock(); types := append([]string(nil), logEvents.types[before:]...); texts := append([]string(nil), logEvents.texts[textBefore:]...); unsafe := logEvents.unsafe; logEvents.mu.Unlock(); fmt.Printf("result %s event_types=%s assistant_text=%s unsafe=%t\n", name, strings.Join(types, ","), strings.Join(texts, " | "), unsafe); return nil }
+	logEvents.mu.Lock(); initialTypes := append([]string(nil), logEvents.rawTypes...); fmt.Printf("initial_counts frames=%d bytes=%d text=%d binary=%d raw_event_types=%s\n", logEvents.frames, logEvents.bytes, logEvents.textFrames, logEvents.binaryFrames, strings.Join(initialTypes, ",")); logEvents.mu.Unlock()
+	if len(initialTypes) == 0 || initialTypes[0] != "state_update" { return 0, fmt.Errorf("raw precondition failed: first event type=%q", func() string { if len(initialTypes)>0{return initialTypes[0]};return "" }()) }
+	step := func(name string, x any, wait time.Duration) error { logEvents.mu.Lock(); before := len(logEvents.rawTypes); textBefore := len(logEvents.rawTexts); callsBefore := len(logEvents.functionCalls); logEvents.mu.Unlock(); fmt.Printf("sent %s %s\n", name, safeSent(x)); if err := send(dc, x); err != nil { return err }; time.Sleep(wait); logEvents.mu.Lock(); types := append([]string(nil), logEvents.rawTypes[before:]...); texts := append([]string(nil), logEvents.rawTexts[textBefore:]...); calls := append([]map[string]string(nil), logEvents.functionCalls[callsBefore:]...); unsafe := logEvents.unsafe; logEvents.mu.Unlock(); fmt.Printf("result %s event_types=%s assistant_text=%s function_calls=%d unsafe=%t\n", name, strings.Join(types, ","), strings.Join(texts, " | "), len(calls), unsafe); if len(calls)>0 { for _, call := range calls { id:=call["call_id"]; if id=="" { id=call["id"] }; if id!="" { _ = send(dc, map[string]any{"type":"conversation.item.create","item":map[string]any{"type":"function_call_output","call_id":id,"output":"done"}}); _ = send(dc, map[string]any{"type":"response.create"}); fmt.Printf("sent function_call_output call_id_present=true\n") } } }; return nil }
 	if label == "E1-E5" {
 		if err := step("E1", relayText("Reply with exactly the word BASELINE."), 7*time.Second); err != nil { return 0, err }
 		if err := step("E2_update_wrapped", map[string]any{"type":"session.update","session":map[string]any{"instructions":"Always answer with exactly the word PIRATE and nothing else."}}, 2*time.Second); err != nil { return 0, err }
