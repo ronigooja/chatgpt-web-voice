@@ -33,12 +33,13 @@ func TestV3SessionShapeAndRedactedDump(t *testing.T) {
 }
 
 func TestFramelessOutboundShapes(t *testing.T) {
-	// These are the exact V3 wire forms used by Codex's frameless methods.
-	if err := sendShape("conversation.item.create", "user", "input_text"); err != nil {
-		t.Fatal(err)
+	for _, typ := range []string{"session.context.append", "delegation.context.append"} {
+		if err := sendShape(typ, "input_text"); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
-func sendShape(typ, role, contentType string) error {
-	_, err := json.Marshal(map[string]any{"type": typ, "item": map[string]any{"type": "message", "role": role, "content": []any{map[string]any{"type": contentType, "text": "x"}}}})
+func sendShape(typ, contentType string) error {
+	_, err := json.Marshal(map[string]any{"type": typ, "content": []any{map[string]any{"type": contentType, "text": "x"}}})
 	return err
 }

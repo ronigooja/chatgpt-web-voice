@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"github.com/pion/interceptor"
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
+	"github.com/pion/webrtc/v4/pkg/media/oggreader"
 )
 
 const endpoint = "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas"
@@ -58,7 +60,7 @@ type requestBody struct {
 func buildSession() session {
 	var s session
 	s.Model = "gpt-live-1-codex"
-	s.Instructions = "You are a test assistant. If the user asks to create a file, delegate it. Remember the project is ORCA-7."
+	s.Instructions = "You are a test assistant. If the user asks to create a file, delegate it to the background agent. Remember the project is ORCA-7."
 	s.Audio.Output.Voice = "cove"
 	s.Delegation.Type = "client"
 	s.InitialItems = []item{
@@ -145,21 +147,77 @@ func opusPT(sdp string) uint8 {
 func hasApplication(sdp string) bool {
 	return regexp.MustCompile(`(?mi)^m=application\s`).MatchString(sdp)
 }
-func sendSilence(t *webrtc.TrackLocalStaticRTP, pt uint8, stop <-chan struct{}) {
+
+type audioClock struct {
+	mu  sync.Mutex
+	seq uint16
+	ts  uint32
+}
+
+func (c *audioClock) write(t *webrtc.TrackLocalStaticRTP, pt uint8, payload []byte) error {
+	c.mu.Lock()
+	p := &rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: pt, SequenceNumber: c.seq, Timestamp: c.ts, SSRC: 77}, Payload: payload}
+	c.seq++
+	c.ts += 960
+	c.mu.Unlock()
+	return t.WriteRTP(p)
+}
+
+func sendSilence(t *webrtc.TrackLocalStaticRTP, pt uint8, clock *audioClock, stop <-chan struct{}) {
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
-	var seq uint16
-	var ts uint32
 	for {
 		select {
 		case <-stop:
 			return
 		case <-ticker.C:
-			_ = t.WriteRTP(&rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: pt, SequenceNumber: seq, Timestamp: ts, SSRC: 77}, Payload: []byte{0xf8, 0xff, 0xfe}})
-			seq++
-			ts += 960
+			_ = clock.write(t, pt, []byte{0xf8, 0xff, 0xfe})
 		}
 	}
+}
+
+func readOpusPackets(path string) ([][]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	r, _, err := oggreader.NewWith(f)
+	if err != nil {
+		return nil, err
+	}
+	var packets [][]byte
+	for {
+		payload, _, err := r.ParseNextPage()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if len(payload) >= 8 && (string(payload[:8]) == "OpusHead" || string(payload[:8]) == "OpusTags") {
+			continue
+		}
+		if len(payload) > 0 {
+			packets = append(packets, payload)
+		}
+	}
+	return packets, nil
+}
+
+func sendOpus(t *webrtc.TrackLocalStaticRTP, pt uint8, clock *audioClock, packets [][]byte, stop <-chan struct{}) error {
+	for _, payload := range packets {
+		select {
+		case <-stop:
+			return nil
+		default:
+		}
+		if err := clock.write(t, pt, payload); err != nil {
+			return err
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return nil
 }
 
 type frames struct {
@@ -168,6 +226,7 @@ type frames struct {
 	delegationID   string
 	delegationText string
 	assistant      []string
+	audioFrames    int
 }
 
 func (f *frames) add(raw string) {
@@ -182,6 +241,9 @@ func (f *frames) add(raw string) {
 	f.Lock()
 	defer f.Unlock()
 	f.types = append(f.types, t)
+	if t == "output_audio.delta" {
+		f.audioFrames++
+	}
 	if t == "delegation.created" {
 		if x, ok := v["item"].(map[string]any); ok {
 			f.delegationID, _ = x["id"].(string)
@@ -193,14 +255,17 @@ func (f *frames) add(raw string) {
 			f.assistant = append(f.assistant, s)
 		}
 	}
-	prefix := raw
-	if len(prefix) > 120 {
-		prefix = prefix[:120]
+	if strings.Contains(t, "input_transcript") {
+		fmt.Printf("data_frame type=%s text_length=%d\n", t, len(findText(v)))
+	} else if strings.Contains(t, "output_transcript") || t == "delegation.created" {
+		text := findText(v)
+		if len(text) > 200 {
+			text = text[:200]
+		}
+		fmt.Printf("data_frame type=%s text=%q\n", t, text)
+	} else {
+		fmt.Printf("data_frame type=%s\n", t)
 	}
-	if strings.Contains(strings.ToLower(prefix), "token") || strings.Contains(strings.ToLower(prefix), "cookie") {
-		prefix = "[redacted]"
-	}
-	fmt.Printf("data_frame type=%s prefix=%q\n", t, prefix)
 }
 func findText(v any) string {
 	switch x := v.(type) {
@@ -224,8 +289,21 @@ func findText(v any) string {
 	return ""
 }
 func sendText(dc *webrtc.DataChannel, text string) error {
-	b, _ := json.Marshal(map[string]any{"type": "conversation.item.create", "item": map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": text}}}})
-	return dc.SendText(string(b))
+	for len(text) > 0 {
+		n := 500
+		if len(text) < n {
+			n = len(text)
+		}
+		for n > 0 && n < len(text) && text[n]&0xc0 == 0x80 {
+			n--
+		}
+		b, _ := json.Marshal(map[string]any{"type": "session.context.append", "content": []any{map[string]any{"type": "input_text", "text": text[:n]}}})
+		if err := dc.SendText(string(b)); err != nil {
+			return err
+		}
+		text = text[n:]
+	}
+	return nil
 }
 func sendDelegation(dc *webrtc.DataChannel, id, text string) error {
 	b, _ := json.Marshal(map[string]any{"type": "delegation.context.append", "delegation_item_id": id, "content": []any{map[string]any{"type": "input_text", "text": text}}})
@@ -233,9 +311,11 @@ func sendDelegation(dc *webrtc.DataChannel, id, text string) error {
 }
 
 func main() {
-	var db, key string
+	var db, key, u1Path, u2Path string
 	flag.StringVar(&db, "db", os.Getenv("VOICE_DATABASE_FILE"), "copied database")
 	flag.StringVar(&key, "key", os.Getenv("VOICE_TOKEN_ENCRYPTION_KEY"), "database key")
+	flag.StringVar(&u1Path, "u1", "", "Ogg Opus U1")
+	flag.StringVar(&u2Path, "u2", "", "Ogg Opus U2")
 	flag.Parse()
 	if db == "" || key == "" {
 		log.Fatal("db and key required")
@@ -316,7 +396,22 @@ func main() {
 	}
 	stop := make(chan struct{})
 	defer close(stop)
-	go sendSilence(track, opusPT(answer), stop)
+	pt := opusPT(answer)
+	clock := &audioClock{}
+	go sendSilence(track, pt, clock, stop)
+	var u1, u2 [][]byte
+	if u1Path != "" {
+		u1, err = readOpusPackets(filepath.Clean(u1Path))
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+	if u2Path != "" {
+		u2, err = readOpusPackets(filepath.Clean(u2Path))
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
 	logf := &frames{}
 	dc.OnMessage(func(m webrtc.DataChannelMessage) {
 		if m.IsString {
@@ -334,24 +429,36 @@ func main() {
 		fmt.Println("data_channel_open=false")
 		return
 	}
-	time.Sleep(5 * time.Second)
-	_ = sendText(dc, "Please create an HTML file called hello.")
-	fmt.Println("sent typed_text=true")
-	time.Sleep(15 * time.Second)
+	time.Sleep(2 * time.Second)
+	if len(u1) > 0 {
+		if err := sendOpus(track, pt, clock, u1, stop); err != nil {
+			log.Fatal(err)
+		}
+	}
+	fmt.Println("sent_audio utterance=U1")
+	time.Sleep(20 * time.Second)
 	logf.Lock()
 	id, txt := logf.delegationID, logf.delegationText
 	logf.Unlock()
 	if id != "" {
 		_ = sendDelegation(dc, id, "Done: hello.html created.")
-		fmt.Printf("delegation_created=true text=%q\n", txt)
-		time.Sleep(15 * time.Second)
+		fmt.Printf("delegation_created=true text=%q keys=item,type\n", txt)
+		time.Sleep(20 * time.Second)
 	} else {
 		fmt.Println("delegation_created=false")
+		_ = sendText(dc, "Reminder: the project is ORCA-7.")
+		fmt.Println("sent_context_probe=true")
+		time.Sleep(5 * time.Second)
 	}
-	_ = sendText(dc, "What is my project called?")
-	time.Sleep(15 * time.Second)
+	if len(u2) > 0 {
+		if err := sendOpus(track, pt, clock, u2, stop); err != nil {
+			log.Fatal(err)
+		}
+	}
+	fmt.Println("sent_audio utterance=U2")
+	time.Sleep(20 * time.Second)
 	logf.Lock()
-	fmt.Printf("event_types=%s assistant_text=%q\n", strings.Join(logf.types, ","), strings.Join(logf.assistant, " | "))
+	fmt.Printf("event_types=%s assistant_text=%q audio_frames=%d\n", strings.Join(logf.types, ","), strings.Join(logf.assistant, " | "), logf.audioFrames)
 	logf.Unlock()
 	fmt.Println("sideband=not_attempted_not_derivable_from_codex_source")
 }
