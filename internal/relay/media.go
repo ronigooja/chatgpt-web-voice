@@ -175,6 +175,12 @@ func (s *pionSession) SetDiagnostics(d Diagnostics) {
 	s.bridge.observeMu.Lock()
 	if d.OnFrame == nil { s.bridge.rawFrame = nil } else { s.bridge.rawFrame = d.OnFrame }
 	s.bridge.observeMu.Unlock()
+	s.bridge.downToUp.mu.Lock()
+	if d.OnChannel == nil { s.bridge.downToUp.onDiagOpen = nil } else { s.bridge.downToUp.onDiagOpen = func() { d.OnChannel("upstream", "open") } }
+	s.bridge.downToUp.mu.Unlock()
+	s.bridge.upToDown.mu.Lock()
+	if d.OnChannel == nil { s.bridge.upToDown.onDiagOpen = nil } else { s.bridge.upToDown.onDiagOpen = func() { d.OnChannel("client", "open") } }
+	s.bridge.upToDown.mu.Unlock()
 }
 
 func (s *pionSession) diagnosticFrame(side string, data []byte, isString bool) {
@@ -215,6 +221,7 @@ type dataChannelPipe struct {
 	mu          sync.RWMutex
 	onError     func(error)
 	onOpen      func()
+	onDiagOpen  func()
 	logger      *slog.Logger
 }
 
@@ -401,7 +408,6 @@ func (r *PionRelay) NewSession(ctx context.Context, clientOffer string, route Ro
 		return fail("create peer A DataChannel", err)
 	}
 	session.bridge.attachDownstream(clientChannel)
-	clientChannel.OnOpen(func() { session.diagnosticChannel("client", "open") })
 	downstream.OnDataChannel(func(channel *webrtc.DataChannel) {
 		if err := channel.Close(); err != nil {
 			session.logger.Debug("relay: close unsupported peer A DataChannel", "error", err)
@@ -484,7 +490,6 @@ func (s *pionSession) buildLeg(ctx context.Context, route Route) (*leg, string, 
 		return failLeg("create peer B DataChannel", err)
 	}
 	l.channel = channel
-	channel.OnOpen(func() { s.diagnosticChannel(l.name, "open") })
 	s.installLegHandlers(l)
 
 	gatherComplete := webrtc.GatheringCompletePromise(pc)
@@ -1188,6 +1193,10 @@ func (p *dataChannelPipe) setDestination(channel *webrtc.DataChannel) {
 		if p.onOpen != nil {
 			p.onOpen()
 		}
+		p.mu.RLock()
+		diag := p.onDiagOpen
+		p.mu.RUnlock()
+		if diag != nil { diag() }
 	}
 	channel.SetBufferedAmountLowThreshold(mediaDataBufferedMaxSize / 2)
 	channel.OnBufferedAmountLow(func() {
