@@ -116,7 +116,10 @@ func runCall(cfg config.Config, pool *accounts.Pool, rl relay.Relay, clientTools
 		if err := step("E4_question", relayText("What is my project called?"), 7*time.Second); err != nil { return 0, err }
 		if err := step("E5_response_create", map[string]any{"type":"response.create"}, 6*time.Second); err != nil { return 0, err }
 	}
-	if err := svc.ReleaseSession("probe", res.VoiceSessionID); err != nil { return 0, err }
+	if !svc.ReleaseSession("probe", res.VoiceSessionID) { return 0, fmt.Errorf("session release not acknowledged") }
+	if label == "E6" {
+		if err := step("E6_question", relayText("Please create an HTML document called hello."), 8*time.Second); err != nil { return 0, err }
+	}
 	return 201, nil
 }
 
