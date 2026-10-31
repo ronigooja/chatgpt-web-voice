@@ -67,7 +67,7 @@ jobs:
             tests) command=(go test -count=1 -timeout=10m ./...) ;;
             race) command=(go test -race -count=1 -timeout=15m ./...) ;;
             build)
-              command=(bash -c 'go build -buildvcs=false -o "$0" ./cmd/server && go build -buildvcs=false -o "$1" ./cmd/migrate-accounts' "$RUNNER_TEMP/voice-server" "$RUNNER_TEMP/migrate-accounts")
+              command=(bash -c 'go build -buildvcs=false -o "$0" ./cmd/server && go build -buildvcs=false -o "$1" ./cmd/migrate-accounts && go build -buildvcs=false -o "$2" ./cmd/probe-tools' "$RUNNER_TEMP/voice-server" "$RUNNER_TEMP/migrate-accounts" "$RUNNER_TEMP/probe-tools")
               ;;
             *) exit 2 ;;
           esac
@@ -86,3 +86,11 @@ jobs:
           path: ${{ runner.temp }}/voice-diagnostics/*.log
           if-no-files-found: ignore
           retention-days: 7
+      - name: Upload probe artifact
+        if: matrix.check == 'build' && success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: voice-protocol-probe-${{ github.sha }}
+          path: ${{ runner.temp }}/probe-tools
+          if-no-files-found: error
+          retention-days: 1
