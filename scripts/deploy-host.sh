@@ -208,8 +208,9 @@ if ports_i is None:
     block.append("    ports:\n")
     ports_i = len(block) - 1
 ports_end = section_end(ports_i)
-udp_line = f'      "{udp_min}-{udp_max}:{udp_min}-{udp_max}/udp"\n'
-if not any(line.strip().strip('"') == udp_line.strip().strip('"') for line in block[ports_i + 1:ports_end]):
+udp_line = f'      - "{udp_min}-{udp_max}:{udp_min}-{udp_max}/udp"\n'
+udp_spec = f'{udp_min}-{udp_max}:{udp_min}-{udp_max}/udp'
+if not any(line.strip().lstrip('-').strip().strip('"').strip("'") == udp_spec for line in block[ports_i + 1:ports_end]):
     block.insert(ports_end, udp_line)
 new = "".join(lines[:service] + block + lines[end:])
 if dry_run == "true":
