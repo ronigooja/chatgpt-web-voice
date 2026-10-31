@@ -70,7 +70,7 @@ func clientAPI() (*webrtc.API, error) {
 	if err := me.RegisterCodec(webrtc.RTPCodecParameters{RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2, SDPFmtpLine: "minptime=10;useinbandfec=1"}, PayloadType: 111}, webrtc.RTPCodecTypeAudio); err != nil { return nil, err }
 	ir := &interceptor.Registry{}
 	if err := webrtc.RegisterDefaultInterceptors(me, ir); err != nil { return nil, err }
-	return webrtc.NewAPI(webrtc.WithMediaEngine(me), webrtc.WithInterceptorRegistry(ir))
+	return webrtc.NewAPI(webrtc.WithMediaEngine(me), webrtc.WithInterceptorRegistry(ir)), nil
 }
 
 func offer(api *webrtc.API) (*webrtc.PeerConnection, string, *webrtc.DataChannel, *webrtc.TrackLocalStaticRTP, error) {
@@ -79,7 +79,7 @@ func offer(api *webrtc.API) (*webrtc.PeerConnection, string, *webrtc.DataChannel
 	track, err := webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2, SDPFmtpLine: "minptime=10;useinbandfec=1"}, "audio", "probe")
 	if err != nil { return nil, "", nil, nil, err }
 	if _, err = pc.AddTrack(track); err != nil { return nil, "", nil, nil, err }
-	if _, err = pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvOnly}); err != nil { return nil, "", nil, nil, err }
+	if _, err = pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly}); err != nil { return nil, "", nil, nil, err }
 	neg := true; id := uint16(0)
 	dc, err := pc.CreateDataChannel("oai-events", &webrtc.DataChannelInit{Negotiated: &neg, ID: &id})
 	if err != nil { return nil, "", nil, nil, err }
