@@ -78,6 +78,21 @@ func TestNormalizeSDP(t *testing.T) {
 	}
 }
 
+func TestValidateCreateSessionInput(t *testing.T) {
+	d := Config().Defaults
+	if err := ValidateCreateSessionInput(CreateSessionRequest{
+		OfferSDP: "v=0\no=- 0 0 IN IP4 0.0.0.0\n",
+		Voice: d.Voice, VoiceMode: d.VoiceMode, LanguageCode: d.LanguageCode,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateCreateSessionInput(CreateSessionRequest{
+		OfferSDP: "v=0\n", Voice: d.Voice, VoiceMode: "conversation", LanguageCode: d.LanguageCode,
+	}); err == nil {
+		t.Fatal("expected invalid voice mode")
+	}
+}
+
 func TestVoiceSessionOwnership(t *testing.T) {
 	svc := New(config.Config{SessionTTLSeconds: 3600}, nil, nil)
 	account := accounts.Account{ID: 7, Proxy: "http://proxy.example:8080"}

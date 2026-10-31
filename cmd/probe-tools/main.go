@@ -99,7 +99,11 @@ func runCall(cfg config.Config, pool *accounts.Pool, rl relay.Relay, clientTools
 	stop := make(chan struct{}); defer close(stop); go silence(track, stop)
 	logEvents := &eventLog{}
 	svc := voice.New(cfg, pool, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))).WithRelay(rl).WithEventObserver(logEvents.add)
-	res, err := svc.CreateSession(voice.CreateSessionRequest{Owner: "probe", OfferSDP: sdp, Voice: "juniper", VoiceMode: "conversation", LanguageCode: "en", ClientTools: clientTools})
+	defaults := voice.Config().Defaults
+	req := voice.CreateSessionRequest{Owner: "probe", OfferSDP: sdp, Voice: defaults.Voice, VoiceMode: defaults.VoiceMode, LanguageCode: defaults.LanguageCode, ClientTools: clientTools}
+	if err := voice.ValidateCreateSessionInput(req); err != nil { return 0, fmt.Errorf("local input validation: %w", err) }
+	fmt.Printf("local_input_validation=ok voice=%s voice_mode=%s language=%s\n", defaults.Voice, defaults.VoiceMode, defaults.LanguageCode)
+	res, err := svc.CreateSession(req)
 	if err != nil { return 0, err }
 	fmt.Printf("%s_connected wm_status=accepted session=%s\n", label, res.SessionID[:8])
 	if err := client.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: res.AnswerSDP}); err != nil { return 0, err }

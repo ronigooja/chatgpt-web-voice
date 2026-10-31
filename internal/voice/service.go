@@ -1179,6 +1179,17 @@ type CreateSessionRequest struct {
 	ClientTools []any
 }
 
+// ValidateCreateSessionInput performs the local, network-free validation used
+// by CreateSession. Probe and integration tooling can call it before any
+// account selection or upstream request.
+func ValidateCreateSessionInput(req CreateSessionRequest) error {
+	if _, err := normalizeSDP(req.OfferSDP); err != nil {
+		return err
+	}
+	_, err := normalizeSessionOptions(req.Voice, req.VoiceMode, req.LanguageCode)
+	return err
+}
+
 // pickAccountForSession preserves stable account identity across token edits.
 // A token retained by a live binding may have been reassigned to another account.
 func (s *Service) pickAccountForSession(preferredToken string, preferredAccountID int64, excluded map[string]struct{}) (string, accounts.Account, error) {
@@ -1190,10 +1201,10 @@ func (s *Service) pickAccountForSession(preferredToken string, preferredAccountI
 
 // CreateSession POSTs offer SDP to /realtime/wm and returns answer SDP.
 func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error) {
-	offerSDP, err := normalizeSDP(req.OfferSDP)
-	if err != nil {
+	if err := ValidateCreateSessionInput(req); err != nil {
 		return nil, err
 	}
+	offerSDP, _ := normalizeSDP(req.OfferSDP)
 	options, err := normalizeSessionOptions(req.Voice, req.VoiceMode, req.LanguageCode)
 	if err != nil {
 		return nil, err
