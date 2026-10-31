@@ -17,10 +17,13 @@ jobs:
       - name: Build probe
         run: |
           set -euo pipefail
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags='-s -w' -o probe-tools ./cmd/probe-tools
+           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags='-s -w' -o probe-tools ./cmd/probe-tools
+           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags='-s -w' -o probe-codex ./cmd/probe-codex
       - name: Upload probe
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: voice-protocol-probe-${{ github.sha }}
-          path: probe-tools
+           path: |
+             probe-tools
+             probe-codex
           retention-days: 1
