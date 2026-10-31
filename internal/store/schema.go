@@ -114,6 +114,16 @@ func (db *DB) migrate() error {
 	if err := db.ensureAccountHealthColumns(); err != nil {
 		return err
 	}
+	// media_route: "direct" (default) or "account"; see accounts.NormalizeMediaRoute.
+	has, err := db.hasColumn("accounts", "media_route")
+	if err != nil {
+		return err
+	}
+	if !has {
+		if _, err := db.conn.Exec(`ALTER TABLE accounts ADD COLUMN media_route TEXT NOT NULL DEFAULT 'direct'`); err != nil {
+			return fmt.Errorf("add accounts.media_route: %w", err)
+		}
+	}
 	if err := db.ensureMediaEvidenceTables(); err != nil {
 		return err
 	}

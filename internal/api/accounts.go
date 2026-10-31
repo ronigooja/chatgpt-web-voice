@@ -21,6 +21,7 @@ type accountView struct {
 	AccessTokenPreview string  `json:"access_token_preview"`
 	HasProxy           bool    `json:"has_proxy"`
 	ProxyPreview       string  `json:"proxy_preview"`
+	MediaRoute         string  `json:"media_route"`
 	Status             string  `json:"status"`
 	Disabled           bool    `json:"disabled"`
 	Available          bool    `json:"available"`
@@ -41,6 +42,7 @@ type accountWriteRequest struct {
 	Email       string  `json:"email"`
 	AccessToken *string `json:"access_token"`
 	Proxy       *string `json:"proxy"`
+	MediaRoute  *string `json:"media_route"`
 	Status      string  `json:"status"`
 	Disabled    bool    `json:"disabled"`
 }
@@ -85,6 +87,9 @@ func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
 	if request.Proxy != nil {
 		account.Proxy = *request.Proxy
 	}
+	if request.MediaRoute != nil {
+		account.MediaRoute = *request.MediaRoute
+	}
 	created, err := s.accounts.Create(account)
 	if err != nil {
 		writeAccountError(w, r, err)
@@ -109,6 +114,7 @@ func (s *Server) updateAccount(w http.ResponseWriter, r *http.Request) {
 		Email:       request.Email,
 		AccessToken: request.AccessToken,
 		Proxy:       request.Proxy,
+		MediaRoute:  request.MediaRoute,
 		Status:      request.Status,
 		Disabled:    request.Disabled,
 	})
@@ -204,6 +210,13 @@ func decodeAccountWriteRequest(w http.ResponseWriter, r *http.Request) (accountW
 		}
 		request.Proxy = &value
 	}
+	if request.MediaRoute != nil {
+		route, ok := accounts.NormalizeMediaRoute(*request.MediaRoute)
+		if !ok {
+			return accountWriteRequest{}, fmt.Errorf("media_route must be direct or account")
+		}
+		request.MediaRoute = &route
+	}
 	return request, nil
 }
 
@@ -223,6 +236,7 @@ func newAccountView(account accounts.Account) accountView {
 		AccessTokenPreview: secretPreview(account.AccessToken),
 		HasProxy:           account.Proxy != "",
 		ProxyPreview:       proxyPreview(account.Proxy),
+		MediaRoute:         account.MediaRoute,
 		Status:             account.Status,
 		Disabled:           account.Disabled,
 		Available:          available,

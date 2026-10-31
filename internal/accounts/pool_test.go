@@ -169,6 +169,51 @@ func TestAccessTokensAreSealedAtRest(t *testing.T) {
 	}
 }
 
+func TestLegacyDatabaseGainsDirectMediaRoute(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "voice.db")
+	conn, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Legacy schema: UNIQUE access_token forces a table rebuild, and no media_route.
+	if _, err := conn.Exec(`
+		CREATE TABLE accounts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			email TEXT NOT NULL DEFAULT '',
+			access_token TEXT NOT NULL UNIQUE,
+			proxy TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '正常',
+			disabled INTEGER NOT NULL DEFAULT 0,
+			invalid_at REAL NOT NULL DEFAULT 0,
+			last_used_at TEXT,
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+		INSERT INTO accounts (email, access_token, proxy) VALUES ('a@x.com', 'legacy-plain-token', 'http://127.0.0.1:1');
+	`); err != nil {
+		_ = conn.Close()
+		t.Fatal(err)
+	}
+	_ = conn.Close()
+
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	pool := NewPoolFromDB(db).WithBox(testBox(t))
+	if _, err := pool.SealStoredTokens(); err != nil {
+		t.Fatal(err)
+	}
+	list, err := pool.List()
+	if err != nil || len(list) != 1 {
+		t.Fatalf("list: %v %d", err, len(list))
+	}
+	if list[0].MediaRoute != MediaRouteDirect {
+		t.Fatalf("legacy account media route=%q want direct", list[0].MediaRoute)
+	}
+}
+
 func TestSealStoredTokensMigratesLegacyPlaintext(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "voice.db")
 	// Simulate a pre-encryption database row.
@@ -249,6 +294,42 @@ func TestImportLegacyJSON(t *testing.T) {
 	}
 	if len(items) != 2 || items[0].AccessToken != "t1" || !items[1].Disabled || items[1].InvalidAt != 123.5 {
 		t.Fatalf("unexpected import: %+v", items)
+	}
+}
+
+func TestAccountMediaRouteDefaultsToDirectAndPersists(t *testing.T) {
+	pool := newTestPool(t)
+	created, err := pool.Create(Account{AccessToken: "token-default", Proxy: "http://127.0.0.1:8080"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.MediaRoute != MediaRouteDirect {
+		t.Fatalf("default media route=%q want direct", created.MediaRoute)
+	}
+	viaAccount, err := pool.Create(Account{AccessToken: "token-account", MediaRoute: "ACCOUNT"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if viaAccount.MediaRoute != MediaRouteAccount {
+		t.Fatalf("media route=%q want account", viaAccount.MediaRoute)
+	}
+	if _, err := pool.Create(Account{AccessToken: "token-bad", MediaRoute: "proxy"}); err == nil {
+		t.Fatal("unknown media route must be rejected")
+	}
+
+	// A nil MediaRoute keeps the stored value; a value replaces it.
+	kept, err := pool.Update(viaAccount.ID, AccountUpdate{Status: "正常"})
+	if err != nil || kept.MediaRoute != MediaRouteAccount {
+		t.Fatalf("nil update must keep route: %+v %v", kept, err)
+	}
+	direct := "direct"
+	changed, err := pool.Update(viaAccount.ID, AccountUpdate{Status: "正常", MediaRoute: &direct})
+	if err != nil || changed.MediaRoute != MediaRouteDirect {
+		t.Fatalf("update to direct failed: %+v %v", changed, err)
+	}
+	bad := "proxy"
+	if _, err := pool.Update(viaAccount.ID, AccountUpdate{Status: "正常", MediaRoute: &bad}); err == nil {
+		t.Fatal("unknown media route update must be rejected")
 	}
 }
 

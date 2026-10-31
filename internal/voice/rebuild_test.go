@@ -374,9 +374,8 @@ func TestRebuildRotatesAcrossAccountsWhenCurrentIsUnavailable(t *testing.T) {
 	}
 }
 
-func TestRebuildRouteFollowsMediaRouteSwitch(t *testing.T) {
+func TestRebuildRouteDefaultsToDirectMedia(t *testing.T) {
 	r := newRebuildFixture(t, okAnswer(t))
-	r.svc.cfg.RelayMediaRoute = "direct"
 	if _, err := r.svc.RebuildMedia("api_key:1", r.res.VoiceSessionID, "scheduled"); err != nil {
 		t.Fatal(err)
 	}

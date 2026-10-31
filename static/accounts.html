@@ -151,6 +151,14 @@
               </div>
               <span id="proxyHint" class="field-hint"></span>
             </div>
+            <div class="field full">
+              <label for="mediaRouteInput" data-i18n="mediaRouteLabel">媒体路由</label>
+              <select id="mediaRouteInput">
+                <option value="direct" data-i18n="mediaRouteDirect">直连</option>
+                <option value="account" data-i18n="mediaRouteAccount">走账号代理</option>
+              </select>
+              <span class="field-hint" data-i18n="mediaRouteHint">仅网关中继媒体时生效；信令始终走账号代理。</span>
+            </div>
           </div>
         </section>
       </div>
@@ -218,6 +226,11 @@
           accessTokenLabel: 'Access token',
           proxyLabel: 'Proxy',
           proxyDirect: '自动（环境代理/直连）',
+          mediaRouteLabel: '媒体路由',
+          mediaRouteDirect: '直连',
+          mediaRouteAccount: '走账号代理',
+          mediaRouteHint: '仅网关中继媒体时生效；信令始终走账号代理。',
+          mediaChip: '媒体：{route}',
           accountId: 'ID {id}',
 
           emptyTitle: '暂无账户',
@@ -305,6 +318,11 @@
           accessTokenLabel: 'Access token',
           proxyLabel: 'Proxy',
           proxyDirect: 'Auto (env proxy/direct)',
+          mediaRouteLabel: 'Media route',
+          mediaRouteDirect: 'Direct',
+          mediaRouteAccount: 'Via account proxy',
+          mediaRouteHint: 'Only applies when the gateway relays media. Signaling always follows the account proxy.',
+          mediaChip: 'Media: {route}',
           accountId: 'ID {id}',
 
           emptyTitle: 'No accounts',
@@ -368,6 +386,7 @@
       var statusInput = document.getElementById('statusInput');
       var accessTokenInput = document.getElementById('accessTokenInput');
       var proxyInput = document.getElementById('proxyInput');
+      var mediaRouteInput = document.getElementById('mediaRouteInput');
       var clearAccessToken = document.getElementById('clearAccessToken');
       var clearProxy = document.getElementById('clearProxy');
       var accessTokenHint = document.getElementById('accessTokenHint');
@@ -627,6 +646,10 @@
         return text.slice(0, 14) + '…' + text.slice(-6);
       }
 
+      function mediaRouteText(value) {
+        return t(value === 'account' ? 'mediaRouteAccount' : 'mediaRouteDirect');
+      }
+
       function renderRow(account) {
         var statusClass = account.available ? '' : 'disabled';
         var tokenPreview = shortToken(account.access_token_preview);
@@ -647,6 +670,7 @@
           '<td data-label="' + escapeHTML(t('columnRoute')) + '">' +
             '<div class="cell-stack">' +
               '<span class="route-chip mono" title="' + escapeHTML(account.proxy_preview || t('proxyDirect')) + '">' + escapeHTML(route) + '</span>' +
+              '<span class="cell-meta">' + escapeHTML(t('mediaChip', { route: mediaRouteText(account.media_route) })) + '</span>' +
             '</div>' +
           '</td>' +
           '<td data-label="' + escapeHTML(t('columnStatus')) + '">' +
@@ -675,6 +699,7 @@
         form.reset();
         emailInput.value = editing ? (account.email || '') : '';
         statusInput.value = editing ? (account.available ? '正常' : '禁用') : '正常';
+        mediaRouteInput.value = editing && account.media_route === 'account' ? 'account' : 'direct';
         accessTokenInput.required = !editing;
         resetClearActions();
         formMessage.textContent = '';
@@ -734,7 +759,8 @@
         var payload = {
           email: emailInput.value.trim(),
           status: statusInput.value,
-          disabled: statusInput.value === '禁用'
+          disabled: statusInput.value === '禁用',
+          media_route: mediaRouteInput.value
         };
         // access_token cannot be empty on the server; omit when blank to keep existing.
         if (accessToken) payload.access_token = accessToken;

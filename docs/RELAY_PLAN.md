@@ -261,7 +261,7 @@ Changes:
 |---|---|---|
 | 0 | Decode the probe `error` event; repeat the probe with audio and a realistic `session`; record the `wm` request and response shape with a local fixture | `internal/voice/service.go`, tests |
 | 1 | Port the Pion bridge into `internal/relay`; replace logrus, Gin, and CLIProxyAPI config; keep copyright notices | `internal/relay/*`, `go.mod` |
-| 2 | Route `CreateSession` through peers A and B; return peer A's answer, not the upstream answer. Done behind `VOICE_RELAY_ENABLED` with the `VOICE_RELAY_MEDIA_ROUTE` switch | `internal/voice/service.go` |
+| 2 | Route `CreateSession` through peers A and B; return peer A's answer, not the upstream answer. Done behind `VOICE_RELAY_ENABLED`, with the per-account `media_route` field choosing direct or account-proxy media | `internal/voice/service.go` |
 | 3 | Lease identity, generations, evidence tables, idempotent release. Done in `internal/mediaevidence`; generations are persisted and stay at 1; phase 4 swaps only the upstream leg, so they do not change | `internal/store/schema.go`, `internal/callsessions`, `internal/api/voice.go` |
 | 4 | Cooldown, expiry guard (done); upstream leg rebuild with text handoff (done, see "Continuous operation"); restart recovery of unknown state (done in phase 3) | `internal/accounts/*`, `internal/relay/swap.go`, `internal/voice/rebuild.go` |
 

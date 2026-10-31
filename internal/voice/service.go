@@ -173,9 +173,10 @@ func (s *Service) WithMediaEvidence(store MediaEvidenceStore) *Service {
 }
 
 // relayRoute returns the proxy the relay's upstream peer should use for media.
+// The account's media_route decides; anything but "account" is direct.
 // Signaling keeps using the account proxy regardless of this setting.
 func (s *Service) relayRoute(account accounts.Account) relay.Route {
-	if s.cfg.RelayMediaRoute == config.RelayMediaRouteDirect {
+	if route, _ := accounts.NormalizeMediaRoute(account.MediaRoute); route != accounts.MediaRouteAccount {
 		return relay.Route{}
 	}
 	if strings.TrimSpace(account.Proxy) == httpclient.ProxyDirect {

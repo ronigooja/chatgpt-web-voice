@@ -241,6 +241,8 @@ needs no port mapping. If the UDP range is unset, the relay uses ephemeral ports
 
 上游代理不是 `VOICE_*`：账号池 `proxy` > `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` > 直连。
 
+中继媒体（`VOICE_RELAY_ENABLED=true`）走代理还是直连，按账号设置 `media_route`（管理端「媒体路由」，API 字段 `media_route`）：`direct`（默认）绕过账号代理；`account` 跟随账号 `proxy`。信令（`/realtime/wm`）始终走账号代理，不受影响。
+
 ## 下游接口
 
 下游使用在 `/keys` 创建的 Bearer API Key，**只能**访问 `/v1/*`。

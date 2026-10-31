@@ -471,6 +471,7 @@ Production 强制校验证书；development 才允许 `VOICE_SKIP_SSL_VERIFY`。
 | `access_token` | 密封密文 `enc1....` |
 | `token_hash` | HMAC，唯一 |
 | `proxy` | 可选账号代理 |
+| `media_route` | 中继媒体路由：`direct`（默认，绕过 `proxy`）或 `account`（跟随 `proxy`）；信令始终走 `proxy` |
 | `disabled` / `status` | 可用性 |
 | `last_used_at` | LRU |
 

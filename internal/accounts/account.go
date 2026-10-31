@@ -1,5 +1,29 @@
 package accounts
 
+import "strings"
+
+// Media routes choose how the relay's upstream media reaches ChatGPT.
+// Signaling (/realtime/wm) always follows the account proxy.
+const (
+	// MediaRouteDirect bypasses the account proxy for relay media (default).
+	MediaRouteDirect = "direct"
+	// MediaRouteAccount sends relay media through the account proxy.
+	MediaRouteAccount = "account"
+)
+
+// NormalizeMediaRoute lowercases and trims a route; empty means direct.
+// The second result is false for unknown values.
+func NormalizeMediaRoute(value string) (string, bool) {
+	switch route := strings.ToLower(strings.TrimSpace(value)); route {
+	case "", MediaRouteDirect:
+		return MediaRouteDirect, true
+	case MediaRouteAccount:
+		return MediaRouteAccount, true
+	default:
+		return "", false
+	}
+}
+
 // Account is one ChatGPT web access token entry. The access token is sealed
 // with AES-256-GCM before it is written to SQLite; domain code always sees
 // the plaintext form after decryption.
@@ -11,6 +35,7 @@ type Account struct {
 	Email       string  `json:"email"`
 	AccessToken string  `json:"access_token"`
 	Proxy       string  `json:"proxy,omitempty"`
+	MediaRoute  string  `json:"media_route,omitempty"`
 	Status      string  `json:"status,omitempty"`
 	Disabled    bool    `json:"disabled,omitempty"`
 	InvalidAt   float64 `json:"invalid_at,omitempty"`
@@ -31,6 +56,7 @@ type AccountUpdate struct {
 	Email       string
 	AccessToken *string
 	Proxy       *string
+	MediaRoute  *string
 	Status      string
 	Disabled    bool
 }

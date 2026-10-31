@@ -428,16 +428,16 @@ func TestRelayMediaRouteSwitch(t *testing.T) {
 		proxy     string
 		wantProxy string
 	}{
-		{"default uses account proxy", "", "socks5://u:p@203.0.113.1:1080", "socks5://u:p@203.0.113.1:1080"},
-		{"account uses account proxy", config.RelayMediaRouteAccount, "socks5://u:p@203.0.113.1:1080", "socks5://u:p@203.0.113.1:1080"},
-		{"direct bypasses account proxy", config.RelayMediaRouteDirect, "socks5://u:p@203.0.113.1:1080", ""},
-		{"account with no proxy stays direct", config.RelayMediaRouteAccount, "", ""},
-		{"account marked direct stays direct", config.RelayMediaRouteAccount, "direct", ""},
+		{"default is direct", "", "socks5://u:p@203.0.113.1:1080", ""},
+		{"account uses account proxy", accounts.MediaRouteAccount, "socks5://u:p@203.0.113.1:1080", "socks5://u:p@203.0.113.1:1080"},
+		{"direct bypasses account proxy", accounts.MediaRouteDirect, "socks5://u:p@203.0.113.1:1080", ""},
+		{"account with no proxy stays direct", accounts.MediaRouteAccount, "", ""},
+		{"account marked direct stays direct", accounts.MediaRouteAccount, "direct", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			svc := New(config.Config{RelayMediaRoute: tc.route}, nil, nil)
-			got := svc.relayRoute(accounts.Account{Proxy: tc.proxy})
+			svc := New(config.Config{}, nil, nil)
+			got := svc.relayRoute(accounts.Account{Proxy: tc.proxy, MediaRoute: tc.route})
 			if got.ProxyURL != tc.wantProxy {
 				t.Fatalf("ProxyURL=%q want %q", got.ProxyURL, tc.wantProxy)
 			}
@@ -446,11 +446,10 @@ func TestRelayMediaRouteSwitch(t *testing.T) {
 }
 
 func TestRelayMediaRouteDoesNotChangeSignalingProxy(t *testing.T) {
-	// Signaling always follows the account proxy; the switch only affects media.
+	// Signaling always follows the account proxy; media_route only affects media.
 	// The fixture uses the "go" transport with an unusable proxy, so a signaling
 	// request that honored the proxy would fail rather than reach the fixture.
 	f, fr := newRelayFixture(t, []string{fixtureTokenA}, 1, answerHandler(readTestdata(t, "wm_answer.sdp"), http.StatusCreated))
-	f.svc.cfg.RelayMediaRoute = config.RelayMediaRouteDirect
 	list, err := f.pool.List()
 	if err != nil || len(list) != 1 {
 		t.Fatalf("setup: %v %d", err, len(list))

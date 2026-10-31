@@ -132,6 +132,40 @@ func TestAccountManagementAPI(t *testing.T) {
 	}
 }
 
+func TestAccountManagementAPIMediaRoute(t *testing.T) {
+	pool, mux := newAPITestServer(t)
+	resp := performJSONRequest(t, mux, http.MethodPost, "/api/accounts", map[string]any{"access_token": "media-route-token"})
+	if resp.Code != http.StatusCreated || !strings.Contains(resp.Body.String(), `"media_route":"direct"`) {
+		t.Fatalf("default must be direct: %d %s", resp.Code, resp.Body.String())
+	}
+	var body struct {
+		Account struct {
+			ID int64 `json:"id"`
+		} `json:"account"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/accounts/" + jsonNumber(body.Account.ID)
+
+	resp = performJSONRequest(t, mux, http.MethodPut, path, map[string]any{"media_route": "account"})
+	if resp.Code != http.StatusOK || !strings.Contains(resp.Body.String(), `"media_route":"account"`) {
+		t.Fatalf("set account route: %d %s", resp.Code, resp.Body.String())
+	}
+	resp = performJSONRequest(t, mux, http.MethodPut, path, map[string]any{"email": "x@example.com"})
+	if stored, err := pool.Get(body.Account.ID); resp.Code != http.StatusOK || err != nil || stored.MediaRoute != "account" {
+		t.Fatalf("omitted media_route must be kept: %d %+v %v", resp.Code, stored, err)
+	}
+	resp = performJSONRequest(t, mux, http.MethodPut, path, map[string]any{"media_route": "bogus"})
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("unknown route must be 400, got %d %s", resp.Code, resp.Body.String())
+	}
+	resp = performJSONRequest(t, mux, http.MethodPost, "/api/accounts", map[string]any{"access_token": "media-route-bad", "media_route": "bogus"})
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("unknown route on create must be 400, got %d", resp.Code)
+	}
+}
+
 func TestAccountManagementAPIRejectsDuplicateToken(t *testing.T) {
 	_, mux := newAPITestServer(t)
 	payload := map[string]any{"access_token": "same-secret-token", "status": "正常"}

@@ -45,7 +45,6 @@ func Run() error {
 		"upstream_impersonate", cfg.Impersonate,
 		"upstream_skip_ssl_verify", cfg.SkipSSLVerify,
 		"relay_enabled", cfg.RelayEnabled,
-		"relay_media_route", cfg.RelayMediaRoute,
 		"log_format", cfg.LogFormat,
 		"log_level", cfg.LogLevel,
 	)
@@ -131,7 +130,7 @@ func Run() error {
 			return fmt.Errorf("media relay setup failed: %w", err)
 		}
 		voiceService.WithRelay(mediaRelay)
-		logger.Info("media_relay_enabled", "media_route", cfg.RelayMediaRoute, "max_sessions", relay.Config{MaxSessions: cfg.RelayMaxSessions}.EffectiveMaxSessions())
+		logger.Info("media_relay_enabled", "max_sessions", relay.Config{MaxSessions: cfg.RelayMaxSessions}.EffectiveMaxSessions())
 	}
 	apiServer := api.New(api.Dependencies{
 		Voice:         voiceService,

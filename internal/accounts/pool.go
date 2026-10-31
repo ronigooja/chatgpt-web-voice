@@ -15,7 +15,7 @@ const accountSelectColumns = `
 	id, email, access_token, token_hash, proxy, status, disabled, invalid_at,
 	COALESCE(last_used_at, ''), created_at, updated_at,
 	COALESCE((SELECT device_id FROM bridge_accounts WHERE account_id = accounts.id), ''),
-	cooldown_until, failure_count, unauthorized_count, expires_at, outcome_at`
+	cooldown_until, failure_count, unauthorized_count, expires_at, outcome_at, media_route`
 
 // Pool is the SQLite-backed account repository. Selection and invalidation are
 // serialized through the shared store mutex. Access tokens are sealed at rest
@@ -177,6 +177,9 @@ func (p *Pool) Create(account Account) (Account, error) {
 	if account.AccessToken == "" {
 		return Account{}, &Error{Message: "access_token is required"}
 	}
+	if account.MediaRoute == "" {
+		return Account{}, &Error{Message: "media_route must be direct or account"}
+	}
 	stored, hash, err := p.sealToken(account.AccessToken)
 	if err != nil {
 		return Account{}, err
@@ -194,10 +197,10 @@ func (p *Pool) Create(account Account) (Account, error) {
 	}
 	result, err := p.db.Conn().Exec(`
 		INSERT INTO accounts
-			(email, access_token, token_hash, proxy, status, disabled, invalid_at, expires_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+			(email, access_token, token_hash, proxy, media_route, status, disabled, invalid_at, expires_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
 		account.Email, stored, hash,
-		storedProxy, account.Status, boolInt(account.Disabled), account.InvalidAt,
+		storedProxy, account.MediaRoute, account.Status, boolInt(account.Disabled), account.InvalidAt,
 		tokenExpiry(account.AccessToken))
 	if err != nil {
 		return Account{}, fmt.Errorf("create account: %w", err)
@@ -237,6 +240,13 @@ func (p *Pool) Update(id int64, update AccountUpdate) (Account, error) {
 	if update.Proxy != nil {
 		current.Proxy = strings.TrimSpace(*update.Proxy)
 	}
+	if update.MediaRoute != nil {
+		route, ok := NormalizeMediaRoute(*update.MediaRoute)
+		if !ok {
+			return Account{}, &Error{Message: "media_route must be direct or account"}
+		}
+		current.MediaRoute = route
+	}
 	current.Status = strings.TrimSpace(update.Status)
 	if current.Status == "" {
 		current.Status = "正常"
@@ -256,11 +266,11 @@ func (p *Pool) Update(id int64, update AccountUpdate) (Account, error) {
 	_, err = p.db.Conn().Exec(`
 		UPDATE accounts SET
 			cooldown_until = 0, failure_count = 0, unauthorized_count = 0, outcome_at = ?,
-			email = ?, access_token = ?, token_hash = ?, proxy = ?,
+			email = ?, access_token = ?, token_hash = ?, proxy = ?, media_route = ?,
 			status = ?, disabled = ?, invalid_at = ?, expires_at = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?`,
 		p.now().UnixMilli(), current.Email, stored, hash,
-		storedProxy, current.Status, boolInt(current.Disabled), invalidAt,
+		storedProxy, current.MediaRoute, current.Status, boolInt(current.Disabled), invalidAt,
 		tokenExpiry(current.AccessToken), id)
 	if err != nil {
 		return Account{}, fmt.Errorf("update account: %w", err)
@@ -308,6 +318,9 @@ func (p *Pool) Upsert(account Account) error {
 	if account.AccessToken == "" {
 		return &Error{Message: "access_token is required"}
 	}
+	if account.MediaRoute == "" {
+		return &Error{Message: "media_route must be direct or account"}
+	}
 	stored, hash, err := p.sealToken(account.AccessToken)
 	if err != nil {
 		return err
@@ -327,10 +340,10 @@ func (p *Pool) Upsert(account Account) error {
 	case errors.Is(err, sql.ErrNoRows):
 		_, err = p.db.Conn().Exec(`
 			INSERT INTO accounts
-				(email, access_token, token_hash, proxy, status, disabled, invalid_at, expires_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+				(email, access_token, token_hash, proxy, media_route, status, disabled, invalid_at, expires_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
 			account.Email, stored, hash,
-			storedProxy, account.Status, boolInt(account.Disabled), account.InvalidAt,
+			storedProxy, account.MediaRoute, account.Status, boolInt(account.Disabled), account.InvalidAt,
 			tokenExpiry(account.AccessToken))
 		if err != nil {
 			return fmt.Errorf("upsert account: %w", err)
@@ -341,10 +354,10 @@ func (p *Pool) Upsert(account Account) error {
 	default:
 		_, err = p.db.Conn().Exec(`
 			UPDATE accounts SET
-				email = ?, access_token = ?, token_hash = ?, proxy = ?,
+				email = ?, access_token = ?, token_hash = ?, proxy = ?, media_route = ?,
 				status = ?, disabled = ?, invalid_at = ?, expires_at = ?, updated_at = CURRENT_TIMESTAMP
 			WHERE id = ?`,
-			account.Email, stored, hash, storedProxy,
+			account.Email, stored, hash, storedProxy, account.MediaRoute,
 			account.Status, boolInt(account.Disabled), account.InvalidAt,
 			tokenExpiry(account.AccessToken), existingID)
 		if err != nil {
@@ -485,9 +498,13 @@ func (p *Pool) scanAccount(row store.Scanner) (Account, error) {
 		&account.Proxy, &account.Status, &disabled, &account.InvalidAt,
 		&account.LastUsedAt, &account.CreatedAt, &account.UpdatedAt, &storedDevice,
 		&account.CooldownUntil, &account.FailureCount, &account.UnauthorizedCount,
-		&account.ExpiresAt, &account.OutcomeAt,
+		&account.ExpiresAt, &account.OutcomeAt, &account.MediaRoute,
 	); err != nil {
 		return Account{}, err
+	}
+	account.MediaRoute, _ = NormalizeMediaRoute(account.MediaRoute)
+	if account.MediaRoute == "" {
+		account.MediaRoute = MediaRouteDirect
 	}
 	plain, err := p.openToken(storedToken)
 	if err != nil {
@@ -566,6 +583,8 @@ func normalizeAccount(account Account) Account {
 	account.Email = strings.TrimSpace(account.Email)
 	account.AccessToken = strings.TrimSpace(account.AccessToken)
 	account.Proxy = strings.TrimSpace(account.Proxy)
+	// Unknown routes become "" so callers can reject them.
+	account.MediaRoute, _ = NormalizeMediaRoute(account.MediaRoute)
 	account.Status = strings.TrimSpace(account.Status)
 	if account.Status == "" {
 		account.Status = "正常"

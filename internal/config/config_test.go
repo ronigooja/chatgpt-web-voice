@@ -250,7 +250,7 @@ func TestValidateRejectsBadAccountHealthSettings(t *testing.T) {
 
 func TestRelayConfigDefaultsAndOverrides(t *testing.T) {
 	cfg := Load()
-	if !cfg.RelayEnabled || cfg.RelayMediaRoute != RelayMediaRouteAccount || cfg.RelayMaxSessions != 0 {
+	if !cfg.RelayEnabled || cfg.RelayMaxSessions != 0 {
 		t.Fatalf("unexpected relay defaults: %+v", cfg)
 	}
 	t.Setenv("VOICE_RELAY_ENABLED", "false")
@@ -258,13 +258,12 @@ func TestRelayConfigDefaultsAndOverrides(t *testing.T) {
 		t.Fatal("VOICE_RELAY_ENABLED=false must disable the relay")
 	}
 	t.Setenv("VOICE_RELAY_ENABLED", "true")
-	t.Setenv("VOICE_RELAY_MEDIA_ROUTE", "DIRECT")
 	t.Setenv("VOICE_RELAY_MAX_SESSIONS", "4")
 	t.Setenv("VOICE_RELAY_UDP_PORT_MIN", "40000")
 	t.Setenv("VOICE_RELAY_UDP_PORT_MAX", "40100")
 	t.Setenv("VOICE_RELAY_PUBLIC_IP", "203.0.113.5")
 	cfg = Load()
-	if !cfg.RelayEnabled || cfg.RelayMediaRoute != RelayMediaRouteDirect || cfg.RelayMaxSessions != 4 ||
+	if !cfg.RelayEnabled || cfg.RelayMaxSessions != 4 ||
 		cfg.RelayUDPPortMin != 40000 || cfg.RelayUDPPortMax != 40100 || cfg.RelayPublicIP != "203.0.113.5" {
 		t.Fatalf("relay overrides not applied: %+v", cfg)
 	}
@@ -279,7 +278,6 @@ func TestValidateRejectsBadRelaySettings(t *testing.T) {
 		t.Fatalf("baseline config invalid: %v", err)
 	}
 	for name, mutate := range map[string]func(*Config){
-		"unknown route":      func(c *Config) { c.RelayMediaRoute = "proxy" },
 		"negative sessions":  func(c *Config) { c.RelayMaxSessions = -1 },
 		"port min only":      func(c *Config) { c.RelayUDPPortMin = 40000 },
 		"port min above max": func(c *Config) { c.RelayUDPPortMin, c.RelayUDPPortMax = 40100, 40000 },
