@@ -90,9 +90,9 @@ jobs:
         if: matrix.check == 'build' && success()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-           name: voice-protocol-probe-${{ github.sha }}
-           path: |
-             ${{ runner.temp }}/probe-tools
-             ${{ runner.temp }}/probe-codex
+          name: voice-protocol-probe-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/probe-tools
+            ${{ runner.temp }}/probe-codex
           if-no-files-found: error
           retention-days: 1
