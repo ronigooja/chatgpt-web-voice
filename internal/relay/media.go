@@ -157,6 +157,7 @@ type pionSession struct {
 
 	observerMu sync.RWMutex
 	observer   func([]byte)
+	diagnostics Diagnostics
 }
 
 // SetEventObserver implements Session.
@@ -164,6 +165,29 @@ func (s *pionSession) SetEventObserver(observer func([]byte)) {
 	s.observerMu.Lock()
 	s.observer = observer
 	s.observerMu.Unlock()
+}
+
+// SetDiagnostics enables raw probe diagnostics on both peer legs.
+func (s *pionSession) SetDiagnostics(d Diagnostics) {
+	s.observerMu.Lock()
+	s.diagnostics = d
+	s.observerMu.Unlock()
+	s.bridge.observeMu.Lock()
+	if d.OnFrame == nil { s.bridge.rawFrame = nil } else { s.bridge.rawFrame = d.OnFrame }
+	s.bridge.observeMu.Unlock()
+}
+
+func (s *pionSession) diagnosticFrame(side string, data []byte, isString bool) {
+	s.observerMu.RLock(); d := s.diagnostics; s.observerMu.RUnlock()
+	if d.OnFrame != nil { d.OnFrame(side, append([]byte(nil), data...), isString) }
+}
+func (s *pionSession) diagnosticState(side, layer, state string) {
+	s.observerMu.RLock(); d := s.diagnostics; s.observerMu.RUnlock()
+	if d.OnState != nil { d.OnState(side, layer, state) }
+}
+func (s *pionSession) diagnosticChannel(side, state string) {
+	s.observerMu.RLock(); d := s.diagnostics; s.observerMu.RUnlock()
+	if d.OnChannel != nil { d.OnChannel(side, state) }
 }
 
 func (s *pionSession) observeEvent(data []byte) {
@@ -208,6 +232,7 @@ type dataChannelBridge struct {
 
 	observeMu sync.RWMutex
 	observe   func([]byte)
+	rawFrame  func(side string, data []byte, isString bool)
 }
 
 // New creates a Pion based relay. A nil logger discards logs.
@@ -376,6 +401,7 @@ func (r *PionRelay) NewSession(ctx context.Context, clientOffer string, route Ro
 		return fail("create peer A DataChannel", err)
 	}
 	session.bridge.attachDownstream(clientChannel)
+	clientChannel.OnOpen(func() { session.diagnosticChannel("client", "open") })
 	downstream.OnDataChannel(func(channel *webrtc.DataChannel) {
 		if err := channel.Close(); err != nil {
 			session.logger.Debug("relay: close unsupported peer A DataChannel", "error", err)
@@ -458,6 +484,7 @@ func (s *pionSession) buildLeg(ctx context.Context, route Route) (*leg, string, 
 		return failLeg("create peer B DataChannel", err)
 	}
 	l.channel = channel
+	channel.OnOpen(func() { s.diagnosticChannel(l.name, "open") })
 	s.installLegHandlers(l)
 
 	gatherComplete := webrtc.GatheringCompletePromise(pc)
@@ -772,7 +799,14 @@ func (s *pionSession) closePeerConnection(peer string, connection *webrtc.PeerCo
 }
 
 func (s *pionSession) installPeerAHandler() {
+	s.downstream.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) { s.diagnosticState("client", "ice", state.String()) })
+	s.downstream.OnICEGatheringStateChange(func(state webrtc.ICEGatheringState) { s.diagnosticState("client", "ice_gathering", state.String()) })
+	if s.downstream.SCTP() != nil {
+		s.downstream.SCTP().Transport().OnStateChange(func(state webrtc.DTLSTransportState) { s.diagnosticState("client", "dtls", state.String()) })
+	}
+	s.downstream.OnICECandidate(func(*webrtc.ICECandidate) {})
 	s.downstream.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		s.diagnosticState("client", "peer", state.String())
 		logger := s.logger.With("peer", "peer-a", "state", state.String())
 		switch state {
 		case webrtc.PeerConnectionStateConnecting:
@@ -801,7 +835,13 @@ func (s *pionSession) installPeerAHandler() {
 // installLegHandlers wires peer B state changes for one leg. A failure of the
 // active leg fails the session; a failure of a pending leg only aborts the swap.
 func (s *pionSession) installLegHandlers(l *leg) {
+	l.pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) { s.diagnosticState(l.name, "ice", state.String()) })
+	l.pc.OnICEGatheringStateChange(func(state webrtc.ICEGatheringState) { s.diagnosticState(l.name, "ice_gathering", state.String()) })
+	if l.pc.SCTP() != nil {
+		l.pc.SCTP().Transport().OnStateChange(func(state webrtc.DTLSTransportState) { s.diagnosticState(l.name, "dtls", state.String()) })
+	}
 	l.pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		s.diagnosticState(l.name, "peer", state.String())
 		logger := s.logger.With("peer", l.name, "state", state.String())
 		switch state {
 		case webrtc.PeerConnectionStateConnecting:
@@ -1019,6 +1059,10 @@ func (b *dataChannelBridge) bindUpstreamSource(channel *webrtc.DataChannel) {
 			return
 		}
 		payload := append([]byte(nil), message.Data...)
+		b.observeMu.RLock()
+		rawFrame := b.rawFrame
+		b.observeMu.RUnlock()
+		if rawFrame != nil { rawFrame("upstream", payload, message.IsString) }
 		if message.IsString {
 			b.observeMu.RLock()
 			observe := b.observe
@@ -1071,6 +1115,10 @@ func (b *dataChannelBridge) bindSource(channel *webrtc.DataChannel, destination 
 			return
 		}
 		payload := append([]byte(nil), message.Data...)
+		b.observeMu.RLock()
+		rawFrame := b.rawFrame
+		b.observeMu.RUnlock()
+		if rawFrame != nil { rawFrame("client", payload, message.IsString) }
 		select {
 		case destination.queue <- dataChannelMessage{data: payload, isString: message.IsString}:
 		case <-b.done:

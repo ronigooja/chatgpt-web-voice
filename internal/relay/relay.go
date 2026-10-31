@@ -21,6 +21,18 @@ type Relay interface {
 	NewSession(ctx context.Context, clientOffer string, route Route) (Session, string, error)
 }
 
+// Diagnostics receives low-level media/session observations for disposable
+// probes. It is optional and has no effect on normal relay operation.
+type Diagnostics struct {
+	OnFrame   func(side string, data []byte, isString bool)
+	OnState   func(side, layer, state string)
+	OnChannel func(side, state string)
+}
+
+type DiagnosticSession interface {
+	SetDiagnostics(Diagnostics)
+}
+
 // Session is one bridged call.
 type Session interface {
 	// ID is the relay-local media session identifier.

@@ -31,6 +31,10 @@ type eventLog struct {
 	types  []string
 	texts  []string
 	unsafe bool
+	frames int
+	bytes int
+	textFrames int
+	binaryFrames int
 }
 
 func (l *eventLog) add(raw []byte) {
@@ -91,14 +95,33 @@ func envelope(inner any) []byte { b, _ := json.Marshal(inner); o, _ := json.Mars
 func relayText(s string) map[string]any { return map[string]any{"type":"relay_message", "payload":map[string]any{"type":"relay_message", "message":s}} }
 
 func send(dc *webrtc.DataChannel, x any) error { return dc.SendText(string(envelope(x))) }
-func silence(track *webrtc.TrackLocalStaticRTP, stop <-chan struct{}) { ticker := time.NewTicker(20*time.Millisecond); defer ticker.Stop(); var seq uint16; var ts uint32; for { select { case <-stop: return; case <-ticker.C: _ = track.WriteRTP(&rtp.Packet{Header: rtp.Header{Version:2, PayloadType:111, SequenceNumber:seq, Timestamp:ts, SSRC:42}, Payload: make([]byte, 20)}); seq++; ts += 960 } } }
+func silence(track *webrtc.TrackLocalStaticRTP, payloadType uint8, stop <-chan struct{}) { ticker := time.NewTicker(20*time.Millisecond); defer ticker.Stop(); var seq uint16; var ts uint32; for { select { case <-stop: return; case <-ticker.C: _ = track.WriteRTP(&rtp.Packet{Header: rtp.Header{Version:2, PayloadType:payloadType, SequenceNumber:seq, Timestamp:ts, SSRC:42}, Payload: []byte{0xf8, 0xff, 0xfe}}); seq++; ts += 960 } } }
+
+func redactFrame(b []byte) string { s := string(b); if len(s) > 120 { s = s[:120] }; for _, marker := range []string{"Bearer ", "access_token", "token", "cookie", "session_token"} { if strings.Contains(strings.ToLower(s), strings.ToLower(marker)) { return "[redacted]" } }; return s }
+
+func audioPayloadTypes(sdp string) []string {
+	var out []string
+	for _, line := range strings.Split(sdp, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "a=rtpmap:") && strings.Contains(strings.ToLower(line), "opus/") {
+			parts := strings.SplitN(strings.TrimPrefix(line, "a=rtpmap:"), " ", 2)
+			if len(parts) == 2 { out = append(out, parts[0]) }
+		}
+	}
+	return out
+}
 
 func runCall(cfg config.Config, pool *accounts.Pool, rl relay.Relay, clientTools []any, label string) (int, error) {
 	api, err := clientAPI(); if err != nil { return 0, err }
 	client, sdp, dc, track, err := offer(api); if err != nil { return 0, err }; defer client.Close()
-	stop := make(chan struct{}); defer close(stop); go silence(track, stop)
+	stop := make(chan struct{}); defer close(stop)
 	logEvents := &eventLog{}
-	svc := voice.New(cfg, pool, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))).WithRelay(rl).WithEventObserver(logEvents.add)
+	diagnostics := relay.Diagnostics{
+		OnFrame: func(side string, data []byte, isString bool) { logEvents.mu.Lock(); logEvents.frames++; logEvents.bytes += len(data); if isString { logEvents.textFrames++ } else { logEvents.binaryFrames++ }; n := logEvents.frames; logEvents.mu.Unlock(); if isString { fmt.Printf("raw_frame side=%s kind=text bytes=%d index=%d prefix=%q\n", side, len(data), n, redactFrame(data)) } else { fmt.Printf("raw_frame side=%s kind=binary bytes=%d index=%d\n", side, len(data), n) } },
+		OnState: func(side, layer, state string) { fmt.Printf("peer_state side=%s layer=%s state=%s\n", side, layer, state) },
+		OnChannel: func(side, state string) { fmt.Printf("channel_state side=%s state=%s\n", side, state) },
+	}
+	svc := voice.New(cfg, pool, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))).WithRelay(rl).WithEventObserver(logEvents.add).WithRelayDiagnostics(diagnostics)
 	defaults := voice.Config().Defaults
 	req := voice.CreateSessionRequest{Owner: "probe", OfferSDP: sdp, Voice: defaults.Voice, VoiceMode: defaults.VoiceMode, LanguageCode: defaults.LanguageCode, ClientTools: clientTools}
 	if err := voice.ValidateCreateSessionInput(req); err != nil { return 0, fmt.Errorf("local input validation: %w", err) }
@@ -106,8 +129,12 @@ func runCall(cfg config.Config, pool *accounts.Pool, rl relay.Relay, clientTools
 	res, err := svc.CreateSession(req)
 	if err != nil { return 0, err }
 	fmt.Printf("%s_connected wm_status=accepted session=%s\n", label, res.SessionID[:8])
+	fmt.Printf("negotiated_audio_payload_types=%s\n", strings.Join(audioPayloadTypes(res.AnswerSDP), ","))
 	if err := client.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: res.AnswerSDP}); err != nil { return 0, err }
+	payloadTypes := audioPayloadTypes(res.AnswerSDP); payloadType := uint8(111); if len(payloadTypes) > 0 { var n int; if _, err := fmt.Sscanf(payloadTypes[0], "%d", &n); err == nil && n >= 0 && n <= 127 { payloadType = uint8(n) } }; go silence(track, payloadType, stop)
 	open := make(chan struct{}); dc.OnOpen(func(){ close(open) }); select { case <-open: case <-time.After(25*time.Second): return 0, fmt.Errorf("client data channel timeout") }
+	time.Sleep(15 * time.Second)
+	logEvents.mu.Lock(); fmt.Printf("initial_counts frames=%d bytes=%d text=%d binary=%d observer_types=%s\n", logEvents.frames, logEvents.bytes, logEvents.textFrames, logEvents.binaryFrames, strings.Join(logEvents.types, ",")); logEvents.mu.Unlock()
 	step := func(name string, x any, wait time.Duration) error { logEvents.mu.Lock(); before := len(logEvents.types); textBefore := len(logEvents.texts); logEvents.mu.Unlock(); fmt.Printf("sent %s %s\n", name, safeSent(x)); if err := send(dc, x); err != nil { return err }; time.Sleep(wait); logEvents.mu.Lock(); types := append([]string(nil), logEvents.types[before:]...); texts := append([]string(nil), logEvents.texts[textBefore:]...); unsafe := logEvents.unsafe; logEvents.mu.Unlock(); fmt.Printf("result %s event_types=%s assistant_text=%s unsafe=%t\n", name, strings.Join(types, ","), strings.Join(texts, " | "), unsafe); return nil }
 	if label == "E1-E5" {
 		if err := step("E1", relayText("Reply with exactly the word BASELINE."), 7*time.Second); err != nil { return 0, err }
@@ -120,10 +147,10 @@ func runCall(cfg config.Config, pool *accounts.Pool, rl relay.Relay, clientTools
 		if err := step("E4_question", relayText("What is my project called?"), 7*time.Second); err != nil { return 0, err }
 		if err := step("E5_response_create", map[string]any{"type":"response.create"}, 6*time.Second); err != nil { return 0, err }
 	}
-	if !svc.ReleaseSession("probe", res.VoiceSessionID) { return 0, fmt.Errorf("session release not acknowledged") }
 	if label == "E6" {
 		if err := step("E6_question", relayText("Please create an HTML document called hello."), 8*time.Second); err != nil { return 0, err }
 	}
+	if !svc.ReleaseSession("probe", res.VoiceSessionID) { return 0, fmt.Errorf("session release not acknowledged") }
 	return 201, nil
 }
 

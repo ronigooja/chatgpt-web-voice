@@ -134,6 +134,7 @@ type Service struct {
 	// relay, when set, terminates media in the gateway (peers A and B).
 	relay relay.Relay
 	eventObserver func([]byte)
+	relayDiagnostics *relay.Diagnostics
 	// evidence, when set, records media sessions and termination evidence.
 	evidence MediaEvidenceStore
 
@@ -170,6 +171,15 @@ func (s *Service) WithRelay(r relay.Relay) *Service {
 func (s *Service) WithEventObserver(observer func([]byte)) *Service {
 	if s != nil {
 		s.eventObserver = observer
+	}
+	return s
+}
+
+// WithRelayDiagnostics enables low-level relay diagnostics for a disposable
+// probe. It is nil for normal server use.
+func (s *Service) WithRelayDiagnostics(d relay.Diagnostics) *Service {
+	if s != nil {
+		s.relayDiagnostics = &d
 	}
 	return s
 }
@@ -1355,6 +1365,11 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 			}
 			if s.eventObserver != nil {
 				media.SetEventObserver(s.eventObserver)
+			}
+			if s.relayDiagnostics != nil {
+				if diagnostic, ok := media.(relay.DiagnosticSession); ok {
+					diagnostic.SetDiagnostics(*s.relayDiagnostics)
+				}
 			}
 		}
 		closeMediaOnFailure := func(reason string) {
