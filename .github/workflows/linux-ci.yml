@@ -114,6 +114,8 @@ jobs:
         if: matrix.check == 'build' && success()
         run: |
           set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
           mkdir -p "$RUNNER_TEMP/probe-audio"
           ffmpeg -hide_banner -loglevel error -i "$RUNNER_TEMP/probe-audio-wav/u1.wav" -c:a libopus -b:a 32k -frame_duration 20 "$RUNNER_TEMP/probe-audio/u1.opus"
           ffmpeg -hide_banner -loglevel error -i "$RUNNER_TEMP/probe-audio-wav/u2.wav" -c:a libopus -b:a 32k -frame_duration 20 "$RUNNER_TEMP/probe-audio/u2.opus"
