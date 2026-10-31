@@ -165,6 +165,7 @@ sys.stdout.writelines(difflib.unified_diff(old.splitlines(True), new.splitlines(
 PY
       exit 0
     fi
+    if [[ ! -f "$PREVIOUS_FILE" ]]; then cp -p "$COMPOSE_FILE" "$PREVIOUS_FILE"; fi
     if ! grep -Fq "image: \"$IMAGE_TAG\"" "$COMPOSE_FILE" || ! grep -Fq "\"$UDP_MIN-$UDP_MAX:$UDP_MIN-$UDP_MAX/udp\"" "$COMPOSE_FILE" || ! grep -Fq 'VOICE_RELAY_ENABLED: "true"' "$COMPOSE_FILE" || ! grep -Fq "VOICE_RELAY_PUBLIC_IP: \"$PUBLIC_IP\"" "$COMPOSE_FILE" || ! grep -Fq "VOICE_RELAY_UDP_PORT_MIN: \"$UDP_MIN\"" "$COMPOSE_FILE" || ! grep -Fq "VOICE_RELAY_UDP_PORT_MAX: \"$UDP_MAX\"" "$COMPOSE_FILE"; then
       cp -p "$COMPOSE_FILE" "$PREVIOUS_FILE"
       python3 - "${python_args[@]}" <<'PY'
@@ -232,7 +233,7 @@ PY
       echo "warning: media_relay_enabled log line not found" >&2
     fi
     echo "Published UDP ports:"
-    docker port "$CONTAINER" 40000-40099/udp 2>/dev/null || true
+    docker port "$CONTAINER" 2>/dev/null | grep "/udp" || true
     echo "Reminder: allow UDP $UDP_MIN-$UDP_MAX in the cloud security group."
     ;;
   rollback)
@@ -248,12 +249,14 @@ PY
     compose ps
     echo "Health: $(docker inspect -f '{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null || echo unavailable)"
     echo "Published UDP ports:"
-    docker port "$CONTAINER" 40000-40099/udp 2>/dev/null || true
+    docker port "$CONTAINER" 2>/dev/null | grep "/udp" || true
     ;;
   uninstall)
     need docker
     compose down
     if [[ "$PURGE_DATA" == true ]]; then
+      read -r -p "Delete volumes and $COMPOSE_DIR/.secrets? Type yes: " answer
+      [[ "$answer" == yes ]] || die "purge cancelled"
       compose down -v
       rm -rf -- "$COMPOSE_DIR/.secrets"
       echo "Removed service, named volumes, and .secrets."
