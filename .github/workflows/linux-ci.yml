@@ -67,7 +67,7 @@ jobs:
             tests) command=(go test -count=1 -timeout=10m ./...) ;;
             race) command=(go test -race -count=1 -timeout=15m ./...) ;;
             build)
-              command=(bash -c 'go build -buildvcs=false -o "$0" ./cmd/server && go build -buildvcs=false -o "$1" ./cmd/migrate-accounts && go build -buildvcs=false -o "$2" ./cmd/probe-tools' "$RUNNER_TEMP/voice-server" "$RUNNER_TEMP/migrate-accounts" "$RUNNER_TEMP/probe-tools")
+              command=(bash -c 'go build -buildvcs=false -o "$0" ./cmd/server && go build -buildvcs=false -o "$1" ./cmd/migrate-accounts && go build -buildvcs=false -o "$2" ./cmd/probe-tools && go build -buildvcs=false -o "$3" ./cmd/probe-codex' "$RUNNER_TEMP/voice-server" "$RUNNER_TEMP/migrate-accounts" "$RUNNER_TEMP/probe-tools" "$RUNNER_TEMP/probe-codex")
               ;;
             *) exit 2 ;;
           esac
