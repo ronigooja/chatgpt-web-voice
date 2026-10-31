@@ -3,12 +3,14 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -17,6 +19,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bogdanfinn/fhttp"
+	"github.com/bogdanfinn/websocket"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/accounts"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/config"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/httpclient"
@@ -57,6 +61,8 @@ type requestBody struct {
 	Session session `json:"session"`
 }
 
+const chatGPTAccountIDHeader = "ChatGPT-Account-ID"
+
 func buildSession() session {
 	var s session
 	s.Model = "gpt-live-1-codex"
@@ -71,13 +77,17 @@ func buildSession() session {
 }
 
 func requestHeaders(token string) map[string]string {
-	return map[string]string{
+	h := map[string]string{
 		"Authorization": "Bearer " + token,
 		"Content-Type":  "application/json",
 		"openai-alpha":  "quicksilver=v2",
 		"originator":    "codex_cli_rs",
 		"User-Agent":    "codex_cli_rs/0.0.0 (darwin unknown; arm64) Codex",
 	}
+	if id := accountIDFromToken(token); id != "" {
+		h[chatGPTAccountIDHeader] = id
+	}
+	return h
 }
 
 func redactedDump(body requestBody, headers map[string]string) string {
@@ -288,6 +298,85 @@ func findText(v any) string {
 	}
 	return ""
 }
+
+func accountIDFromToken(token string) string {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	b, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ""
+	}
+	var claims map[string]any
+	if json.Unmarshal(b, &claims) != nil {
+		return ""
+	}
+	for _, key := range []string{"chatgpt_account_id", "account_id"} {
+		if v, ok := claims[key].(string); ok {
+			return v
+		}
+	}
+	if auth, ok := claims["https://api.openai.com/auth"].(map[string]any); ok {
+		for _, key := range []string{"chatgpt_account_id", "account_id"} {
+			if v, ok := auth[key].(string); ok {
+				return v
+			}
+		}
+	}
+	return ""
+}
+
+func sidebandURL(callID string) string {
+	return "wss://api.openai.com/v1/live/" + url.PathEscape(callID)
+}
+
+type sidebandResult struct {
+	conn                 *websocket.Conn
+	status               int
+	errorType, errorCode string
+}
+
+func connectSideband(callID, token, accountProxy string) sidebandResult {
+	h := fhttp.Header{}
+	h.Set("Authorization", "Bearer "+token)
+	if accountID := accountIDFromToken(token); accountID != "" {
+		h.Set(chatGPTAccountIDHeader, accountID)
+	}
+	h.Set("originator", "codex_cli_rs")
+	h.Set("User-Agent", "codex_cli_rs/0.0.0 (linux unknown; amd64) Codex")
+	d := websocket.Dialer{HandshakeTimeout: 20 * time.Second, Proxy: func(*fhttp.Request) (*url.URL, error) { return url.Parse(strings.TrimSpace(accountProxy)) }}
+	if strings.TrimSpace(accountProxy) == "" || strings.EqualFold(strings.TrimSpace(accountProxy), "direct") {
+		d.Proxy = nil
+	}
+	conn, resp, err := d.Dial(sidebandURL(callID), h)
+	result := sidebandResult{conn: conn}
+	if resp != nil {
+		result.status = resp.StatusCode
+	}
+	if err != nil {
+		if resp != nil {
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+			var e map[string]any
+			if json.Unmarshal(b, &e) == nil {
+				result.errorType, _ = e["type"].(string)
+				result.errorCode, _ = e["code"].(string)
+			}
+		}
+	}
+	fmt.Printf("sideband_headers_sent=Authorization,%s,originator,User-Agent attestation=false\n", chatGPTAccountIDHeader)
+	if err != nil {
+		fmt.Printf("sideband_handshake status=%d error_type=%s error_code=%s\n", result.status, result.errorType, result.errorCode)
+	} else {
+		fmt.Printf("sideband_handshake status=%d\n", result.status)
+	}
+	return result
+}
+
+func sendSideband(conn *websocket.Conn, value any) error {
+	b, _ := json.Marshal(value)
+	return conn.WriteMessage(websocket.TextMessage, b)
+}
 func sendText(dc *webrtc.DataChannel, text string) error {
 	for len(text) > 0 {
 		n := 500
@@ -394,6 +483,37 @@ func main() {
 	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: answer}); err != nil {
 		log.Fatal(err)
 	}
+	sb := connectSideband(location[strings.LastIndex(location, "/")+1:], token, account.Proxy)
+	if sb.conn != nil {
+		defer sb.conn.Close()
+		go func() {
+			for {
+				_ = sb.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+				_, b, err := sb.conn.ReadMessage()
+				if err != nil {
+					if strings.Contains(err.Error(), "i/o timeout") {
+						continue
+					}
+					return
+				}
+				var v map[string]any
+				if json.Unmarshal(b, &v) != nil {
+					continue
+				}
+				t, _ := v["type"].(string)
+				if t == "" {
+					continue
+				}
+				if t == "delegation.created" {
+					fmt.Printf("sideband_frame type=%s keys=item,type text=%q\n", t, truncate(findText(v), 200))
+				} else if strings.Contains(t, "transcript") {
+					fmt.Printf("sideband_frame type=%s text_length=%d\n", t, len(findText(v)))
+				} else {
+					fmt.Printf("sideband_frame type=%s\n", t)
+				}
+			}
+		}()
+	}
 	stop := make(chan struct{})
 	defer close(stop)
 	pt := opusPT(answer)
@@ -442,6 +562,9 @@ func main() {
 	logf.Unlock()
 	if id != "" {
 		_ = sendDelegation(dc, id, "Done: hello.html created.")
+		if sb.conn != nil {
+			_ = sendSideband(sb.conn, map[string]any{"type": "delegation.context.append", "delegation_item_id": id, "content": []any{map[string]any{"type": "input_text", "text": "Done: hello.html was created."}}})
+		}
 		fmt.Printf("delegation_created=true text=%q keys=item,type\n", txt)
 		time.Sleep(20 * time.Second)
 	} else {
@@ -461,4 +584,11 @@ func main() {
 	fmt.Printf("event_types=%s assistant_text=%q audio_frames=%d\n", strings.Join(logf.types, ","), strings.Join(logf.assistant, " | "), logf.audioFrames)
 	logf.Unlock()
 	fmt.Println("sideband=not_attempted_not_derivable_from_codex_source")
+}
+
+func truncate(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
 }
