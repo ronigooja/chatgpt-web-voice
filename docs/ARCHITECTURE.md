@@ -229,6 +229,12 @@ api_key:<numeric_id>
   DELETE /v1/voice/sessions/{id}
 ```
 
+The downstream DELETE is idempotent for an owner-scoped session recorded as
+released or cleanly terminated: the first release keeps its existing
+`{"ok":true,"released":true}` response, while a repeat returns
+`{"ok":true,"state":"already_released"}`. Unknown ids and another API key's
+session remain 404.
+
 - 释放 **不** 强制掐断已建立的 WebRTC（客户端自己 close）；
 - 撤销 API Key **不能** 中断已连通媒体面；
 - 粘性账号与上游线索仍在 SQLite，供下次同 `voice_session_id` 重连。

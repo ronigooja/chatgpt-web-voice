@@ -23,6 +23,7 @@ type downstreamVoiceStub struct {
 	releaseID     string
 	createError   error
 	generation    int64
+	releaseCount  int
 }
 
 func (s *downstreamVoiceStub) CreateSession(req voice.CreateSessionRequest) (*voice.SessionResult, error) {
@@ -42,9 +43,18 @@ func (s *downstreamVoiceStub) CreateSession(req voice.CreateSessionRequest) (*vo
 }
 
 func (s *downstreamVoiceStub) ReleaseSession(owner, id string) bool {
+	released, _ := s.ReleaseSessionStatus(owner, id)
+	return released
+}
+
+func (s *downstreamVoiceStub) ReleaseSessionStatus(owner, id string) (bool, bool) {
 	s.releaseOwner = owner
 	s.releaseID = id
-	return owner == "api_key:1" && id == "vs_test"
+	if owner != "api_key:1" || id != "vs_test" {
+		return false, false
+	}
+	s.releaseCount++
+	return true, s.releaseCount > 1
 }
 
 func (s *downstreamVoiceStub) ReleaseAccountLease(owner, leaseID string, generation int64, sessionID string, sessionGeneration int64) (*voice.AccountLeaseRelease, error) {
@@ -123,7 +133,7 @@ func orDefaultString(value, fallback string) string {
 	return value
 }
 
-func newDownstreamTestHandler(t *testing.T, voiceService VoiceService) (http.Handler, string) {
+func newDownstreamTestHandler(t *testing.T, voiceService VoiceService) (http.Handler, string, string) {
 	t.Helper()
 	db, err := store.Open(filepath.Join(t.TempDir(), "voice.db"))
 	if err != nil {
@@ -135,11 +145,15 @@ func newDownstreamTestHandler(t *testing.T, voiceService VoiceService) (http.Han
 	if err != nil {
 		t.Fatal(err)
 	}
+	other, err := keyStore.Create("other client")
+	if err != nil {
+		t.Fatal(err)
+	}
 	server := New(Dependencies{Voice: voiceService, APIKeys: keyStore})
 	mux := http.NewServeMux()
 	server.RegisterDownstream(mux)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return auth.NewAPIKeyManager(keyStore, logger).Require(mux), created.Secret
+	return auth.NewAPIKeyManager(keyStore, logger).Require(mux), created.Secret, other.Secret
 }
 
 func performDownstreamRequest(t *testing.T, handler http.Handler, method, path, secret string, body any) *httptest.ResponseRecorder {
@@ -166,7 +180,7 @@ func performDownstreamRequest(t *testing.T, handler http.Handler, method, path, 
 
 func TestDownstreamConfigAndSessionIsolation(t *testing.T) {
 	voiceStub := &downstreamVoiceStub{}
-	handler, secret := newDownstreamTestHandler(t, voiceStub)
+	handler, secret, otherSecret := newDownstreamTestHandler(t, voiceStub)
 
 	unauthorized := performDownstreamRequest(t, handler, http.MethodGet, "/v1/voice/config", "", nil)
 	if unauthorized.Code != http.StatusUnauthorized {
@@ -264,6 +278,18 @@ func TestDownstreamConfigAndSessionIsolation(t *testing.T) {
 	if releaseResp.Code != http.StatusOK || voiceStub.releaseOwner != "api_key:1" || voiceStub.releaseID != "vs_test" {
 		t.Fatalf("release status=%d owner=%q id=%q", releaseResp.Code, voiceStub.releaseOwner, voiceStub.releaseID)
 	}
+	repeatResp := performDownstreamRequest(t, handler, http.MethodDelete, "/v1/voice/sessions/vs_test", secret, nil)
+	if repeatResp.Code != http.StatusOK || repeatResp.Body.String() != "{\"ok\":true,\"state\":\"already_released\"}\n" {
+		t.Fatalf("repeat release status=%d body=%s", repeatResp.Code, repeatResp.Body.String())
+	}
+	unknownResp := performDownstreamRequest(t, handler, http.MethodDelete, "/v1/voice/sessions/vs_unknown", secret, nil)
+	if unknownResp.Code != http.StatusNotFound {
+		t.Fatalf("unknown release status=%d body=%s", unknownResp.Code, unknownResp.Body.String())
+	}
+	otherResp := performDownstreamRequest(t, handler, http.MethodDelete, "/v1/voice/sessions/vs_test", otherSecret, nil)
+	if otherResp.Code != http.StatusNotFound {
+		t.Fatalf("other-key release status=%d body=%s", otherResp.Code, otherResp.Body.String())
+	}
 }
 
 func TestDownstreamHidesUpstreamErrorDetail(t *testing.T) {
@@ -272,7 +298,7 @@ func TestDownstreamHidesUpstreamErrorDetail(t *testing.T) {
 		StatusCode: http.StatusBadGateway,
 		Detail:     "access_token=secret-account-token",
 	}}
-	handler, secret := newDownstreamTestHandler(t, voiceStub)
+	handler, secret, _ := newDownstreamTestHandler(t, voiceStub)
 	resp := performDownstreamRequest(t, handler, http.MethodPost, "/v1/voice/sessions", secret, map[string]any{
 		"offer_sdp": "v=0\r\noffer\r\n",
 	})
@@ -295,7 +321,7 @@ func TestDownstreamSessionGenerationOnlyWhenMediaIsRelayed(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			voiceStub := &downstreamVoiceStub{generation: tc.generation}
-			handler, secret := newDownstreamTestHandler(t, voiceStub)
+			handler, secret, _ := newDownstreamTestHandler(t, voiceStub)
 			resp := performDownstreamRequest(t, handler, http.MethodPost, "/v1/voice/sessions", secret, map[string]any{"offer_sdp": "v=0\r\noffer\r\n"})
 			if resp.Code != http.StatusOK {
 				t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())

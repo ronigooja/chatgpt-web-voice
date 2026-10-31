@@ -112,6 +112,25 @@ func TestLeaseReleaseAfterPlainSessionReleaseStillHasEvidence(t *testing.T) {
 	}
 }
 
+func TestLeaseReleaseAfterPeerAClosesStillReturnsEvidence(t *testing.T) {
+	l := newLeaseFixture(t, okAnswer(t))
+	res := l.create(t)
+	if err := l.fr.session(0).CloseWithReason("peer_a_closed"); err != nil {
+		t.Fatal(err)
+	}
+	if released, already := l.svc.ReleaseSessionStatus("api_key:1", res.VoiceSessionID); !released || !already {
+		t.Fatalf("DELETE after relay self-termination: released=%v already=%v", released, already)
+	}
+	first, err := l.release(res)
+	if err != nil || !first.Terminated || first.EvidenceID == "" {
+		t.Fatalf("self-terminated release: %+v %v", first, err)
+	}
+	second, err := l.release(res)
+	if err != nil || *first != *second {
+		t.Fatalf("repeat self-terminated release: first=%+v second=%+v err=%v", first, second, err)
+	}
+}
+
 func TestLeaseStaleOrWrongIdentityIsRejected(t *testing.T) {
 	l := newLeaseFixture(t, okAnswer(t))
 	res := l.create(t)

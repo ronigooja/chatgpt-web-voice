@@ -743,14 +743,22 @@ func isPlaceholderConversationTitle(title string) bool {
 
 // ReleaseSession unbinds a voice_session_id.
 func (s *Service) ReleaseSession(owner, voiceSessionID string) bool {
+	released, _ := s.ReleaseSessionStatus(owner, voiceSessionID)
+	return released
+}
+
+// ReleaseSessionStatus unbinds a live voice_session_id. If the binding is
+// already gone, it accepts only an owner-scoped durable released/terminated
+// record as an idempotent repeat; it does not change that record.
+func (s *Service) ReleaseSessionStatus(owner, voiceSessionID string) (released, alreadyReleased bool) {
 	owner = normalizeSessionOwner(owner)
 	sessionID := strings.TrimSpace(voiceSessionID)
 	if sessionID == "" {
-		return false
+		return false, false
 	}
 	s.mu.Lock()
 	item, ok := s.bindings[sessionID]
-	released := false
+	released = false
 	var media relay.Session
 	var mediaID mediaevidence.Identity
 	var call *callState
@@ -764,12 +772,25 @@ func (s *Service) ReleaseSession(owner, voiceSessionID string) bool {
 		call.halt()
 	}
 	s.closeTracked(media, mediaID, "released")
-	if s.records != nil {
+	if released && s.records != nil {
 		if err := s.records.MarkReleased(owner, sessionID); err != nil {
 			s.logger.Warn("call_session_release_persist_failed", "voice_session_id", sessionID, "error", err)
 		}
 	}
-	return released
+	if released {
+		return true, false
+	}
+	if s.records != nil {
+		if record, err := s.records.Get(owner, sessionID); err == nil && record.Status == callsessions.StatusReleased {
+			return true, true
+		}
+	}
+	if s.evidence != nil {
+		if row, err := s.evidence.Current(sessionID); err == nil && row.Owner == owner && row.State == mediaevidence.StateTerminated {
+			return true, true
+		}
+	}
+	return false, false
 }
 
 func (s *Service) boundVoiceSession(owner, voiceSessionID string) (binding *sessionBinding, ownedByOther bool) {

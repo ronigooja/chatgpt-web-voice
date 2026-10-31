@@ -286,7 +286,11 @@ Authorization: Bearer vgw_live_<密钥>
    网关**不落库**图片与 `file_id`，也不接收图片字节；token / `account_id` 不下发。
 
 4. **挂断**  
-   `DELETE /v1/voice/sessions/{voice_session_id}` 释放内存绑定；SQLite 元数据仍保留。
+   `DELETE /v1/voice/sessions/{voice_session_id}` releases the session. The
+   first release keeps `{"ok":true,"released":true}`; a repeat for the same
+   owner after release or clean termination returns
+   `{"ok":true,"state":"already_released"}`. Unknown IDs and another API
+   key's sessions still return 404.
 
 5. **恢复 / 再拨**  
    再次 `POST /v1/voice/sessions`，带上**同一个** `voice_session_id` 与新的 `offer_sdp`。  

@@ -17,8 +17,10 @@ so continuous voice and automatic account change both fail.
 - Media was client-direct before the gateway relay was enabled by default. The
   client opened WebRTC to the upstream service; the gateway only proxied SDP
   (`internal/voice/service.go`, `CreateSession`) and had no PeerConnection.
-- `DELETE /v1/voice/sessions/{id}` only drops the gateway binding and marks the
-  call session released (`ReleaseSession`). It cannot show that the peer stopped.
+- `DELETE /v1/voice/sessions/{id}` drops the gateway binding and marks the call
+  session released (`ReleaseSession`). After a release or clean relay
+  termination, an owner-scoped repeat is acknowledged as already released;
+  unknown and cross-key ids remain 404.
 - `ReleaseAccountLease` returns "cannot obtain upstream WebRTC termination
   evidence". (An earlier draft of this plan also said a `Capabilities()` function
   advertised support; no such function exists in this repository, and

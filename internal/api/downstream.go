@@ -179,7 +179,11 @@ func (s *Server) downstreamRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sessionID := strings.TrimSpace(r.PathValue("id"))
-	if sessionID == "" || !s.voice.ReleaseSession(owner, sessionID) {
+	released, alreadyReleased := false, false
+	if sessionID != "" {
+		released, alreadyReleased = s.voice.ReleaseSessionStatus(owner, sessionID)
+	}
+	if !released {
 		writeDownstreamError(w, http.StatusNotFound, "voice_session_not_found", "voice session not found")
 		return
 	}
@@ -189,6 +193,10 @@ func (s *Server) downstreamRelease(w http.ResponseWriter, r *http.Request) {
 		"api_key_id", key.ID,
 		"voice_session_id", sessionID,
 	)
+	if alreadyReleased {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "state": "already_released"})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "released": true})
 }
 

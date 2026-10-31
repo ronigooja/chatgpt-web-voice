@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Downstream voice-session DELETE is now idempotent after an owner-scoped
+  release or clean relay termination; repeats return `state=already_released`,
+  while unknown and cross-key session ids remain 404. Lease release continues
+  to return the same durable termination evidence after relay self-termination.
 - Added a manual GitHub Actions workflow that builds the `linux/amd64` gateway image
   and publishes it only as a 7-day GitHub Actions artifact for host-side verification
   and `docker load`.

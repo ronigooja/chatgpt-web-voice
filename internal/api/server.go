@@ -45,6 +45,7 @@ type APIKeyStore interface {
 type VoiceService interface {
 	CreateSession(req voice.CreateSessionRequest) (*voice.SessionResult, error)
 	ReleaseSession(owner, voiceSessionID string) bool
+	ReleaseSessionStatus(owner, voiceSessionID string) (released, alreadyReleased bool)
 	ReleaseAccountLease(owner, leaseID string, generation int64, sessionID string, sessionGeneration int64) (*voice.AccountLeaseRelease, error)
 	UpdateSessionContext(owner, voiceSessionID string, patch voice.UpstreamContext) (voice.UpstreamContext, error)
 	FetchUpstreamTitle(owner, voiceSessionID, conversationID string) (*voice.UpstreamTitleResult, error)
