@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added a manual GitHub Actions workflow that builds the `linux/amd64` gateway image
+  and publishes it only as a 7-day GitHub Actions artifact for host-side verification
+  and `docker load`.
 - Gateway media relay is now enabled by default. Set `VOICE_RELAY_ENABLED=false`
   to retain client-direct media; unset UDP bounds use ephemeral ports.
 - Relayed calls learn `conversation_id` and `parent_message_id` from the upstream events themselves (`internal/voice/upstream_ids.go`), so a same-account rebuild resumes the conversation even if the client never calls the context update. Found in a live rebuild test, see `docs/RELAY_PLAN.md`.

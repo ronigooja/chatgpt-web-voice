@@ -135,6 +135,22 @@ docker compose restart chatgpt-web-voice
 docker compose down
 ```
 
+### GitHub Actions image artifact
+
+To build a host-loadable `linux/amd64` image without publishing to a registry, open
+the **Build image artifact** workflow and select **Run workflow**. The workflow is
+manual-only and keeps the artifact for 7 days. On the deployment host, download and
+load the artifact for the full commit SHA:
+
+```bash
+gh run download <run-id> -R ronigooja/chatgpt-web-voice -n voice-image-<sha>
+sha256sum -c SHA256SUMS
+gunzip -c voice-image.tar.gz | docker load
+```
+
+The `IMAGE_TAG` file contains the `main-<7-character-sha>` tag to use when starting
+the loaded image.
+
 ## 环境变量
 
 多数运行参数已在代码或镜像里内置默认值（路径、会话 TTL、上游传输/指纹、日志格式等），**算固定默认，一般不用写**。  
