@@ -19,7 +19,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bogdanfinn/fhttp"
+	fhttp "github.com/bogdanfinn/fhttp"
 	"github.com/bogdanfinn/websocket"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/accounts"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/config"
