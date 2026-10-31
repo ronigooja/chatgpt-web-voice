@@ -108,7 +108,7 @@ func TestBuildSessionJSONResumesUpstreamConversation(t *testing.T) {
 		UpstreamVoiceSessionID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
 		ConversationID:         "conv-123",
 		ParentMessageID:        "msg-parent",
-	})
+	}, nil)
 	var payload map[string]any
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
 		t.Fatal(err)

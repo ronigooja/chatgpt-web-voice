@@ -133,6 +133,7 @@ type Service struct {
 
 	// relay, when set, terminates media in the gateway (peers A and B).
 	relay relay.Relay
+	eventObserver func([]byte)
 	// evidence, when set, records media sessions and termination evidence.
 	evidence MediaEvidenceStore
 
@@ -160,6 +161,15 @@ func New(cfg config.Config, pool AccountRepository, logger *slog.Logger) *Servic
 func (s *Service) WithRelay(r relay.Relay) *Service {
 	if s != nil {
 		s.relay = r
+	}
+	return s
+}
+
+// WithEventObserver attaches a non-blocking observer to upstream DataChannel
+// events for a disposable protocol probe. It is nil for normal server use.
+func (s *Service) WithEventObserver(observer func([]byte)) *Service {
+	if s != nil {
+		s.eventObserver = observer
 	}
 	return s
 }
@@ -867,7 +877,7 @@ func normalizeSDP(offerSDP string) (string, error) {
 	return text, nil
 }
 
-func buildSessionJSON(voice, voiceMode, languageCode string, upstream UpstreamContext) string {
+func buildSessionJSON(voice, voiceMode, languageCode string, upstream UpstreamContext, clientTools []any) string {
 	sid := strings.TrimSpace(upstream.UpstreamVoiceSessionID)
 	if sid == "" {
 		sid = newUpstreamVoiceSessionID()
@@ -886,7 +896,7 @@ func buildSessionJSON(voice, voiceMode, languageCode string, upstream UpstreamCo
 		"voice_mode":                    voiceMode,
 		"model_slug":                    "",
 		"model_slug_advanced":           "",
-		"client_tools":                  []any{},
+		"client_tools":                  clientTools,
 		"history_and_training_disabled": false,
 		"conversation_mode":             map[string]any{"kind": "primary_assistant"},
 		"enable_message_streaming":      true,
@@ -1164,6 +1174,9 @@ type CreateSessionRequest struct {
 	UpstreamConversationID  string
 	UpstreamParentMessageID string
 	UpstreamVoiceSessionID  string
+	// ClientTools is optional and is omitted from normal calls. It exists for
+	// protocol probes that need to test the web voice session sideband.
+	ClientTools []any
 }
 
 // pickAccountForSession preserves stable account identity across token edits.
@@ -1263,7 +1276,11 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 		upstreamForWM.UpstreamVoiceSessionID = newUpstreamVoiceSessionID()
 	}
 
-	sessionJSON := buildSessionJSON(voice, options.VoiceMode, options.LanguageCode, upstreamForWM)
+	clientTools := req.ClientTools
+	if clientTools == nil {
+		clientTools = []any{}
+	}
+	sessionJSON := buildSessionJSON(voice, options.VoiceMode, options.LanguageCode, upstreamForWM, clientTools)
 	// Fixed before any attempt so media evidence can be keyed to the final id.
 	targetSessionID := strings.TrimSpace(req.VoiceSessionID)
 	if targetSessionID == "" {
@@ -1292,7 +1309,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 				// Drop upstream conversation resume fields if we no longer own the account.
 				upstreamForWM.ConversationID = ""
 				upstreamForWM.ParentMessageID = ""
-				sessionJSON = buildSessionJSON(voice, options.VoiceMode, options.LanguageCode, upstreamForWM)
+				sessionJSON = buildSessionJSON(voice, options.VoiceMode, options.LanguageCode, upstreamForWM, clientTools)
 				token, account, err = s.pool.Pick("", excluded)
 			}
 		}
@@ -1324,6 +1341,9 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 					return nil, &ServiceError{Message: "media relay capacity exhausted", StatusCode: 503}
 				}
 				return nil, &ServiceError{Message: "media relay unavailable", StatusCode: 502, Detail: truncate(relayErr.Error(), 300)}
+			}
+			if s.eventObserver != nil {
+				media.SetEventObserver(s.eventObserver)
 			}
 		}
 		closeMediaOnFailure := func(reason string) {
@@ -1368,7 +1388,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 			upstreamForWM.UpstreamVoiceSessionID = newUpstreamVoiceSessionID()
 			upstreamForWM.ConversationID = ""
 			upstreamForWM.ParentMessageID = ""
-			sessionJSON = buildSessionJSON(voice, options.VoiceMode, options.LanguageCode, upstreamForWM)
+			sessionJSON = buildSessionJSON(voice, options.VoiceMode, options.LanguageCode, upstreamForWM, clientTools)
 			continue
 		}
 

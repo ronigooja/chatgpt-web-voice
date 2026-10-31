@@ -143,7 +143,7 @@ func (s *Service) RebuildMedia(owner, voiceSessionID, why string) (RebuildOutcom
 		}
 	}
 
-	sessionJSON := buildSessionJSON(voice, mode, lang, upstream)
+	sessionJSON := buildSessionJSON(voice, mode, lang, upstream, nil)
 	started := time.Now()
 	status, ct, text, retryAfter, postErr := s.postWMResponse(token, offer, sessionJSON, account.Proxy, account.DeviceID)
 	s.reportOutcome(token, started, status, ct, text, retryAfter, postErr)
