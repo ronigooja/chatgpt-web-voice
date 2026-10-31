@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"github.com/google/uuid"
 
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/accounts"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/config"
@@ -124,9 +125,20 @@ func offer(api *webrtc.API) (*webrtc.PeerConnection, string, *webrtc.DataChannel
 }
 
 func envelope(inner any) []byte { b, _ := json.Marshal(inner); o, _ := json.Marshal(map[string]any{"type":"data_message", "data":string(b)}); return o }
-func relayText(s string) map[string]any { return map[string]any{"type":"relay_message", "payload":map[string]any{"type":"relay_message", "message":s}} }
+func relayText(s string) map[string]any {
+	return map[string]any{"type":"relay_message", "payload":map[string]any{"type":"relay_message", "message":map[string]any{
+		"id": uuid.NewString(), "author": map[string]any{"role":"user"}, "create_time": float64(time.Now().UnixNano()) / 1e9,
+		"content": map[string]any{"content_type":"text", "parts":[]any{s}},
+		"metadata": map[string]any{"serialization_metadata":map[string]any{"custom_symbol_offsets":[]any{}}},
+		"clientMetadata": map[string]any{"isOptimistic":true},
+	}}}
+}
 
 func send(dc *webrtc.DataChannel, x any) error { return dc.SendText(string(envelope(x))) }
+func sendTyped(dc *webrtc.DataChannel, text string) error {
+	if err := send(dc, map[string]any{"type":"action_request", "payload":map[string]any{"action":"stop_speaking"}}); err != nil { return err }
+	return send(dc, relayText(text))
+}
 func silence(track *webrtc.TrackLocalStaticRTP, payloadType uint8, stop <-chan struct{}) { ticker := time.NewTicker(20*time.Millisecond); defer ticker.Stop(); var seq uint16; var ts uint32; for { select { case <-stop: return; case <-ticker.C: _ = track.WriteRTP(&rtp.Packet{Header: rtp.Header{Version:2, PayloadType:payloadType, SequenceNumber:seq, Timestamp:ts, SSRC:42}, Payload: []byte{0xf8, 0xff, 0xfe}}); seq++; ts += 960 } } }
 
 func redactFrame(b []byte) string { s := string(b); if len(s) > 120 { s = s[:120] }; for _, marker := range []string{"Bearer ", "access_token", "token", "cookie", "session_token"} { if strings.Contains(strings.ToLower(s), strings.ToLower(marker)) { return "[redacted]" } }; return s }
@@ -168,7 +180,7 @@ func runCall(cfg config.Config, pool *accounts.Pool, rl relay.Relay, clientTools
 	time.Sleep(15 * time.Second)
 	logEvents.mu.Lock(); initialTypes := append([]string(nil), logEvents.rawTypes...); fmt.Printf("initial_counts frames=%d bytes=%d text=%d binary=%d raw_event_types=%s\n", logEvents.frames, logEvents.bytes, logEvents.textFrames, logEvents.binaryFrames, strings.Join(initialTypes, ",")); logEvents.mu.Unlock()
 	if len(initialTypes) == 0 || initialTypes[0] != "state_update" { return 0, fmt.Errorf("raw precondition failed: first event type=%q", func() string { if len(initialTypes)>0{return initialTypes[0]};return "" }()) }
-	step := func(name string, x any, wait time.Duration) error { logEvents.mu.Lock(); before := len(logEvents.rawTypes); textBefore := len(logEvents.rawTexts); callsBefore := len(logEvents.functionCalls); logEvents.mu.Unlock(); fmt.Printf("sent %s %s\n", name, safeSent(x)); if err := send(dc, x); err != nil { return err }; time.Sleep(wait); logEvents.mu.Lock(); types := append([]string(nil), logEvents.rawTypes[before:]...); texts := append([]string(nil), logEvents.rawTexts[textBefore:]...); calls := append([]map[string]string(nil), logEvents.functionCalls[callsBefore:]...); unsafe := logEvents.unsafe; logEvents.mu.Unlock(); fmt.Printf("result %s event_types=%s assistant_text=%s function_calls=%d unsafe=%t\n", name, strings.Join(types, ","), strings.Join(texts, " | "), len(calls), unsafe); if len(calls)>0 { for _, call := range calls { id:=call["call_id"]; if id=="" { id=call["id"] }; if id!="" { _ = send(dc, map[string]any{"type":"conversation.item.create","item":map[string]any{"type":"function_call_output","call_id":id,"output":"done"}}); _ = send(dc, map[string]any{"type":"response.create"}); fmt.Printf("sent function_call_output call_id_present=true\n") } } }; return nil }
+	step := func(name string, x any, wait time.Duration) error { logEvents.mu.Lock(); before := len(logEvents.rawTypes); textBefore := len(logEvents.rawTexts); callsBefore := len(logEvents.functionCalls); logEvents.mu.Unlock(); fmt.Printf("sent %s %s\n", name, safeSent(x)); var err error; if msg, ok := x.(map[string]any); ok && msg["type"] == "relay_message" { var text string; if p, ok := msg["payload"].(map[string]any); ok { if m, ok := p["message"].(map[string]any); ok { if c, ok := m["content"].(map[string]any); ok { if parts, ok := c["parts"].([]any); ok && len(parts)>0 { text, _ = parts[0].(string) } } } }; err = sendTyped(dc, text) } else { err = send(dc, x) }; if err != nil { return err }; time.Sleep(wait); logEvents.mu.Lock(); types := append([]string(nil), logEvents.rawTypes[before:]...); texts := append([]string(nil), logEvents.rawTexts[textBefore:]...); calls := append([]map[string]string(nil), logEvents.functionCalls[callsBefore:]...); unsafe := logEvents.unsafe; logEvents.mu.Unlock(); fmt.Printf("result %s event_types=%s assistant_text=%s function_calls=%d unsafe=%t\n", name, strings.Join(types, ","), strings.Join(texts, " | "), len(calls), unsafe); if len(calls)>0 { for _, call := range calls { id:=call["call_id"]; if id=="" { id=call["id"] }; if id!="" { _ = send(dc, map[string]any{"type":"conversation.item.create","item":map[string]any{"type":"function_call_output","call_id":id,"output":"done"}}); _ = send(dc, map[string]any{"type":"response.create"}); fmt.Printf("sent function_call_output call_id_present=true\n") } } }; return nil }
 	if label == "E1-E5" {
 		if err := step("E1", relayText("Reply with exactly the word BASELINE."), 7*time.Second); err != nil { return 0, err }
 		if err := step("E2_update_wrapped", map[string]any{"type":"session.update","session":map[string]any{"instructions":"Always answer with exactly the word PIRATE and nothing else."}}, 2*time.Second); err != nil { return 0, err }
