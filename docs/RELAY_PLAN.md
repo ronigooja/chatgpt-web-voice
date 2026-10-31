@@ -14,9 +14,9 @@ so continuous voice and automatic account change both fail.
 
 ## Why the pool is fenced today
 
-- Media is client-direct. The client opens WebRTC to the upstream service; the
-  gateway only proxies SDP (`internal/voice/service.go`, `CreateSession`) and has
-  no PeerConnection.
+- Media was client-direct before the gateway relay was enabled by default. The
+  client opened WebRTC to the upstream service; the gateway only proxied SDP
+  (`internal/voice/service.go`, `CreateSession`) and had no PeerConnection.
 - `DELETE /v1/voice/sessions/{id}` only drops the gateway binding and marks the
   call session released (`ReleaseSession`). It cannot show that the peer stopped.
 - `ReleaseAccountLease` returns "cannot obtain upstream WebRTC termination

@@ -105,7 +105,8 @@ type Config struct {
 	AccountUnauthorizedCooldownSeconds int
 
 	// RelayEnabled terminates voice media in the gateway (two PeerConnections
-	// per call) instead of proxying only the SDP exchange. Off by default.
+	// per call) instead of proxying only the SDP exchange. On by default; set
+	// VOICE_RELAY_ENABLED=false to keep client-direct media.
 	RelayEnabled bool
 	// RelayMediaRoute selects how the relay's upstream peer reaches ChatGPT
 	// media: "account" uses the account proxy (default), "direct" bypasses it.
@@ -254,7 +255,7 @@ func Load() Config {
 		AccountTransientCooldownSeconds:    envInt("VOICE_ACCOUNT_TRANSIENT_COOLDOWN_SECONDS", 15),
 		AccountUnauthorizedCooldownSeconds: envInt("VOICE_ACCOUNT_UNAUTHORIZED_COOLDOWN_SECONDS", 60),
 
-		RelayEnabled:     envBool("VOICE_RELAY_ENABLED", false),
+		RelayEnabled:     envBool("VOICE_RELAY_ENABLED", true),
 		RelayMediaRoute:  strings.ToLower(env("VOICE_RELAY_MEDIA_ROUTE", RelayMediaRouteAccount)),
 		RelayMaxSessions: envInt("VOICE_RELAY_MAX_SESSIONS", 0),
 		RelayUDPPortMin:  envInt("VOICE_RELAY_UDP_PORT_MIN", 0),

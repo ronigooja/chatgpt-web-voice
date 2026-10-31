@@ -179,7 +179,6 @@ func TestLoadPreservesPasswordWhitespace(t *testing.T) {
 	}
 }
 
-
 func TestValidateProductionForbidsSkipSSLVerify(t *testing.T) {
 	cfg := Config{
 		Environment:         EnvironmentProduction,
@@ -251,8 +250,12 @@ func TestValidateRejectsBadAccountHealthSettings(t *testing.T) {
 
 func TestRelayConfigDefaultsAndOverrides(t *testing.T) {
 	cfg := Load()
-	if cfg.RelayEnabled || cfg.RelayMediaRoute != RelayMediaRouteAccount || cfg.RelayMaxSessions != 0 {
+	if !cfg.RelayEnabled || cfg.RelayMediaRoute != RelayMediaRouteAccount || cfg.RelayMaxSessions != 0 {
 		t.Fatalf("unexpected relay defaults: %+v", cfg)
+	}
+	t.Setenv("VOICE_RELAY_ENABLED", "false")
+	if cfg := Load(); cfg.RelayEnabled {
+		t.Fatal("VOICE_RELAY_ENABLED=false must disable the relay")
 	}
 	t.Setenv("VOICE_RELAY_ENABLED", "true")
 	t.Setenv("VOICE_RELAY_MEDIA_ROUTE", "DIRECT")

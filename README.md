@@ -172,7 +172,7 @@ docker compose down
 | `VOICE_LOGIN_WINDOW_SECONDS` | `900` | 登录失败统计窗口 |
 | `VOICE_LOGIN_LOCKOUT_SECONDS` | `900` | 登录锁定时长 |
 | `VOICE_SESSION_TTL_SECONDS` | `180` | 语音内存绑定 TTL |
-| `VOICE_RELAY_ENABLED` | `false` | Terminate voice media in the gateway (two PeerConnections per call). Off keeps client-direct media |
+| `VOICE_RELAY_ENABLED` | `true` | Terminate voice media in the gateway (two PeerConnections per call). Set `false` to keep client-direct media |
 | `VOICE_RELAY_MEDIA_ROUTE` | `account` | `account`: relay media follows the account proxy. `direct`: relay media bypasses it. Signaling always follows the account proxy |
 | `VOICE_RELAY_MAX_SESSIONS` | `16` | Concurrent relayed calls (`0` uses the default) |
 | `VOICE_RELAY_UDP_PORT_MIN` / `VOICE_RELAY_UDP_PORT_MAX` | unset | Restrict the relay's UDP port range; set both or neither |
@@ -185,6 +185,11 @@ docker compose down
 | `VOICE_UPSTREAM_TRANSPORT` | `tls-client` | 可换成 `curl-impersonate` |
 | `VOICE_TLS_PROFILE` | `chrome_120` | 使用 `tls-client` 时换指纹档 |
 | `VOICE_IMPERSONATE` / `VOICE_CURL_IMPERSONATE_BIN` | `edge_101` / 空 | 使用 curl-impersonate 时指定配置档与二进制 |
+
+With the relay enabled, the host must allow inbound UDP on the relay port range,
+and `VOICE_RELAY_PUBLIC_IP` should be the host's public address when it is behind
+NAT. A Docker bridge network needs that UDP range published; host networking
+needs no port mapping. If the UDP range is unset, the relay uses ephemeral ports.
 
 ### 生产环境可改
 
