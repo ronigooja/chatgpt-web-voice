@@ -286,7 +286,7 @@ func main() {
 	location := resp.Header.Get("Location")
 	shape := "absent"
 	if location != "" {
-		last := location[strings.LastIndex(location, "/")+1]
+		last := location[strings.LastIndex(location, "/")+1:]
 		prefix := last
 		if len(prefix) > 4 {
 			prefix = prefix[:4]
