@@ -1,0 +1,70 @@
+name: Build image artifact
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    name: Build linux/amd64 image artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Build image
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          short_sha="${SOURCE_REVISION:0:12}"
+          main_sha="${SOURCE_REVISION:0:7}"
+          image="llm-auth-bridge-voice:${short_sha}"
+          main_image="llm-auth-bridge-voice:main-${main_sha}"
+          created="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          docker buildx build \
+            --platform linux/amd64 \
+            --load \
+            --tag "$image" \
+            --tag "$main_image" \
+            --label "org.opencontainers.image.revision=${SOURCE_REVISION}" \
+            --label "org.opencontainers.image.created=${created}" \
+            --build-arg "REVISION=${SOURCE_REVISION}" \
+            --build-arg "BUILD_DATE=${created}" \
+            .
+          echo "IMAGE_TAG=${main_image}" >> "$GITHUB_ENV"
+          echo "IMAGE_SHA_TAG=${image}" >> "$GITHUB_ENV"
+
+      - name: Smoke test image
+        run: >-
+          docker run --rm --entrypoint /app/bin/curl-impersonate/curl_edge101
+          "$IMAGE_TAG" --version
+
+      - name: Package image
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          docker save --output voice-image.tar "$IMAGE_TAG" "$IMAGE_SHA_TAG"
+          gzip -n voice-image.tar
+          sha256sum voice-image.tar.gz > SHA256SUMS
+          printf '%s\n' "$SOURCE_REVISION" > SOURCE_REVISION
+          printf '%s\n' "$IMAGE_TAG" > IMAGE_TAG
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: voice-image-${{ github.sha }}
+          path: |
+            voice-image.tar.gz
+            SHA256SUMS
+            SOURCE_REVISION
+            IMAGE_TAG
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
