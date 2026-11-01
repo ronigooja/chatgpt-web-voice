@@ -340,37 +340,62 @@ type sidebandResult struct {
 func connectSideband(callID, token, accountProxy string) sidebandResult {
 	h := fhttp.Header{}
 	h.Set("Authorization", "Bearer "+token)
+	accountIDPresent := false
 	if accountID := accountIDFromToken(token); accountID != "" {
 		h.Set(chatGPTAccountIDHeader, accountID)
+		accountIDPresent = true
 	}
 	h.Set("originator", "codex_cli_rs")
 	h.Set("User-Agent", "codex_cli_rs/0.0.0 (linux unknown; amd64) Codex")
+	h.Set("openai-alpha", "quicksilver=v2")
 	d := websocket.Dialer{HandshakeTimeout: 20 * time.Second, Proxy: func(*fhttp.Request) (*url.URL, error) { return url.Parse(strings.TrimSpace(accountProxy)) }}
 	if strings.TrimSpace(accountProxy) == "" || strings.EqualFold(strings.TrimSpace(accountProxy), "direct") {
 		d.Proxy = nil
 	}
 	conn, resp, err := d.Dial(sidebandURL(callID), h)
 	result := sidebandResult{conn: conn}
+	responseNames := []string{}
 	if resp != nil {
 		result.status = resp.StatusCode
+		for name := range resp.Header {
+			responseNames = append(responseNames, name)
+		}
+		sort.Strings(responseNames)
 	}
 	if err != nil {
 		if resp != nil {
-			b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
+			body := redactBody(string(b))
 			var e map[string]any
 			if json.Unmarshal(b, &e) == nil {
 				result.errorType, _ = e["type"].(string)
 				result.errorCode, _ = e["code"].(string)
 			}
+			fmt.Printf("sideband_response_header_names=%s body_prefix=%q\n", strings.Join(responseNames, ","), body)
 		}
 	}
-	fmt.Printf("sideband_headers_sent=Authorization,%s,originator,User-Agent attestation=false\n", chatGPTAccountIDHeader)
+	headerNames := "Authorization,originator,User-Agent,openai-alpha"
+	if accountIDPresent {
+		headerNames = "Authorization," + chatGPTAccountIDHeader + ",originator,User-Agent,openai-alpha"
+	}
+	fmt.Printf("sideband_headers_sent=%s attestation=false\n", headerNames)
+	fmt.Printf("sideband_dial subprotocols=none version_header=library_default key_header=library_generated proxy=%t\n", strings.TrimSpace(accountProxy) != "" && !strings.EqualFold(strings.TrimSpace(accountProxy), "direct"))
 	if err != nil {
 		fmt.Printf("sideband_handshake status=%d error_type=%s error_code=%s\n", result.status, result.errorType, result.errorCode)
 	} else {
 		fmt.Printf("sideband_handshake status=%d\n", result.status)
 	}
 	return result
+}
+
+func redactBody(s string) string {
+	low := strings.ToLower(s)
+	for _, marker := range []string{"bearer ", "access_token", "token", "cookie", "session_token"} {
+		if strings.Contains(low, marker) {
+			return "[redacted]"
+		}
+	}
+	return s
 }
 
 func sendSideband(conn *websocket.Conn, value any) error {
