@@ -3428,8 +3428,35 @@
     toastTimer = setTimeout(function () { toastEl.classList.remove('show'); }, 2400);
   }
 
+  var debugEvents = (function () {
+    if (!/[?&]debug=1(&|$)/.test(location.search)) return null;
+    var box = document.createElement('pre');
+    box.style.cssText = 'position:fixed;left:0;right:0;top:0;max-height:34vh;overflow:auto;margin:0;padding:6px 8px;background:rgba(0,0,0,.82);color:#9f9;font:11px/1.35 monospace;z-index:99999;white-space:pre-wrap';
+    document.addEventListener('DOMContentLoaded', function () { document.body.appendChild(box); });
+    if (document.body) document.body.appendChild(box);
+    var lines = [];
+    return {
+      add: function (label) {
+        lines.push(new Date().toISOString().slice(11, 19) + ' ' + label);
+        if (lines.length > 50) lines.shift();
+        box.textContent = lines.join('\n');
+        box.scrollTop = box.scrollHeight;
+      }
+    };
+  })();
+
   function log() {
     return;
+  }
+
+  // Debug only (?debug=1): records event type names, never content.
+  function debugEventType(outer, inner) {
+    if (!debugEvents) return;
+    var o = (outer && outer.type) || '?';
+    var i = inner && inner !== outer ? (inner.type || '?') : '';
+    var extra = '';
+    if (inner && inner.payload && typeof inner.payload.type === 'string') extra = '/' + inner.payload.type;
+    debugEvents.add(o + (i ? ' > ' + i : '') + extra);
   }
 
   function setUI(state, title, sub, titleKey, subKey, titleVars, subVars) {
@@ -4605,6 +4632,7 @@
             if (obj.type === 'data_message' && typeof obj.data === 'string') inner = JSON.parse(obj.data);
             var t = inner.type || obj.type;
             log('dc', t, inner);
+            debugEventType(obj, inner);
             if (t === 'state_update') {
               var st = (inner.payload && inner.payload.new_state) || '';
               if (st === 'listening') {
