@@ -25,7 +25,7 @@ Usage:
                          [--admin-user NAME] [--dry-run]
   deploy-host.sh update --run-id N [--compose-dir DIR] [--public-ip IP]
                         [--udp-min PORT] [--udp-max PORT] [--dry-run]
-  deploy-host.sh rollback [--compose-dir DIR]
+  deploy-host.sh rollback [--compose-dir DIR] [--dry-run]
   deploy-host.sh status [--compose-dir DIR]
   deploy-host.sh uninstall [--compose-dir DIR] [--purge-data]
   deploy-host.sh --help
@@ -339,6 +339,12 @@ case "$COMMAND" in
     ;;
   rollback)
     [[ -f "$PREVIOUS_FILE" ]] || die "missing $PREVIOUS_FILE"
+    compose_image() { sed -n 's/^[[:space:]]*image:[[:space:]]*//p' "$1" | head -n 1 | tr -d "\"'"; }
+    echo "Rollback would change image: $(compose_image "$COMPOSE_FILE") -> $(compose_image "$PREVIOUS_FILE")"
+    if [[ "$DRY_RUN" == true ]]; then
+      echo "Dry run: nothing changed."
+      exit 0
+    fi
     need docker
     cp -p "$PREVIOUS_FILE" "$COMPOSE_FILE"
     compose config -q
