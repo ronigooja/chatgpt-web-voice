@@ -331,7 +331,7 @@ case "$COMMAND" in
       update_compose true
       exit 0
     fi
-    if [[ ! -f "$PREVIOUS_FILE" ]]; then cp -p "$COMPOSE_FILE" "$PREVIOUS_FILE"; fi
+    cp -p "$COMPOSE_FILE" "$PREVIOUS_FILE"
     update_compose false
     compose config -q
     ARTIFACT_DIR="$TMP_DIR/artifact"
