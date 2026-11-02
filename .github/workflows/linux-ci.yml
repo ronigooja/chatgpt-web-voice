@@ -64,8 +64,8 @@ jobs:
           mkdir -p "$diagnostics"
           trap 'rm -f "$task_log"' EXIT
           case "$CHECK" in
-            tests) command=(go test -count=1 -timeout=10m ./...) ;;
-            race) command=(go test -race -count=1 -timeout=15m ./...) ;;
+            tests) command=(go test -v -count=1 -timeout=10m ./...) ;;
+            race) command=(go test -race -v -count=1 -timeout=15m ./...) ;;
             build)
               command=(bash -c 'go build -buildvcs=false -o "$0" ./cmd/server && go build -buildvcs=false -o "$1" ./cmd/migrate-accounts' "$RUNNER_TEMP/voice-server" "$RUNNER_TEMP/migrate-accounts")
               ;;
