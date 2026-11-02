@@ -44,6 +44,7 @@ type APIKeyStore interface {
 // VoiceService is the voice-session surface required by handlers.
 type VoiceService interface {
 	CreateSession(req voice.CreateSessionRequest) (*voice.SessionResult, error)
+	ApplyOpeningContext(owner, voiceSessionID string, context voice.OpeningContext) (*voice.OpeningContextResult, error)
 	ReleaseSession(owner, voiceSessionID string) bool
 	ReleaseSessionStatus(owner, voiceSessionID string) (released, alreadyReleased bool)
 	ReleaseAccountLease(owner, leaseID string, generation int64, sessionID string, sessionGeneration int64) (*voice.AccountLeaseRelease, error)
@@ -119,6 +120,7 @@ func (s *Server) RegisterDownstream(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/voice/config", s.voiceConfig)
 	mux.HandleFunc("POST /v1/voice/sessions", s.downstreamSession)
 	mux.HandleFunc("POST /v1/voice/sessions/{id}/context", s.downstreamSessionContext)
+	mux.HandleFunc("POST /v1/voice/sessions/{id}/opening-context", s.downstreamOpeningContext)
 	mux.HandleFunc("GET /v1/voice/sessions/{id}/title", s.downstreamSessionTitle)
 	mux.HandleFunc("POST /v1/voice/sessions/{id}/uploads", s.downstreamImageUpload)
 	mux.HandleFunc("POST /v1/voice/sessions/{id}/uploads/{file_id}/complete", s.downstreamImageUploadComplete)

@@ -63,6 +63,7 @@ type CallSessionStore interface {
 	Upsert(item callsessions.Session) error
 	UpdateUpstream(owner, voiceSessionID string, accountID int64, upstreamConversationID, upstreamParentMessageID, upstreamVoiceSessionID string) (callsessions.Session, error)
 	UpdateMetrics(owner, voiceSessionID, conversation, reason string, confirmed *bool, contextChars int) (callsessions.Session, error)
+	UpdateOpeningContext(owner, voiceSessionID, kind string, version, items, chars int, appliedAt string) (callsessions.Session, bool, error)
 	MarkReleased(owner, voiceSessionID string) error
 	Get(owner, voiceSessionID string) (callsessions.Session, error)
 }
@@ -224,14 +225,70 @@ type SessionResult struct {
 	AccountLeaseGeneration int64  `json:"account_lease_generation,omitempty"`
 	// VoiceSessionGeneration is the media generation when termination evidence
 	// is tracked; zero otherwise.
-	VoiceSessionGeneration  int64  `json:"voice_session_generation,omitempty"`
-	UpstreamVoiceSessionID  string `json:"upstream_voice_session_id,omitempty"`
-	UpstreamConversationID  string `json:"upstream_conversation_id,omitempty"`
-	UpstreamParentMessageID string `json:"upstream_parent_message_id,omitempty"`
-	Conversation            string `json:"conversation"`
-	ConversationReason      string `json:"conversation_reason,omitempty"`
-	ConversationConfirmed   *bool  `json:"conversation_confirmed,omitempty"`
-	ContextChars            int    `json:"context_chars"`
+	VoiceSessionGeneration  int64                 `json:"voice_session_generation,omitempty"`
+	UpstreamVoiceSessionID  string                `json:"upstream_voice_session_id,omitempty"`
+	UpstreamConversationID  string                `json:"upstream_conversation_id,omitempty"`
+	UpstreamParentMessageID string                `json:"upstream_parent_message_id,omitempty"`
+	Conversation            string                `json:"conversation"`
+	ConversationReason      string                `json:"conversation_reason,omitempty"`
+	ConversationConfirmed   *bool                 `json:"conversation_confirmed,omitempty"`
+	ContextChars            int                   `json:"context_chars"`
+	OpeningContext          *OpeningContextResult `json:"opening_context,omitempty"`
+}
+
+type OpeningContextItem struct {
+	Role string `json:"role"`
+	Text string `json:"text"`
+}
+type OpeningContext struct {
+	Kind    string               `json:"kind"`
+	Version int                  `json:"version"`
+	Items   []OpeningContextItem `json:"items"`
+}
+type OpeningContextResult struct {
+	Applied        bool   `json:"applied"`
+	AlreadyApplied bool   `json:"already_applied,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+	Version        int    `json:"version,omitempty"`
+	ItemCount      int    `json:"item_count,omitempty"`
+	CharCount      int    `json:"char_count,omitempty"`
+}
+
+const (
+	maxOpeningItems     = 128
+	maxOpeningItemChars = 32 << 10
+	maxOpeningChars     = 256 << 10
+)
+
+func validateOpeningContext(c OpeningContext) (int, error) {
+	if c.Kind != "full" && c.Kind != "delta" {
+		return 0, &ServiceError{Message: "opening context kind is invalid", StatusCode: 400}
+	}
+	if c.Version < 1 {
+		return 0, &ServiceError{Message: "opening context version is invalid", StatusCode: 400}
+	}
+	if len(c.Items) == 0 || len(c.Items) > maxOpeningItems {
+		return 0, &ServiceError{Message: "opening context item count is invalid", StatusCode: 400}
+	}
+	chars := 0
+	for _, item := range c.Items {
+		if item.Role != "system" && item.Role != "user" {
+			return 0, &ServiceError{Message: "opening context role is invalid", StatusCode: 400}
+		}
+		if item.Text == "" || len(item.Text) > maxOpeningItemChars {
+			return 0, &ServiceError{Message: "opening context item is invalid", StatusCode: 400}
+		}
+		for _, r := range item.Text {
+			if r < 0x20 && r != '\n' && r != '\t' {
+				return 0, &ServiceError{Message: "opening context contains control characters", StatusCode: 400}
+			}
+		}
+		chars += len([]rune(item.Text))
+		if chars > maxOpeningChars {
+			return 0, &ServiceError{Message: "opening context is too large", StatusCode: 400}
+		}
+	}
+	return chars, nil
 }
 
 func normalizeVoice(voice string) string {
@@ -583,6 +640,59 @@ func (s *Service) UpdateSessionContext(owner, voiceSessionID string, patch Upstr
 		ParentMessageID:        updated.UpstreamParentMessageID,
 		UpstreamVoiceSessionID: updated.UpstreamVoiceSessionID,
 	}, nil
+}
+
+// ApplyOpeningContext delivers opening context once and persists metadata only.
+// AVAS live sideband writes are not yet wired; creation-time AVAS initial_items
+// is the only proven silent AVAS form.
+func (s *Service) ApplyOpeningContext(owner, voiceSessionID string, c OpeningContext) (*OpeningContextResult, error) {
+	chars, err := validateOpeningContext(c)
+	if err != nil {
+		return nil, err
+	}
+	owner = normalizeSessionOwner(owner)
+	binding, other := s.boundVoiceSession(owner, voiceSessionID)
+	if other {
+		return nil, &ServiceError{Message: "voice session does not belong to caller", StatusCode: 403}
+	}
+	if binding == nil {
+		return nil, &ServiceError{Message: "voice session not found", StatusCode: 404}
+	}
+	if c.Kind == "full" && binding.conversation == "resumed" && binding.conversationConfirmed != nil && *binding.conversationConfirmed {
+		return nil, &ServiceError{Message: "full opening context cannot be applied to resumed thread", StatusCode: 409}
+	}
+	if s.records == nil {
+		return nil, &ServiceError{Message: "opening context persistence unavailable", StatusCode: 503}
+	}
+	row, err := s.records.Get(owner, voiceSessionID)
+	if err != nil {
+		return nil, &ServiceError{Message: "voice session not found", StatusCode: 404}
+	}
+	if c.Version < row.OpeningContextVersion {
+		return nil, &ServiceError{Message: "opening context version must increase", StatusCode: 409}
+	}
+	if c.Version == row.OpeningContextVersion && row.OpeningContextVersion > 0 {
+		return &OpeningContextResult{Applied: true, AlreadyApplied: true, Version: c.Version, ItemCount: row.OpeningContextItems, CharCount: row.OpeningContextChars}, nil
+	}
+	if s.cfg.VoiceUpstreamRoute == "avas" {
+		return nil, &ServiceError{Message: "opening context live injection is not supported on avas", StatusCode: 501}
+	}
+	injector, ok := binding.media.(relay.UpstreamEventInjector)
+	if !ok {
+		return nil, &ServiceError{Message: "opening context live injection is not supported on this route", StatusCode: 501}
+	}
+	payload, err := relay.UserTextEvent(openingContextText(c))
+	if err != nil {
+		return nil, &ServiceError{Message: "opening context encoding failed", StatusCode: 500}
+	}
+	if err := injector.SendUpstreamEvent([]byte(payload)); err != nil {
+		return nil, &ServiceError{Message: "opening context delivery failed", StatusCode: 502}
+	}
+	_, applied, err := s.records.UpdateOpeningContext(owner, voiceSessionID, c.Kind, c.Version, len(c.Items), chars, time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, &ServiceError{Message: "opening context persistence failed", StatusCode: 503}
+	}
+	return &OpeningContextResult{Applied: applied, AlreadyApplied: !applied, Version: c.Version, ItemCount: len(c.Items), CharCount: chars}, nil
 }
 
 // SessionContext returns the stored upstream continuity fields for an owned binding.
@@ -1054,6 +1164,12 @@ func buildAVASSession(voice string, upstream UpstreamContext) avasSessionPayload
 	return p
 }
 
+func (p *avasSessionPayload) addOpeningContext(c OpeningContext) {
+	for _, item := range c.Items {
+		p.InitialItems = append(p.InitialItems, map[string]any{"type": "message", "role": item.Role, "content": []any{map[string]any{"type": "input_text", "text": item.Text}}})
+	}
+}
+
 func (s *Service) postAVASResponse(token, offerSDP string, payload avasSessionPayload, proxy, deviceID string) (status int, contentType, answer, location string, err error) {
 	body, err := json.Marshal(map[string]any{"sdp": offerSDP, "session": payload})
 	if err != nil {
@@ -1331,6 +1447,19 @@ type CreateSessionRequest struct {
 	UpstreamConversationID  string
 	UpstreamParentMessageID string
 	UpstreamVoiceSessionID  string
+	OpeningContext          OpeningContext
+}
+
+func openingContextText(c OpeningContext) string {
+	var b strings.Builder
+	for _, item := range c.Items {
+		b.WriteByte('[')
+		b.WriteString(item.Role)
+		b.WriteString("]\n")
+		b.WriteString(item.Text)
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 // pickAccountForSession preserves stable account identity across token edits.
@@ -1351,6 +1480,11 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 	options, err := normalizeSessionOptions(req.Voice, req.VoiceMode, req.LanguageCode)
 	if err != nil {
 		return nil, err
+	}
+	if len(req.OpeningContext.Items) > 0 {
+		if _, err := validateOpeningContext(req.OpeningContext); err != nil {
+			return nil, err
+		}
 	}
 	voice := options.Voice
 	owner := normalizeSessionOwner(req.Owner)
@@ -1519,6 +1653,12 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 		var contentType, text, retryAfter, upstreamLocation string
 		if s.cfg.VoiceUpstreamRoute == "avas" {
 			avasPayload := buildAVASSession(voice, upstreamForWM)
+			if len(req.OpeningContext.Items) > 0 {
+				if _, err := validateOpeningContext(req.OpeningContext); err != nil {
+					return nil, err
+				}
+				avasPayload.addOpeningContext(req.OpeningContext)
+			}
 			status, contentType, text, upstreamLocation, err = s.postAVASResponse(token, wmOffer, avasPayload, explicitProxy, account.DeviceID)
 		} else {
 			status, contentType, text, retryAfter, err = s.postWMResponse(token, wmOffer, sessionJSON, explicitProxy, account.DeviceID)
@@ -1690,6 +1830,25 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 			upstreamOut = stored.upstreamContext()
 		}
 		s.persistCallSession(owner, voiceSessionID, account.ID, voice, options.VoiceMode, options.LanguageCode, upstreamOut)
+		var openingResult *OpeningContextResult
+		if len(req.OpeningContext.Items) > 0 {
+			openingResult = &OpeningContextResult{Applied: false, Version: req.OpeningContext.Version, ItemCount: len(req.OpeningContext.Items)}
+			if chars, validationErr := validateOpeningContext(req.OpeningContext); validationErr != nil {
+				return nil, validationErr
+			} else if s.cfg.VoiceUpstreamRoute == "avas" {
+				_, _, appliedErr := s.records.UpdateOpeningContext(owner, voiceSessionID, req.OpeningContext.Kind, req.OpeningContext.Version, len(req.OpeningContext.Items), chars, time.Now().UTC().Format(time.RFC3339Nano))
+				if appliedErr == nil {
+					openingResult.Applied = true
+					openingResult.CharCount = chars
+				} else {
+					openingResult.Reason = "metadata_persist_failed"
+				}
+			} else if applied, applyErr := s.ApplyOpeningContext(owner, voiceSessionID, req.OpeningContext); applyErr == nil {
+				openingResult = applied
+			} else {
+				openingResult.Reason = applyErr.Error()
+			}
+		}
 		s.logger.Info(
 			"voice_session_created",
 			"voice_session_id", voiceSessionID,
@@ -1717,6 +1876,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 			Conversation:            conversationState(upstreamOut),
 			ConversationReason:      conversationReason(upstreamOut),
 			ConversationConfirmed:   upstreamOut.ConversationConfirmed,
+			OpeningContext:          openingResult,
 		}, nil
 	}
 

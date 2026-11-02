@@ -71,6 +71,13 @@ func (s *downstreamVoiceStub) UpdateSessionContext(owner, id string, patch voice
 	return patch, nil
 }
 
+func (s *downstreamVoiceStub) ApplyOpeningContext(owner, id string, context voice.OpeningContext) (*voice.OpeningContextResult, error) {
+	if owner != "api_key:1" || id != "vs_test" {
+		return nil, &voice.ServiceError{Message: "voice session not found", StatusCode: http.StatusNotFound}
+	}
+	return &voice.OpeningContextResult{Applied: true, Version: context.Version, ItemCount: len(context.Items)}, nil
+}
+
 func (s *downstreamVoiceStub) FetchUpstreamTitle(owner, id, conversationID string) (*voice.UpstreamTitleResult, error) {
 	if owner != "api_key:1" || id != "vs_test" {
 		return nil, &voice.ServiceError{Message: "voice session not found", StatusCode: http.StatusNotFound}
@@ -307,6 +314,24 @@ func TestDownstreamHidesUpstreamErrorDetail(t *testing.T) {
 	}
 	if strings.Contains(resp.Body.String(), "secret-account-token") || strings.Contains(resp.Body.String(), "realtime/wm") {
 		t.Fatalf("downstream error leaked upstream detail: %s", resp.Body.String())
+	}
+}
+
+func TestDownstreamOpeningContextAuthAndStrictJSON(t *testing.T) {
+	handler, secret, other := newDownstreamTestHandler(t, &downstreamVoiceStub{})
+	if got := performDownstreamRequest(t, handler, http.MethodPost, "/v1/voice/sessions/vs_test/opening-context", "", map[string]any{}); got.Code != http.StatusUnauthorized {
+		t.Fatalf("auth status=%d", got.Code)
+	}
+	if got := performDownstreamRequest(t, handler, http.MethodPost, "/v1/voice/sessions/vs_test/opening-context", other, map[string]any{}); got.Code != http.StatusNotFound {
+		t.Fatalf("ownership status=%d", got.Code)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/voice/sessions/vs_test/opening-context", strings.NewReader(`{"kind":"delta","version":1,"items":[{"role":"user","text":"x"}],"extra":true}`))
+	req.Header.Set("Authorization", "Bearer "+secret)
+	req.Header.Set("Content-Type", "application/json")
+	r := httptest.NewRecorder()
+	handler.ServeHTTP(r, req)
+	if r.Code != http.StatusBadRequest {
+		t.Fatalf("unknown field status=%d body=%s", r.Code, r.Body.String())
 	}
 }
 

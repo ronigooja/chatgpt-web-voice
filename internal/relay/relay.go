@@ -74,6 +74,15 @@ type EventInjector interface {
 	InjectEvent(data []byte) error
 }
 
+// UpstreamEventInjector sends an event to the active upstream oai-events
+// channel. It is separate from EventInjector, which sends downstream.
+type UpstreamEventInjector interface {
+	SendUpstreamEvent(data []byte) error
+}
+
+// UserTextEvent returns the proven web-client envelope used for context handoff.
+func UserTextEvent(text string) (string, error) { return userTextEvent(text) }
+
 // LegTermination is the close record of one upstream leg that was replaced
 // while peer A stayed up. It carries no peer A result.
 type LegTermination struct {

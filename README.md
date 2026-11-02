@@ -247,6 +247,8 @@ needs no port mapping. If the UDP range is unset, the relay uses ephemeral ports
 
 下游使用在 `/keys` 创建的 Bearer API Key，**只能**访问 `/v1/*`。
 
+`opening-context` accepts `{"kind":"full"|"delta","version":1,"items":[{"role":"system"|"user","text":"..."}]}`. The body is capped at 1 MiB; item count and text sizes are bounded, control characters other than newline and tab are rejected, and only metadata is stored. Versions are idempotent and must increase. Confirmed resumed threads reject `full`. The same object may be supplied as `opening_context` during session creation; delivery failure does not fail SDP creation and is reported as `applied:false`.
+
 ```http
 Authorization: Bearer vgw_live_<密钥>
 ```
@@ -258,7 +260,8 @@ Authorization: Bearer vgw_live_<密钥>
 | `GET` | `/v1/health` | 健康检查 |
 | `GET` | `/v1/voice/config` | 音色、语言、STUN、DataChannel 约定 |
 | `POST` | `/v1/voice/sessions` | 建立或恢复语音会话（SDP 交换） |
-| `POST` | `/v1/voice/sessions/{voice_session_id}/context` | 上报 DataChannel 学到的上游 id |
+| `POST` | `/v1/voice/sessions/{voice_session_id}/context` | Upstream continuity metadata |
+| `POST` | `/v1/voice/sessions/{voice_session_id}/opening-context` | Apply bounded, versioned opening context |
 | `GET` | `/v1/voice/sessions/{voice_session_id}/title` | 拉取上游会话标题 |
 | `POST` | `/v1/voice/sessions/{voice_session_id}/uploads` | 申请通话中图片直传凭证（绑定粘性账号） |
 | `POST` | `/v1/voice/sessions/{voice_session_id}/uploads/{file_id}/complete` | 标记直传完成（网关代调上游，不收图） |

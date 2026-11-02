@@ -49,6 +49,11 @@ func (db *DB) migrate() error {
 			conversation_reason TEXT NOT NULL DEFAULT '',
 			conversation_confirmed INTEGER,
 			context_chars INTEGER NOT NULL DEFAULT 0,
+			opening_context_version INTEGER NOT NULL DEFAULT 0,
+			opening_context_kind TEXT NOT NULL DEFAULT '',
+			opening_context_items INTEGER NOT NULL DEFAULT 0,
+			opening_context_chars INTEGER NOT NULL DEFAULT 0,
+			opening_context_applied_at TEXT NOT NULL DEFAULT '',
 			gateway_voice_session_id TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -161,6 +166,11 @@ func (db *DB) ensureCallSessionResumeColumns() error {
 		"conversation_reason TEXT NOT NULL DEFAULT ''",
 		"conversation_confirmed INTEGER",
 		"context_chars INTEGER NOT NULL DEFAULT 0",
+		"opening_context_version INTEGER NOT NULL DEFAULT 0",
+		"opening_context_kind TEXT NOT NULL DEFAULT ''",
+		"opening_context_items INTEGER NOT NULL DEFAULT 0",
+		"opening_context_chars INTEGER NOT NULL DEFAULT 0",
+		"opening_context_applied_at TEXT NOT NULL DEFAULT ''",
 	} {
 		name := column[:strings.IndexByte(column, ' ')]
 		has, err := db.hasColumn("call_sessions", name)

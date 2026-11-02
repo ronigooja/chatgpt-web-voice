@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Added API-key-authenticated `POST /v1/voice/sessions/{id}/opening-context` and
+  additive session-creation `opening_context`. Bounds, control-character
+  rejection, owner checks, monotonic idempotent versions, and metadata-only
+  persistence are enforced. AVAS creation uses `initial_items`; live AVAS
+  injection is explicitly unverified and returns 501. WM delivery uses the
+  existing typed-text relay envelope and is not claimed silent.
+
 - Session creation now returns additive `conversation` (`resumed` or `new`) and
   optional `conversation_reason`; call-session records also expose the running
   `context_chars` count for user and assistant transcript text. `VOICE_UPSTREAM_ROUTE=avas`

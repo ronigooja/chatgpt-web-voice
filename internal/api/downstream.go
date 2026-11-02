@@ -46,6 +46,7 @@ func (s *Server) downstreamSession(w http.ResponseWriter, r *http.Request) {
 		VoiceMode:      body.VoiceMode,
 		LanguageCode:   body.LanguageCode,
 		VoiceSessionID: body.VoiceSessionID,
+		OpeningContext: body.OpeningContext,
 	})
 	if err != nil {
 		writeDownstreamServiceError(w, err)
@@ -70,11 +71,45 @@ func (s *Server) downstreamSession(w http.ResponseWriter, r *http.Request) {
 		"voice_mode":               result.VoiceMode,
 		"language_code":            result.LanguageCode,
 	}
+	if result.OpeningContext != nil {
+		response["opening_context"] = result.OpeningContext
+	}
 	if result.VoiceSessionGeneration > 0 {
 		// Present only when the gateway terminates media and can attest closure.
 		response["voice_session_generation"] = result.VoiceSessionGeneration
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) downstreamOpeningContext(w http.ResponseWriter, r *http.Request) {
+	if s.voice == nil {
+		writeDownstreamError(w, http.StatusServiceUnavailable, "voice_unavailable", "voice service unavailable")
+		return
+	}
+	owner := auth.APIKeyOwner(r.Context())
+	if owner == "" {
+		writeDownstreamError(w, http.StatusUnauthorized, "invalid_api_key", "valid Bearer API key required")
+		return
+	}
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		writeDownstreamError(w, http.StatusBadRequest, "invalid_request", "voice session id is required")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var body voice.OpeningContext
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		writeDownstreamError(w, http.StatusBadRequest, "invalid_request", "invalid JSON body")
+		return
+	}
+	result, err := s.voice.ApplyOpeningContext(owner, id, body)
+	if err != nil {
+		writeDownstreamServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) downstreamSessionContext(w http.ResponseWriter, r *http.Request) {
@@ -318,6 +353,10 @@ func writeDownstreamServiceError(w http.ResponseWriter, err error) {
 		writeDownstreamError(w, http.StatusUnauthorized, "upstream_unauthorized", "upstream account token invalid")
 	case http.StatusForbidden:
 		writeDownstreamError(w, http.StatusForbidden, "forbidden", "voice session does not belong to caller")
+	case http.StatusConflict:
+		writeDownstreamError(w, http.StatusConflict, "full_context_into_resumed_thread", "full opening context cannot be applied to resumed thread")
+	case http.StatusNotImplemented:
+		writeDownstreamError(w, http.StatusNotImplemented, "not_supported_on_route", "opening context is not supported on this route")
 	case http.StatusNotFound:
 		// Distinguish missing gateway binding vs missing upstream conversation when possible.
 		if strings.Contains(strings.ToLower(se.Message), "upstream conversation") {

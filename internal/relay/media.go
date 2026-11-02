@@ -173,6 +173,13 @@ func (s *pionSession) InjectEvent(data []byte) error {
 	return s.bridge.sendDownstream(data)
 }
 
+func (s *pionSession) SendUpstreamEvent(data []byte) error {
+	if s == nil || s.bridge == nil {
+		return errors.New("relay event bridge unavailable")
+	}
+	return s.bridge.sendUpstream(data)
+}
+
 func (s *pionSession) observeEvent(data []byte) {
 	s.observerMu.RLock()
 	observer := s.observer
@@ -228,6 +235,20 @@ func (b *dataChannelBridge) sendDownstream(data []byte) error {
 		return errors.New("relay closed")
 	default:
 		return errors.New("downstream event queue full")
+	}
+}
+
+func (b *dataChannelBridge) sendUpstream(data []byte) error {
+	if b == nil || b.downToUp == nil {
+		return errors.New("upstream event channel unavailable")
+	}
+	select {
+	case b.downToUp.queue <- dataChannelMessage{data: append([]byte(nil), data...), isString: true}:
+		return nil
+	case <-b.done:
+		return errors.New("relay closed")
+	default:
+		return errors.New("upstream event queue full")
 	}
 }
 

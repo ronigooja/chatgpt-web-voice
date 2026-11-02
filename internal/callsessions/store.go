@@ -27,6 +27,8 @@ const sessionSelectColumns = `
 	COALESCE(conversation_state, 'new'), COALESCE(conversation_reason, ''),
 	conversation_confirmed,
 	COALESCE(context_chars, 0),
+	COALESCE(opening_context_version, 0), COALESCE(opening_context_kind, ''),
+	COALESCE(opening_context_items, 0), COALESCE(opening_context_chars, 0), COALESCE(opening_context_applied_at, ''),
 	COALESCE(voice, ''), COALESCE(voice_mode, ''), COALESCE(language_code, ''),
 	status, created_at, updated_at, last_seen_at, COALESCE(released_at, '')`
 
@@ -45,6 +47,11 @@ type Session struct {
 	ConversationReason      string `json:"conversation_reason,omitempty"`
 	ConversationConfirmed   *bool  `json:"conversation_confirmed"`
 	ContextChars            int    `json:"context_chars"`
+	OpeningContextVersion   int    `json:"opening_context_version,omitempty"`
+	OpeningContextKind      string `json:"opening_context_kind,omitempty"`
+	OpeningContextItems     int    `json:"opening_context_items,omitempty"`
+	OpeningContextChars     int    `json:"opening_context_chars,omitempty"`
+	OpeningContextAppliedAt string `json:"opening_context_applied_at,omitempty"`
 	Voice                   string `json:"voice,omitempty"`
 	VoiceMode               string `json:"voice_mode,omitempty"`
 	LanguageCode            string `json:"language_code,omitempty"`
@@ -107,10 +114,11 @@ func (s *Store) Upsert(item Session) error {
 			voice_session_id, owner, caller_kind, caller_label, api_key_id, account_id,
 			upstream_conversation_id, upstream_parent_message_id, upstream_voice_session_id,
 			conversation_state, conversation_reason, conversation_confirmed, context_chars,
+			opening_context_version, opening_context_kind, opening_context_items, opening_context_chars, opening_context_applied_at,
 			voice, voice_mode, language_code, status,
 			created_at, updated_at, last_seen_at, released_at
 		) VALUES (
-			?, ?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?,
 			?, ?, ?, ?, ?, ?, ?,
 			CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ''
@@ -159,12 +167,32 @@ func (s *Store) Upsert(item Session) error {
 		item.VoiceSessionID, item.Owner, item.CallerKind, item.CallerLabel, item.APIKeyID, item.AccountID,
 		item.UpstreamConversationID, item.UpstreamParentMessageID, item.UpstreamVoiceSessionID,
 		item.Conversation, item.ConversationReason, boolValue(item.ConversationConfirmed), item.ContextChars,
+		item.OpeningContextVersion, item.OpeningContextKind, item.OpeningContextItems, item.OpeningContextChars, item.OpeningContextAppliedAt,
 		item.Voice, item.VoiceMode, item.LanguageCode, item.Status,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert call session: %w", err)
 	}
 	return nil
+}
+
+// UpdateOpeningContext records only opening-context metadata and atomically
+// rejects versions that do not increase. Text is intentionally not stored.
+func (s *Store) UpdateOpeningContext(owner, voiceSessionID, kind string, version, items, chars int, appliedAt string) (Session, bool, error) {
+	s.db.Lock()
+	defer s.db.Unlock()
+	current, err := s.getUnlocked(strings.TrimSpace(owner), strings.TrimSpace(voiceSessionID))
+	if err != nil {
+		return Session{}, false, err
+	}
+	if version <= current.OpeningContextVersion {
+		return current, version == current.OpeningContextVersion, nil
+	}
+	if _, err := s.db.Conn().Exec(`UPDATE call_sessions SET opening_context_version=?, opening_context_kind=?, opening_context_items=?, opening_context_chars=?, opening_context_applied_at=?, context_chars=context_chars+?, updated_at=CURRENT_TIMESTAMP, last_seen_at=CURRENT_TIMESTAMP WHERE voice_session_id=? AND owner=?`, version, kind, items, chars, appliedAt, chars, voiceSessionID, owner); err != nil {
+		return Session{}, false, fmt.Errorf("update opening context: %w", err)
+	}
+	updated, err := s.getUnlocked(strings.TrimSpace(owner), strings.TrimSpace(voiceSessionID))
+	return updated, true, err
 }
 
 func boolValue(value *bool) any {
@@ -445,6 +473,7 @@ func scanSession(row store.Scanner) (Session, error) {
 		&item.APIKeyID, &item.AccountID,
 		&item.UpstreamConversationID, &item.UpstreamParentMessageID, &item.UpstreamVoiceSessionID,
 		&item.Conversation, &item.ConversationReason, &item.ConversationConfirmed, &item.ContextChars,
+		&item.OpeningContextVersion, &item.OpeningContextKind, &item.OpeningContextItems, &item.OpeningContextChars, &item.OpeningContextAppliedAt,
 		&item.Voice, &item.VoiceMode, &item.LanguageCode,
 		&item.Status, &item.CreatedAt, &item.UpdatedAt, &item.LastSeenAt, &item.ReleasedAt,
 	); err != nil {

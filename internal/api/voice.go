@@ -20,15 +20,16 @@ func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 }
 
 type sessionRequest struct {
-	OfferSDP                string `json:"offer_sdp"`
-	Voice                   string `json:"voice"`
-	VoiceMode               string `json:"voice_mode"`
-	LanguageCode            string `json:"language_code"`
-	VoiceSessionID          string `json:"voice_session_id"`
-	AccountID               int64  `json:"account_id"`
-	UpstreamConversationID  string `json:"upstream_conversation_id"`
-	UpstreamParentMessageID string `json:"upstream_parent_message_id"`
-	UpstreamVoiceSessionID  string `json:"upstream_voice_session_id"`
+	OfferSDP                string               `json:"offer_sdp"`
+	Voice                   string               `json:"voice"`
+	VoiceMode               string               `json:"voice_mode"`
+	LanguageCode            string               `json:"language_code"`
+	VoiceSessionID          string               `json:"voice_session_id"`
+	AccountID               int64                `json:"account_id"`
+	UpstreamConversationID  string               `json:"upstream_conversation_id"`
+	UpstreamParentMessageID string               `json:"upstream_parent_message_id"`
+	UpstreamVoiceSessionID  string               `json:"upstream_voice_session_id"`
+	OpeningContext          voice.OpeningContext `json:"opening_context"`
 }
 
 type sessionContextRequest struct {

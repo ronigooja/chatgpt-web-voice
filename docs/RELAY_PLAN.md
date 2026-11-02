@@ -220,6 +220,14 @@ Implemented: `internal/relay/swap.go`, `internal/voice/rebuild.go`,
 
 ### Account change and context
 
+Opening context is route-specific. WM has a proven upstream typed-text envelope
+used by account-change handoff; this gateway uses that same envelope only when a
+live upstream write is available, and does not claim that it is silent. AVAS
+creation accepts `initial_items`, which is the only proven silent creation form.
+The AVAS sideband context-append event shape was observed by the disposable probe
+(`session.context.append`), but no real upstream call has verified its behavior;
+live AVAS opening-context injection therefore remains unsupported (501).
+
 Measured 2026-10-30 (see "Live probe"): a different account cannot resume the
 conversation; upstream sends `goodbye` (`reason=error`, `detail=internal_error`)
 and closes (3 of 3). The same account resumes normally and may hold two sessions

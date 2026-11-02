@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/accounts"
+	"github.com/dyhhhhhh/chatgpt-web-voice/internal/callsessions"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/config"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/relay"
 )
@@ -26,6 +27,50 @@ type fakeRelay struct {
 	offers   []string
 	newErr   error
 	acceptFn func(*fakeMedia) error
+}
+
+type testCallSessionStore struct {
+	rows map[string]callsessions.Session
+}
+
+func (s *testCallSessionStore) Upsert(v callsessions.Session) error {
+	s.rows[v.VoiceSessionID] = v
+	return nil
+}
+func (s *testCallSessionStore) UpdateUpstream(_, id string, _ int64, c, p, u string) (callsessions.Session, error) {
+	v := s.rows[id]
+	v.UpstreamConversationID = c
+	v.UpstreamParentMessageID = p
+	v.UpstreamVoiceSessionID = u
+	s.rows[id] = v
+	return v, nil
+}
+func (s *testCallSessionStore) UpdateMetrics(_, id, conversation, reason string, confirmed *bool, chars int) (callsessions.Session, error) {
+	v := s.rows[id]
+	v.Conversation = conversation
+	v.ConversationReason = reason
+	v.ConversationConfirmed = confirmed
+	v.ContextChars = chars
+	s.rows[id] = v
+	return v, nil
+}
+func (s *testCallSessionStore) UpdateOpeningContext(_, id, kind string, version, items, chars int, applied string) (callsessions.Session, bool, error) {
+	v := s.rows[id]
+	if version <= v.OpeningContextVersion {
+		return v, false, nil
+	}
+	v.OpeningContextVersion = version
+	v.OpeningContextKind = kind
+	v.OpeningContextItems = items
+	v.OpeningContextChars = chars
+	v.OpeningContextAppliedAt = applied
+	v.ContextChars += chars
+	s.rows[id] = v
+	return v, true, nil
+}
+func (s *testCallSessionStore) MarkReleased(_, _ string) error { return nil }
+func (s *testCallSessionStore) Get(_, id string) (callsessions.Session, error) {
+	return s.rows[id], nil
 }
 
 func (r *fakeRelay) NewSession(_ context.Context, clientOffer string, route relay.Route) (relay.Session, string, error) {
@@ -66,19 +111,20 @@ type fakeMedia struct {
 	termination *relay.Termination
 
 	// swap simulation
-	observer     func([]byte)
-	swapRoutes   []relay.Route
-	swapPending  bool
-	swapReady    chan struct{}
-	swapAnswers  []string
-	pendingTexts []string
-	committed    int
-	aborted      []string
-	beginErr     error
-	acceptErr    error
-	textErr      error
-	commitErr    error
-	legClose     relay.LegTermination
+	observer       func([]byte)
+	swapRoutes     []relay.Route
+	swapPending    bool
+	swapReady      chan struct{}
+	swapAnswers    []string
+	pendingTexts   []string
+	upstreamEvents []string
+	committed      int
+	aborted        []string
+	beginErr       error
+	acceptErr      error
+	textErr        error
+	commitErr      error
+	legClose       relay.LegTermination
 }
 
 func (m *fakeMedia) ID() string { return m.id }
@@ -159,6 +205,7 @@ func newRelayFixture(t *testing.T, tokens []string, attempts int, respond func(w
 	fr := &fakeRelay{}
 	f.svc.cfg.SessionTTLSeconds = 180
 	f.svc.WithRelay(fr)
+	f.svc.WithCallSessions(&testCallSessionStore{rows: make(map[string]callsessions.Session)})
 	return f, fr
 }
 
@@ -193,6 +240,25 @@ func TestRelayUpstreamGetsPeerBOfferAndClientGetsPeerAAnswer(t *testing.T) {
 	}
 	if got := media.closedReasons(); len(got) != 0 {
 		t.Fatalf("live session must not be closed: %v", got)
+	}
+}
+
+func TestOpeningContextWMUsesUpstreamEnvelopeAndIsIdempotent(t *testing.T) {
+	f, fr := newRelayFixture(t, []string{fixtureTokenA}, 1, answerHandler(readTestdata(t, "wm_answer.sdp"), http.StatusCreated))
+	res, err := f.svc.CreateSession(CreateSessionRequest{Owner: "api_key:1", OfferSDP: readTestdata(t, "wm_offer.sdp")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := OpeningContext{Kind: "delta", Version: 1, Items: []OpeningContextItem{{Role: "system", Text: "private opening"}}}
+	if _, err := f.svc.ApplyOpeningContext("api_key:1", res.VoiceSessionID, c); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.ApplyOpeningContext("api_key:1", res.VoiceSessionID, c); err != nil {
+		t.Fatal(err)
+	}
+	m := fr.session(0)
+	if len(m.upstreamEvents) != 1 || !strings.Contains(m.upstreamEvents[0], `"type":"data_message"`) || !strings.Contains(m.upstreamEvents[0], "private opening") {
+		t.Fatalf("unexpected upstream events: %v", m.upstreamEvents)
 	}
 }
 
@@ -516,6 +582,13 @@ func (m *fakeMedia) SendPendingText(text string) error {
 		return m.textErr
 	}
 	m.pendingTexts = append(m.pendingTexts, text)
+	return nil
+}
+
+func (m *fakeMedia) SendUpstreamEvent(data []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.upstreamEvents = append(m.upstreamEvents, string(data))
 	return nil
 }
 
