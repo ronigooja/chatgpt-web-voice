@@ -333,6 +333,14 @@ func TestDownstreamOpeningContextAuthAndStrictJSON(t *testing.T) {
 	if r.Code != http.StatusBadRequest {
 		t.Fatalf("unknown field status=%d body=%s", r.Code, r.Body.String())
 	}
+	large := strings.Repeat("x", 1<<20)
+	largeReq := httptest.NewRequest(http.MethodPost, "/v1/voice/sessions/vs_test/opening-context", strings.NewReader(`{"kind":"delta","version":1,"items":[{"role":"user","text":"`+large+`"}]}`))
+	largeReq.Header.Set("Authorization", "Bearer "+secret)
+	largeResp := httptest.NewRecorder()
+	handler.ServeHTTP(largeResp, largeReq)
+	if largeResp.Code != http.StatusBadRequest && largeResp.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized body status=%d body=%s", largeResp.Code, largeResp.Body.String())
+	}
 }
 
 func TestDownstreamSessionGenerationOnlyWhenMediaIsRelayed(t *testing.T) {

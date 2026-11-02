@@ -247,7 +247,7 @@ needs no port mapping. If the UDP range is unset, the relay uses ephemeral ports
 
 下游使用在 `/keys` 创建的 Bearer API Key，**只能**访问 `/v1/*`。
 
-`opening-context` accepts `{"kind":"full"|"delta","version":1,"items":[{"role":"system"|"user","text":"..."}]}`. The body is capped at 1 MiB; item count and text sizes are bounded, control characters other than newline and tab are rejected, and only metadata is stored. Versions are idempotent and must increase. Confirmed resumed threads reject `full`. The same object may be supplied as `opening_context` during session creation; delivery failure does not fail SDP creation and is reported as `applied:false`.
+`opening-context` accepts `{"kind":"full"|"delta","version":1,"items":[{"role":"system"|"user","text":"..."}]}`. The body is capped at 1 MiB; item count and text sizes are bounded, control characters other than newline and tab are rejected, and only metadata is stored. Versions are idempotent and must increase. Confirmed resumed threads reject `full`. WM responses include `silent:"unverified"`: the typed-text envelope may trigger a spoken reply; the observed handoff probe was silent once, but this is not guaranteed. The same object may be supplied as `opening_context` during session creation; delivery failure does not fail SDP creation and is reported as `applied:false`.
 
 ```http
 Authorization: Bearer vgw_live_<密钥>

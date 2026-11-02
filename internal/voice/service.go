@@ -252,6 +252,7 @@ type OpeningContextResult struct {
 	Version        int    `json:"version,omitempty"`
 	ItemCount      int    `json:"item_count,omitempty"`
 	CharCount      int    `json:"char_count,omitempty"`
+	Silent         any    `json:"silent,omitempty"`
 }
 
 const (
@@ -692,7 +693,7 @@ func (s *Service) ApplyOpeningContext(owner, voiceSessionID string, c OpeningCon
 	if err != nil {
 		return nil, &ServiceError{Message: "opening context persistence failed", StatusCode: 503}
 	}
-	return &OpeningContextResult{Applied: applied, AlreadyApplied: !applied, Version: c.Version, ItemCount: len(c.Items), CharCount: chars}, nil
+	return &OpeningContextResult{Applied: applied, AlreadyApplied: !applied, Version: c.Version, ItemCount: len(c.Items), CharCount: chars, Silent: "unverified"}, nil
 }
 
 // SessionContext returns the stored upstream continuity fields for an owned binding.
@@ -1840,6 +1841,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 				if appliedErr == nil {
 					openingResult.Applied = true
 					openingResult.CharCount = chars
+					openingResult.Silent = true
 				} else {
 					openingResult.Reason = "metadata_persist_failed"
 				}

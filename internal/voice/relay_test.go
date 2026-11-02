@@ -123,6 +123,7 @@ type fakeMedia struct {
 	beginErr       error
 	acceptErr      error
 	textErr        error
+	upstreamErr    error
 	commitErr      error
 	legClose       relay.LegTermination
 }
@@ -588,6 +589,9 @@ func (m *fakeMedia) SendPendingText(text string) error {
 func (m *fakeMedia) SendUpstreamEvent(data []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.upstreamErr != nil {
+		return m.upstreamErr
+	}
 	m.upstreamEvents = append(m.upstreamEvents, string(data))
 	return nil
 }

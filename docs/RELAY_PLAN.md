@@ -228,6 +228,13 @@ The AVAS sideband context-append event shape was observed by the disposable prob
 (`session.context.append`), but no real upstream call has verified its behavior;
 live AVAS opening-context injection therefore remains unsupported (501).
 
+The WM opening-context API response reports `silent:"unverified"`: the envelope
+is the typed-text form and may trigger a spoken reply. The live probe observed no
+unprompted speech for the handoff text, but this is not a protocol guarantee.
+No forwarded `response.cancel`, system-role item, or `conversation.item.create`
+silent form was found in this repository's traffic handling. Zoe must decide
+whether to accept that uncertainty.
+
 Measured 2026-10-30 (see "Live probe"): a different account cannot resume the
 conversation; upstream sends `goodbye` (`reason=error`, `detail=internal_error`)
 and closes (3 of 3). The same account resumes normally and may hold two sessions
