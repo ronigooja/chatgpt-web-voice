@@ -71,7 +71,7 @@ jobs:
               ;;
             *) exit 2 ;;
           esac
-          if "${command[@]}" >"$task_log" 2>&1; then
+          if "${command[@]}" 2>&1 | tee "$task_log"; then
             echo "$CHECK passed"
           else
             tail -c 65536 "$task_log" | tail -n 160 > "$diagnostics/$CHECK.log"
