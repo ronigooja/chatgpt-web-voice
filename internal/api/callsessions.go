@@ -60,6 +60,7 @@ func (s *Server) listCallSessions(w http.ResponseWriter, r *http.Request) {
 			"upstream_voice_session_id":  item.UpstreamVoiceSessionID,
 			"conversation":               item.Conversation,
 			"conversation_reason":        item.ConversationReason,
+			"conversation_confirmed":     item.ConversationConfirmed,
 			"context_chars":              item.ContextChars,
 			"voice":                      item.Voice,
 			"voice_mode":                 item.VoiceMode,

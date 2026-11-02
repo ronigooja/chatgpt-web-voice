@@ -309,14 +309,18 @@ and changes to production configuration.
 # Session continuity and AVAS route
 
 `POST /v1/voice/sessions` adds `conversation`, whose value is `resumed` only
-when both prior upstream identifiers are sent on the same sticky account and
-the upstream accepts them. Otherwise it is `new`; `conversation_reason` may be
-`account_changed`, `no_prior`, or `upstream_refused`. `context_chars` counts
+after a WM upstream event proves that both stored prior identifiers were echoed
+by the same upstream conversation. At create time, before that event exists,
+the conservative value is `new` with reason `unverified`; `conversation_confirmed`
+is initially null and later becomes true or false from the event evidence.
+`conversation_reason` may be `account_changed`, `unverified`, or
+`upstream_refused`. `context_chars` counts
 user and assistant transcript characters for the current upstream conversation
 and resets for a new conversation. The gateway does not enforce a limit.
 
 The default upstream remains WM. `VOICE_UPSTREAM_ROUTE=avas` selects the
 probed Codex realtime create endpoint and requires its sideband alpha header;
-AVAS failures are reported rather than falling back to WM. The probe did not
+AVAS always reports `new` with reason `avas_no_resume` because the probe did
+not establish a resume identity field. AVAS failures are reported rather than falling back to WM. The probe did not
 establish real-speech delegation, transcript text production, or initial-item
 recall; those remain unverified.

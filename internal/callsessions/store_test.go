@@ -99,7 +99,7 @@ func TestCallSessionContextMetricsPersist(t *testing.T) {
 	if err := s.Upsert(Session{VoiceSessionID: "vs_metrics", Owner: "api_key:1", AccountID: 2, Conversation: "resumed"}); err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.UpdateMetrics("api_key:1", "vs_metrics", "new", "account_changed", 42)
+	got, err := s.UpdateMetrics("api_key:1", "vs_metrics", "new", "account_changed", nil, 42)
 	if err != nil {
 		t.Fatal(err)
 	}

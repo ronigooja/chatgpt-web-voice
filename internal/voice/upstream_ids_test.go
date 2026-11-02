@@ -1,6 +1,8 @@
 package voice
 
 import (
+	"github.com/dyhhhhhh/chatgpt-web-voice/internal/accounts"
+	"github.com/dyhhhhhh/chatgpt-web-voice/internal/config"
 	"strings"
 	"testing"
 )
@@ -61,5 +63,15 @@ func TestLearnedIDsDoNotLeakToAnotherBindingOrAfterAccountChange(t *testing.T) {
 	r.svc.learnUpstreamIDs(r.res.VoiceSessionID, func(*sessionBinding) bool { return false }, []byte(wrapEvent(`{"conversation_id":"y"}`)))
 	if ctxNow, _ := r.svc.SessionContext("api_key:1", r.res.VoiceSessionID); ctxNow.ConversationID != "" {
 		t.Fatalf("ids from a non-owning media must be ignored, got %+v", ctxNow)
+	}
+}
+
+func TestConversationEvidenceConfirmsMatchingStoredResumeIDs(t *testing.T) {
+	svc := New(config.Config{SessionTTLSeconds: 3600}, nil, nil)
+	id := svc.bindVoiceSession("api_key:1", "vs_evidence", "token", accounts.Account{ID: 1}, UpstreamContext{ConversationID: "conv", ParentMessageID: "parent"})
+	svc.learnUpstreamIDs(id, func(*sessionBinding) bool { return true }, []byte(wrapEvent(`{"conversation_id":"conv","parent_message_id":"parent"}`)))
+	b, _ := svc.boundVoiceSession("api_key:1", id)
+	if b.conversation != "resumed" || b.conversationConfirmed == nil || !*b.conversationConfirmed {
+		t.Fatalf("binding=%+v", b)
 	}
 }

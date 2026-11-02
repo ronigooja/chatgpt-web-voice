@@ -62,7 +62,7 @@ type AccountRepository interface {
 type CallSessionStore interface {
 	Upsert(item callsessions.Session) error
 	UpdateUpstream(owner, voiceSessionID string, accountID int64, upstreamConversationID, upstreamParentMessageID, upstreamVoiceSessionID string) (callsessions.Session, error)
-	UpdateMetrics(owner, voiceSessionID, conversation, reason string, contextChars int) (callsessions.Session, error)
+	UpdateMetrics(owner, voiceSessionID, conversation, reason string, confirmed *bool, contextChars int) (callsessions.Session, error)
 	MarkReleased(owner, voiceSessionID string) error
 	Get(owner, voiceSessionID string) (callsessions.Session, error)
 }
@@ -100,6 +100,7 @@ type UpstreamContext struct {
 	UpstreamVoiceSessionID string `json:"upstream_voice_session_id,omitempty"`
 	ConversationState      string `json:"conversation,omitempty"`
 	ConversationReason     string `json:"conversation_reason,omitempty"`
+	ConversationConfirmed  *bool  `json:"conversation_confirmed,omitempty"`
 }
 
 type sessionBinding struct {
@@ -111,8 +112,11 @@ type sessionBinding struct {
 	UpstreamVoiceSessionID string
 	ConversationID         string
 	ParentMessageID        string
+	ResumeConversationID   string
+	ResumeParentMessageID  string
 	conversation           string
 	conversationReason     string
+	conversationConfirmed  *bool
 	contextChars           int
 	CreatedAt              time.Time
 	UpdatedAt              time.Time
@@ -226,6 +230,7 @@ type SessionResult struct {
 	UpstreamParentMessageID string `json:"upstream_parent_message_id,omitempty"`
 	Conversation            string `json:"conversation"`
 	ConversationReason      string `json:"conversation_reason,omitempty"`
+	ConversationConfirmed   *bool  `json:"conversation_confirmed,omitempty"`
 	ContextChars            int    `json:"context_chars"`
 }
 
@@ -343,6 +348,11 @@ func (s *Service) bindVoiceSessionMedia(owner, sessionID, token string, account 
 		UpstreamVoiceSessionID: merged.UpstreamVoiceSessionID,
 		ConversationID:         merged.ConversationID,
 		ParentMessageID:        merged.ParentMessageID,
+		ResumeConversationID:   merged.ConversationID,
+		ResumeParentMessageID:  merged.ParentMessageID,
+		conversation:           conversationState(merged),
+		conversationReason:     conversationReason(merged),
+		conversationConfirmed:  merged.ConversationConfirmed,
 		CreatedAt:              createdAt,
 		UpdatedAt:              now,
 	}
@@ -444,6 +454,9 @@ func (b *sessionBinding) upstreamContext() UpstreamContext {
 		ConversationID:         b.ConversationID,
 		ParentMessageID:        b.ParentMessageID,
 		UpstreamVoiceSessionID: b.UpstreamVoiceSessionID,
+		ConversationState:      b.conversation,
+		ConversationReason:     b.conversationReason,
+		ConversationConfirmed:  b.conversationConfirmed,
 	}
 }
 
@@ -464,11 +477,14 @@ func mergeUpstreamContext(base, patch UpstreamContext) UpstreamContext {
 	if patch.ConversationReason != "" {
 		out.ConversationReason = patch.ConversationReason
 	}
+	if patch.ConversationConfirmed != nil {
+		out.ConversationConfirmed = patch.ConversationConfirmed
+	}
 	return out
 }
 
 func conversationState(upstream UpstreamContext) string {
-	if upstream.ConversationState == "resumed" {
+	if upstream.ConversationState == "resumed" && upstream.ConversationConfirmed != nil && *upstream.ConversationConfirmed {
 		return "resumed"
 	}
 	return "new"
@@ -481,27 +497,23 @@ func conversationReason(upstream UpstreamContext) string {
 	if upstream.ConversationID != "" && upstream.ParentMessageID != "" {
 		return "same_account"
 	}
-	return "no_prior"
+	return "unverified"
 }
 
 func normalizeConversation(upstream UpstreamContext) UpstreamContext {
-	if upstream.ConversationID != "" && upstream.ParentMessageID != "" {
-		upstream.ConversationState = "resumed"
-		if upstream.ConversationReason == "" {
-			upstream.ConversationReason = "same_account"
-		}
-		return upstream
-	}
 	upstream.ConversationState = "new"
 	if upstream.ConversationReason == "" {
-		upstream.ConversationReason = "no_prior"
+		upstream.ConversationReason = "unverified"
 	}
+	upstream.ConversationConfirmed = nil
 	return upstream
 }
 
 func newUpstreamVoiceSessionID() string {
 	return strings.ToUpper(uuid.New().String())
 }
+
+func boolPtr(value bool) *bool { return &value }
 
 // UpdateSessionContext records upstream conversation identifiers learned from
 // the DataChannel after the media plane is connected. Only the binding owner
@@ -1392,11 +1404,11 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 		UpstreamVoiceSessionID: strings.TrimSpace(req.UpstreamVoiceSessionID),
 	}
 	if requestUpstream.ConversationID != "" && requestUpstream.ParentMessageID != "" {
-		requestUpstream.ConversationState = "resumed"
-		requestUpstream.ConversationReason = "same_account"
+		requestUpstream.ConversationState = "new"
+		requestUpstream.ConversationReason = "unverified"
 	} else {
 		requestUpstream.ConversationState = "new"
-		requestUpstream.ConversationReason = "no_prior"
+		requestUpstream.ConversationReason = "unverified"
 	}
 	upstreamForWM := requestUpstream
 	if durable != nil {
@@ -1422,6 +1434,11 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 		}
 	}
 	upstreamForWM = normalizeConversation(upstreamForWM)
+	if s.cfg.VoiceUpstreamRoute == "avas" {
+		upstreamForWM.ConversationState = "new"
+		upstreamForWM.ConversationReason = "avas_no_resume"
+		upstreamForWM.ConversationConfirmed = boolPtr(false)
+	}
 	if strings.TrimSpace(upstreamForWM.UpstreamVoiceSessionID) == "" {
 		upstreamForWM.UpstreamVoiceSessionID = newUpstreamVoiceSessionID()
 	}
@@ -1630,9 +1647,10 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 				owner: owner,
 				voice: voice, voiceMode: options.VoiceMode, language: options.LanguageCode,
 				accountID: account.ID, token: token, proxy: account.Proxy, deviceID: account.DeviceID,
-				conversation:       conversationState(upstreamForWM),
-				conversationReason: conversationReason(upstreamForWM),
-				stop:               make(chan struct{}),
+				conversation:          conversationState(upstreamForWM),
+				conversationReason:    conversationReason(upstreamForWM),
+				conversationConfirmed: upstreamForWM.ConversationConfirmed,
+				stop:                  make(chan struct{}),
 			}
 			if s.cfg.RelayHandoffEnabled {
 				call.transcript = newTranscriptTail(s.cfg.RelayHandoffMaxChars)
@@ -1642,6 +1660,16 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 		if media != nil {
 			boundMedia, boundCall := media, call
 			media.SetEventObserver(func(data []byte) {
+				s.learnUpstreamIDs(voiceSessionID, func(b *sessionBinding) bool { return b.media == boundMedia }, data)
+				s.mu.Lock()
+				if current := s.bindings[voiceSessionID]; current != nil && current.media == boundMedia && current.call == boundCall {
+					boundCall.mu.Lock()
+					boundCall.conversation = current.conversation
+					boundCall.conversationReason = current.conversationReason
+					boundCall.conversationConfirmed = current.conversationConfirmed
+					boundCall.mu.Unlock()
+				}
+				s.mu.Unlock()
 				if boundCall.transcript != nil {
 					boundCall.transcript.Observe(data)
 					boundCall.mu.Lock()
@@ -1649,8 +1677,9 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 					chars := boundCall.contextChars
 					boundCall.mu.Unlock()
 					s.persistSessionMetrics(voiceSessionID, boundCall, chars)
+				} else {
+					s.persistSessionMetrics(voiceSessionID, boundCall, 0)
 				}
-				s.learnUpstreamIDs(voiceSessionID, func(b *sessionBinding) bool { return b.media == boundMedia }, data)
 			})
 			s.startRebuildLoop(owner, voiceSessionID, media, call)
 		}
@@ -1687,6 +1716,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 			UpstreamParentMessageID: upstreamOut.ParentMessageID,
 			Conversation:            conversationState(upstreamOut),
 			ConversationReason:      conversationReason(upstreamOut),
+			ConversationConfirmed:   upstreamOut.ConversationConfirmed,
 		}, nil
 	}
 
@@ -1849,6 +1879,7 @@ func (s *Service) persistCallSessionMetrics(owner, voiceSessionID string, accoun
 		UpstreamVoiceSessionID:  upstream.UpstreamVoiceSessionID,
 		Conversation:            conversation,
 		ConversationReason:      reason,
+		ConversationConfirmed:   upstream.ConversationConfirmed,
 		ContextChars:            contextChars,
 		Voice:                   voiceName,
 		VoiceMode:               voiceMode,
@@ -1867,8 +1898,9 @@ func (s *Service) persistSessionMetrics(voiceSessionID string, call *callState, 
 	call.mu.Lock()
 	owner, accountID, voice, mode, lang := call.owner, call.accountID, call.voice, call.voiceMode, call.language
 	conversation, reason := call.conversation, call.conversationReason
+	confirmed := call.conversationConfirmed
 	call.mu.Unlock()
-	if _, err := s.records.UpdateMetrics(owner, voiceSessionID, conversation, reason, contextChars); err != nil {
+	if _, err := s.records.UpdateMetrics(owner, voiceSessionID, conversation, reason, confirmed, contextChars); err != nil {
 		// The binding may have been released before the observer drained its last frame.
 		s.logger.Debug("call_session_metrics_update_skipped", "voice_session_id", voiceSessionID, "account_id", accountID, "voice", voice, "mode", mode, "language", lang, "error", err)
 	}

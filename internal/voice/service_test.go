@@ -123,7 +123,22 @@ func TestBuildSessionJSONResumesUpstreamConversation(t *testing.T) {
 
 func TestResumeConversationFlagSameAccount(t *testing.T) {
 	got := normalizeConversation(UpstreamContext{ConversationID: "c", ParentMessageID: "p"})
-	if conversationState(got) != "resumed" || conversationReason(got) != "same_account" {
+	if conversationState(got) != "new" || conversationReason(got) != "unverified" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestConversationConfirmedLaterFromMatchingUpstreamEvent(t *testing.T) {
+	confirmed := boolPtr(true)
+	got := UpstreamContext{ConversationState: "resumed", ConversationReason: "same_account", ConversationConfirmed: confirmed}
+	if conversationState(got) != "resumed" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestAVASConversationIsNewWithoutResumeIdentity(t *testing.T) {
+	got := UpstreamContext{ConversationState: "new", ConversationReason: "avas_no_resume", ConversationConfirmed: boolPtr(false)}
+	if conversationState(got) != "new" || conversationReason(got) != "avas_no_resume" {
 		t.Fatalf("got %+v", got)
 	}
 }
@@ -137,7 +152,7 @@ func TestNewConversationFlagAccountChange(t *testing.T) {
 
 func TestNewConversationFlagNoPrior(t *testing.T) {
 	got := normalizeConversation(UpstreamContext{})
-	if conversationState(got) != "new" || conversationReason(got) != "no_prior" {
+	if conversationState(got) != "new" || conversationReason(got) != "unverified" {
 		t.Fatalf("got %+v", got)
 	}
 }

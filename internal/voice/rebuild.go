@@ -15,23 +15,24 @@ import (
 // callState is the per-call data a rebuild needs. It lives in memory beside the
 // session binding and is dropped with it.
 type callState struct {
-	owner              string
-	mu                 sync.Mutex
-	voice              string
-	voiceMode          string
-	language           string
-	accountID          int64
-	token              string
-	proxy              string
-	deviceID           string
-	rebuilds           int
-	lastReason         string
-	stop               chan struct{}
-	stopOnce           sync.Once
-	transcript         *transcriptTail
-	conversation       string
-	conversationReason string
-	contextChars       int
+	owner                 string
+	mu                    sync.Mutex
+	voice                 string
+	voiceMode             string
+	language              string
+	accountID             int64
+	token                 string
+	proxy                 string
+	deviceID              string
+	rebuilds              int
+	lastReason            string
+	stop                  chan struct{}
+	stopOnce              sync.Once
+	transcript            *transcriptTail
+	conversation          string
+	conversationReason    string
+	conversationConfirmed *bool
+	contextChars          int
 }
 
 func (c *callState) halt() {

@@ -47,6 +47,7 @@ func (db *DB) migrate() error {
 			upstream_voice_session_id TEXT NOT NULL DEFAULT '',
 			conversation_state TEXT NOT NULL DEFAULT 'new',
 			conversation_reason TEXT NOT NULL DEFAULT '',
+			conversation_confirmed INTEGER,
 			context_chars INTEGER NOT NULL DEFAULT 0,
 			gateway_voice_session_id TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -158,6 +159,7 @@ func (db *DB) ensureCallSessionResumeColumns() error {
 	for _, column := range []string{
 		"conversation_state TEXT NOT NULL DEFAULT 'new'",
 		"conversation_reason TEXT NOT NULL DEFAULT ''",
+		"conversation_confirmed INTEGER",
 		"context_chars INTEGER NOT NULL DEFAULT 0",
 	} {
 		name := column[:strings.IndexByte(column, ' ')]

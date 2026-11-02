@@ -66,6 +66,15 @@ func (s *Service) learnUpstreamIDs(sessionID string, owned func(*sessionBinding)
 	if item == nil || !owned(item) {
 		return
 	}
+	confirmed := item.ResumeConversationID != "" && conversationID == item.ResumeConversationID && item.ResumeParentMessageID != "" && parentMessageID == item.ResumeParentMessageID
+	if item.ResumeConversationID != "" || item.ResumeParentMessageID != "" {
+		item.conversationConfirmed = boolPtr(confirmed)
+		if confirmed {
+			item.conversation, item.conversationReason = "resumed", "same_account"
+		} else {
+			item.conversation, item.conversationReason = "new", "upstream_refused"
+		}
+	}
 	if conversationID != "" {
 		item.ConversationID = conversationID
 	}
