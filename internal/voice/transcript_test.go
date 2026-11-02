@@ -107,3 +107,16 @@ func TestTranscriptMemoryStaysBounded(t *testing.T) {
 		t.Fatalf("recorded text grew unbounded: %d bytes", n)
 	}
 }
+
+func TestContextCharsCountsAndResetsOnNewConversation(t *testing.T) {
+	tr := newTranscriptTail(1000)
+	tr.Observe([]byte(deltaFrame("user", "u1", "hello")))
+	tr.Observe([]byte(deltaFrame("assistant", "a1", "world")))
+	if got := tr.ContextChars(); got != 10 {
+		t.Fatalf("context chars=%d", got)
+	}
+	tr.ResetContextChars()
+	if got := tr.ContextChars(); got != 0 {
+		t.Fatalf("after reset=%d", got)
+	}
+}

@@ -19,7 +19,7 @@
 | 谁负责 | 内容 |
 |---|---|
 | 浏览器 / 下游客户端 | 麦克风、扬声器、`RTCPeerConnection`、DataChannel、字幕、业务 UI；图片字节直传 Azure |
-| Gateway | 登录 / API Key、账号池、`/realtime/wm` SDP 代理、内存绑定 + `call_sessions`、文本会话、图片凭证与 complete |
+| Gateway | 登录 / API Key、账号池、`/realtime/wm` 或显式 AVAS SDP 代理、内存绑定 + `call_sessions`、文本会话、图片凭证与 complete |
 | chatgpt.com + Azure | 语音推理、WebRTC 媒体面、文件 blob、DataChannel 协议事件 |
 
 **设计边界：信令 / 凭证走 Gateway，媒体与图片字节尽量不经 Gateway。**
@@ -418,7 +418,7 @@ Production 强制校验证书；development 才允许 `VOICE_SKIP_SSL_VERIFY`。
 |---|---|
 | `GET /v1/health` | 鉴权健康检查 |
 | `GET /v1/voice/config` | 音色 / 语言 / STUN / DataChannel |
-| `POST /v1/voice/sessions` | offer → answer；返回 `voice_session_id` 等公开字段 |
+| `POST /v1/voice/sessions` | offer → answer；返回 `voice_session_id`、`conversation` (`resumed`/`new`)、可选 `conversation_reason` 与 `context_chars` 等公开字段。`VOICE_UPSTREAM_ROUTE` 默认为 `wm`，可显式设为 `avas`; AVAS 失败不会回退到 WM。 |
 | `POST .../context` | 上报上游 id |
 | `GET .../title` | 拉上游标题 |
 | `POST .../uploads` | 图片直传凭证 |

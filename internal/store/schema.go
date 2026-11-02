@@ -1,6 +1,9 @@
 package store
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 func (db *DB) migrate() error {
 	for _, statement := range []string{
@@ -42,6 +45,9 @@ func (db *DB) migrate() error {
 			upstream_conversation_id TEXT NOT NULL DEFAULT '',
 			upstream_parent_message_id TEXT NOT NULL DEFAULT '',
 			upstream_voice_session_id TEXT NOT NULL DEFAULT '',
+			conversation_state TEXT NOT NULL DEFAULT 'new',
+			conversation_reason TEXT NOT NULL DEFAULT '',
+			context_chars INTEGER NOT NULL DEFAULT 0,
 			gateway_voice_session_id TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -111,6 +117,9 @@ func (db *DB) migrate() error {
 	if err := db.ensureConversationUpstreamColumns(); err != nil {
 		return err
 	}
+	if err := db.ensureCallSessionResumeColumns(); err != nil {
+		return err
+	}
 	if err := db.ensureAccountHealthColumns(); err != nil {
 		return err
 	}
@@ -141,6 +150,27 @@ func (db *DB) migrate() error {
 		key TEXT PRIMARY KEY, remote_id TEXT NOT NULL, payload_digest TEXT NOT NULL
 	)`); err != nil {
 		return fmt.Errorf("create bridge idempotency: %w", err)
+	}
+	return nil
+}
+
+func (db *DB) ensureCallSessionResumeColumns() error {
+	for _, column := range []string{
+		"conversation_state TEXT NOT NULL DEFAULT 'new'",
+		"conversation_reason TEXT NOT NULL DEFAULT ''",
+		"context_chars INTEGER NOT NULL DEFAULT 0",
+	} {
+		name := column[:strings.IndexByte(column, ' ')]
+		has, err := db.hasColumn("call_sessions", name)
+		if err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		if _, err := db.conn.Exec("ALTER TABLE call_sessions ADD COLUMN " + column); err != nil {
+			return fmt.Errorf("add call_sessions.%s: %w", name, err)
+		}
 	}
 	return nil
 }

@@ -2,6 +2,13 @@ package voice
 
 import "strings"
 
+func normalizeVoiceUpstreamRoute(raw string) string {
+	if strings.EqualFold(strings.TrimSpace(raw), "avas") {
+		return "avas"
+	}
+	return "wm"
+}
+
 const (
 	defaultVoice        = "cove"
 	defaultVoiceMode    = "wingman"

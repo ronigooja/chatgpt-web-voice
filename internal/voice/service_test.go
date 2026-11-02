@@ -121,6 +121,82 @@ func TestBuildSessionJSONResumesUpstreamConversation(t *testing.T) {
 	}
 }
 
+func TestResumeConversationFlagSameAccount(t *testing.T) {
+	got := normalizeConversation(UpstreamContext{ConversationID: "c", ParentMessageID: "p"})
+	if conversationState(got) != "resumed" || conversationReason(got) != "same_account" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestNewConversationFlagAccountChange(t *testing.T) {
+	got := normalizeConversation(UpstreamContext{ConversationReason: "account_changed"})
+	if conversationState(got) != "new" || conversationReason(got) != "account_changed" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestNewConversationFlagNoPrior(t *testing.T) {
+	got := normalizeConversation(UpstreamContext{})
+	if conversationState(got) != "new" || conversationReason(got) != "no_prior" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestNewConversationFlagUpstreamRefused(t *testing.T) {
+	got := normalizeConversation(UpstreamContext{ConversationReason: "upstream_refused"})
+	if conversationState(got) != "new" || conversationReason(got) != "upstream_refused" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestAVASRouteCreateAndEventNormalization(t *testing.T) {
+	if got := normalizeVoiceUpstreamRoute("avas"); got != "avas" {
+		t.Fatalf("route=%q", got)
+	}
+	frame := normalizeAVASEvent([]byte(`{"type":"usage","total_tokens":3}`))
+	var outer struct {
+		Type string `json:"type"`
+		Data string `json:"data"`
+	}
+	if err := json.Unmarshal(frame, &outer); err != nil || outer.Type != "data_message" || !strings.Contains(outer.Data, `"type":"usage"`) {
+		t.Fatalf("normalized=%s err=%v", frame, err)
+	}
+}
+
+func TestAVASCreateSendsAlphaHeaderAndJSONSession(t *testing.T) {
+	var gotAlpha, gotContentType string
+	var got map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAlpha, gotContentType = r.Header.Get("openai-alpha"), r.Header.Get("Content-Type")
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.Header().Set("Location", "https://api.openai.com/v1/live/rtc_test")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte("v=0\r\n"))
+	}))
+	t.Cleanup(upstream.Close)
+	svc := New(config.Config{DefaultUA: "test", UpstreamTransport: config.TransportGo}, nil, nil)
+	svc.avasURL = upstream.URL
+	_, _, answer, location, err := svc.postAVASResponse("token", "v=0\r\n", buildAVASSession("cove", UpstreamContext{}), "direct", "device")
+	if err != nil || !strings.HasPrefix(answer, "v=0") || !strings.HasSuffix(location, "rtc_test") {
+		t.Fatalf("answer=%q location=%q err=%v", answer, location, err)
+	}
+	if gotAlpha != "quicksilver=v2" || !strings.Contains(gotContentType, "application/json") {
+		t.Fatalf("headers alpha=%q content-type=%q", gotAlpha, gotContentType)
+	}
+	if got["sdp"] != "v=0\r\n" {
+		t.Fatalf("body=%v", got)
+	}
+	if session, ok := got["session"].(map[string]any); !ok || session["model"] != "gpt-live-1-codex" {
+		t.Fatalf("session=%v", got["session"])
+	}
+}
+
+func TestWMDefaultUnchanged(t *testing.T) {
+	if got := normalizeVoiceUpstreamRoute(""); got != "wm" {
+		t.Fatalf("default route=%q", got)
+	}
+}
+
 func TestExtractConversationTitle(t *testing.T) {
 	title, ok := extractConversationTitle(`{"title":"Plan weekend trip","conversation_id":"c1"}`)
 	if !ok || title != "Plan weekend trip" {

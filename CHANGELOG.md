@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Session creation now returns additive `conversation` (`resumed` or `new`) and
+  optional `conversation_reason`; call-session records also expose the running
+  `context_chars` count for user and assistant transcript text. `VOICE_UPSTREAM_ROUTE=avas`
+  selects the probed Codex AVAS create path and its `openai-alpha: quicksilver=v2`
+  sideband; the default remains `wm`, and AVAS does not fall back silently.
 - Downstream voice-session DELETE is now idempotent after an owner-scoped
   release or clean relay termination; repeats return `state=already_released`,
   while unknown and cross-key session ids remain 404. Lease release continues

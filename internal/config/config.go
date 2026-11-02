@@ -85,6 +85,7 @@ type Config struct {
 	SecCHUAPlatformVersion string
 	ClientVersion          string
 	ClientBuildNumber      string
+	VoiceUpstreamRoute     string
 	ListenAddr             string
 	TLS                    bool
 	TLSCertFile            string
@@ -233,6 +234,7 @@ func Load() Config {
 		SecCHUAPlatformVersion: env("VOICE_SEC_CH_UA_PLATFORM_VERSION", defaultSecCHUAPlatformVersion),
 		ClientVersion:          env("VOICE_CLIENT_VERSION", defaultClientVersion),
 		ClientBuildNumber:      env("VOICE_CLIENT_BUILD_NUMBER", defaultClientBuildNumber),
+		VoiceUpstreamRoute:     normalizeVoiceRoute(env("VOICE_UPSTREAM_ROUTE", "wm")),
 		// Bind all interfaces so Windows / VS Code port-forward can reach WSL.
 		ListenAddr:  env("VOICE_LISTEN_ADDR", "0.0.0.0:8090"),
 		TLS:         envBool("VOICE_TLS", false),
@@ -259,6 +261,13 @@ func Load() Config {
 		RelayHandoffEnabled:      envBool("VOICE_RELAY_HANDOFF", true),
 		RelayHandoffMaxChars:     envInt("VOICE_RELAY_HANDOFF_MAX_CHARS", 6000),
 	}
+}
+
+func normalizeVoiceRoute(raw string) string {
+	if strings.EqualFold(strings.TrimSpace(raw), "avas") {
+		return "avas"
+	}
+	return "wm"
 }
 
 // Validate rejects configurations that would leave protected content exposed.

@@ -166,6 +166,13 @@ func (s *pionSession) SetEventObserver(observer func([]byte)) {
 	s.observerMu.Unlock()
 }
 
+func (s *pionSession) InjectEvent(data []byte) error {
+	if s == nil || s.bridge == nil {
+		return errors.New("relay event bridge unavailable")
+	}
+	return s.bridge.sendDownstream(data)
+}
+
 func (s *pionSession) observeEvent(data []byte) {
 	s.observerMu.RLock()
 	observer := s.observer
@@ -208,6 +215,20 @@ type dataChannelBridge struct {
 
 	observeMu sync.RWMutex
 	observe   func([]byte)
+}
+
+func (b *dataChannelBridge) sendDownstream(data []byte) error {
+	if b == nil || b.upToDown == nil {
+		return errors.New("downstream event channel unavailable")
+	}
+	select {
+	case b.upToDown.queue <- dataChannelMessage{data: append([]byte(nil), data...), isString: true}:
+		return nil
+	case <-b.done:
+		return errors.New("relay closed")
+	default:
+		return errors.New("downstream event queue full")
+	}
 }
 
 // New creates a Pion based relay. A nil logger discards logs.

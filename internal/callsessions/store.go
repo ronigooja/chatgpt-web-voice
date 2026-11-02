@@ -24,6 +24,8 @@ const sessionSelectColumns = `
 	COALESCE(upstream_conversation_id, ''),
 	COALESCE(upstream_parent_message_id, ''),
 	COALESCE(upstream_voice_session_id, ''),
+	COALESCE(conversation_state, 'new'), COALESCE(conversation_reason, ''),
+	COALESCE(context_chars, 0),
 	COALESCE(voice, ''), COALESCE(voice_mode, ''), COALESCE(language_code, ''),
 	status, created_at, updated_at, last_seen_at, COALESCE(released_at, '')`
 
@@ -38,6 +40,9 @@ type Session struct {
 	UpstreamConversationID  string `json:"upstream_conversation_id,omitempty"`
 	UpstreamParentMessageID string `json:"upstream_parent_message_id,omitempty"`
 	UpstreamVoiceSessionID  string `json:"upstream_voice_session_id,omitempty"`
+	Conversation            string `json:"conversation"`
+	ConversationReason      string `json:"conversation_reason,omitempty"`
+	ContextChars            int    `json:"context_chars"`
 	Voice                   string `json:"voice,omitempty"`
 	VoiceMode               string `json:"voice_mode,omitempty"`
 	LanguageCode            string `json:"language_code,omitempty"`
@@ -99,12 +104,13 @@ func (s *Store) Upsert(item Session) error {
 		INSERT INTO call_sessions (
 			voice_session_id, owner, caller_kind, caller_label, api_key_id, account_id,
 			upstream_conversation_id, upstream_parent_message_id, upstream_voice_session_id,
+			conversation_state, conversation_reason, context_chars,
 			voice, voice_mode, language_code, status,
 			created_at, updated_at, last_seen_at, released_at
 		) VALUES (
-			?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?,
-			?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?,
 			CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ''
 		)
 		ON CONFLICT(voice_session_id) DO UPDATE SET
@@ -134,6 +140,9 @@ func (s *Store) Upsert(item Session) error {
 				WHEN excluded.upstream_voice_session_id <> '' THEN excluded.upstream_voice_session_id
 				ELSE call_sessions.upstream_voice_session_id
 			END,
+			conversation_state = excluded.conversation_state,
+			conversation_reason = excluded.conversation_reason,
+			context_chars = excluded.context_chars,
 			voice = CASE WHEN excluded.voice <> '' THEN excluded.voice ELSE call_sessions.voice END,
 			voice_mode = CASE WHEN excluded.voice_mode <> '' THEN excluded.voice_mode ELSE call_sessions.voice_mode END,
 			language_code = CASE WHEN excluded.language_code <> '' THEN excluded.language_code ELSE call_sessions.language_code END,
@@ -146,6 +155,7 @@ func (s *Store) Upsert(item Session) error {
 			END`,
 		item.VoiceSessionID, item.Owner, item.CallerKind, item.CallerLabel, item.APIKeyID, item.AccountID,
 		item.UpstreamConversationID, item.UpstreamParentMessageID, item.UpstreamVoiceSessionID,
+		item.Conversation, item.ConversationReason, item.ContextChars,
 		item.Voice, item.VoiceMode, item.LanguageCode, item.Status,
 	)
 	if err != nil {
@@ -203,6 +213,19 @@ func (s *Store) UpdateUpstream(owner, voiceSessionID string, accountID int64, up
 		voiceSessionID, owner,
 	); err != nil {
 		return Session{}, fmt.Errorf("update call session upstream: %w", err)
+	}
+	return s.getUnlocked(owner, voiceSessionID)
+}
+
+func (s *Store) UpdateMetrics(owner, voiceSessionID, conversation, reason string, contextChars int) (Session, error) {
+	owner, voiceSessionID = strings.TrimSpace(owner), strings.TrimSpace(voiceSessionID)
+	if contextChars < 0 {
+		contextChars = 0
+	}
+	s.db.Lock()
+	defer s.db.Unlock()
+	if _, err := s.db.Conn().Exec(`UPDATE call_sessions SET conversation_state = ?, conversation_reason = ?, context_chars = ?, updated_at = CURRENT_TIMESTAMP, last_seen_at = CURRENT_TIMESTAMP WHERE voice_session_id = ? AND owner = ?`, conversation, reason, contextChars, voiceSessionID, owner); err != nil {
+		return Session{}, fmt.Errorf("update call session metrics: %w", err)
 	}
 	return s.getUnlocked(owner, voiceSessionID)
 }
@@ -407,6 +430,7 @@ func scanSession(row store.Scanner) (Session, error) {
 		&item.VoiceSessionID, &item.Owner, &item.CallerKind, &item.CallerLabel,
 		&item.APIKeyID, &item.AccountID,
 		&item.UpstreamConversationID, &item.UpstreamParentMessageID, &item.UpstreamVoiceSessionID,
+		&item.Conversation, &item.ConversationReason, &item.ContextChars,
 		&item.Voice, &item.VoiceMode, &item.LanguageCode,
 		&item.Status, &item.CreatedAt, &item.UpdatedAt, &item.LastSeenAt, &item.ReleasedAt,
 	); err != nil {
@@ -426,6 +450,14 @@ func normalizeSession(item Session) Session {
 	item.Voice = truncate(strings.TrimSpace(item.Voice), 40)
 	item.VoiceMode = truncate(strings.TrimSpace(item.VoiceMode), 40)
 	item.LanguageCode = truncate(strings.TrimSpace(item.LanguageCode), 40)
+	item.Conversation = strings.TrimSpace(item.Conversation)
+	if item.Conversation != "resumed" {
+		item.Conversation = "new"
+	}
+	item.ConversationReason = truncate(strings.TrimSpace(item.ConversationReason), 80)
+	if item.ContextChars < 0 {
+		item.ContextChars = 0
+	}
 	item.Status = strings.TrimSpace(item.Status)
 	if item.CallerKind == "" {
 		if strings.HasPrefix(item.Owner, "api_key:") {

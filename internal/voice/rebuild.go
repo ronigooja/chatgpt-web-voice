@@ -15,19 +15,23 @@ import (
 // callState is the per-call data a rebuild needs. It lives in memory beside the
 // session binding and is dropped with it.
 type callState struct {
-	mu         sync.Mutex
-	voice      string
-	voiceMode  string
-	language   string
-	accountID  int64
-	token      string
-	proxy      string
-	deviceID   string
-	rebuilds   int
-	lastReason string
-	stop       chan struct{}
-	stopOnce   sync.Once
-	transcript *transcriptTail
+	owner              string
+	mu                 sync.Mutex
+	voice              string
+	voiceMode          string
+	language           string
+	accountID          int64
+	token              string
+	proxy              string
+	deviceID           string
+	rebuilds           int
+	lastReason         string
+	stop               chan struct{}
+	stopOnce           sync.Once
+	transcript         *transcriptTail
+	conversation       string
+	conversationReason string
+	contextChars       int
 }
 
 func (c *callState) halt() {
@@ -219,7 +223,7 @@ func (s *Service) RebuildMedia(owner, voiceSessionID, why string) (RebuildOutcom
 	}
 	s.mu.Unlock()
 	if changed && s.records != nil {
-		s.persistCallSession(owner, voiceSessionID, account.ID, voice, mode, lang, UpstreamContext{UpstreamVoiceSessionID: upstream.UpstreamVoiceSessionID})
+		s.persistCallSessionMetrics(owner, voiceSessionID, account.ID, voice, mode, lang, UpstreamContext{UpstreamVoiceSessionID: upstream.UpstreamVoiceSessionID}, "new", "account_changed", 0)
 	}
 	if s.evidence != nil && mediaID.VoiceSessionID != "" {
 		if recErr := s.evidence.RecordLegSwap(mediaID, account.ID, legClose.Clean()); recErr != nil {

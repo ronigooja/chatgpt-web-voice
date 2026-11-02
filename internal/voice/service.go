@@ -11,11 +11,14 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	fhttp "github.com/bogdanfinn/fhttp"
+	"github.com/bogdanfinn/websocket"
 	"github.com/google/uuid"
 
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/accounts"
@@ -29,6 +32,7 @@ import (
 
 const (
 	wmURL           = "https://chatgpt.com/realtime/wm?dcid=0"
+	avasURL         = "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas"
 	settingsUserURL = "https://chatgpt.com/backend-api/settings/user"
 	// conversationURLPrefix is used to load chatgpt.com conversation metadata
 	// (including the generated title) with the sticky account token.
@@ -58,6 +62,7 @@ type AccountRepository interface {
 type CallSessionStore interface {
 	Upsert(item callsessions.Session) error
 	UpdateUpstream(owner, voiceSessionID string, accountID int64, upstreamConversationID, upstreamParentMessageID, upstreamVoiceSessionID string) (callsessions.Session, error)
+	UpdateMetrics(owner, voiceSessionID, conversation, reason string, contextChars int) (callsessions.Session, error)
 	MarkReleased(owner, voiceSessionID string) error
 	Get(owner, voiceSessionID string) (callsessions.Session, error)
 }
@@ -93,6 +98,8 @@ type UpstreamContext struct {
 	ConversationID         string `json:"upstream_conversation_id,omitempty"`
 	ParentMessageID        string `json:"upstream_parent_message_id,omitempty"`
 	UpstreamVoiceSessionID string `json:"upstream_voice_session_id,omitempty"`
+	ConversationState      string `json:"conversation,omitempty"`
+	ConversationReason     string `json:"conversation_reason,omitempty"`
 }
 
 type sessionBinding struct {
@@ -104,6 +111,9 @@ type sessionBinding struct {
 	UpstreamVoiceSessionID string
 	ConversationID         string
 	ParentMessageID        string
+	conversation           string
+	conversationReason     string
+	contextChars           int
 	CreatedAt              time.Time
 	UpdatedAt              time.Time
 	// media is the gateway-terminated media session, nil in client-direct mode.
@@ -111,7 +121,8 @@ type sessionBinding struct {
 	// mediaID is the evidence identity of media; zero when evidence is not tracked.
 	mediaID mediaevidence.Identity
 	// call holds in-memory per-call data for rebuilds; nil for client-direct media.
-	call *callState
+	call       *callState
+	avasCancel context.CancelFunc
 }
 
 // Service is the ChatGPT web voice gateway.
@@ -124,6 +135,9 @@ type Service struct {
 
 	// realtimeURL overrides the voice endpoint in tests.
 	realtimeURL string
+	// avasURL overrides the AVAS endpoint in tests.
+	avasURL         string
+	avasSidebandURL string
 	// settingsUserURL overrides the account probe endpoint in tests.
 	settingsUserURL string
 	// conversationURLPrefix overrides the conversation metadata endpoint in tests.
@@ -210,6 +224,9 @@ type SessionResult struct {
 	UpstreamVoiceSessionID  string `json:"upstream_voice_session_id,omitempty"`
 	UpstreamConversationID  string `json:"upstream_conversation_id,omitempty"`
 	UpstreamParentMessageID string `json:"upstream_parent_message_id,omitempty"`
+	Conversation            string `json:"conversation"`
+	ConversationReason      string `json:"conversation_reason,omitempty"`
+	ContextChars            int    `json:"context_chars"`
 }
 
 func normalizeVoice(voice string) string {
@@ -441,7 +458,45 @@ func mergeUpstreamContext(base, patch UpstreamContext) UpstreamContext {
 	if v := strings.TrimSpace(patch.UpstreamVoiceSessionID); v != "" {
 		out.UpstreamVoiceSessionID = v
 	}
+	if patch.ConversationState != "" {
+		out.ConversationState = patch.ConversationState
+	}
+	if patch.ConversationReason != "" {
+		out.ConversationReason = patch.ConversationReason
+	}
 	return out
+}
+
+func conversationState(upstream UpstreamContext) string {
+	if upstream.ConversationState == "resumed" {
+		return "resumed"
+	}
+	return "new"
+}
+
+func conversationReason(upstream UpstreamContext) string {
+	if upstream.ConversationReason != "" {
+		return upstream.ConversationReason
+	}
+	if upstream.ConversationID != "" && upstream.ParentMessageID != "" {
+		return "same_account"
+	}
+	return "no_prior"
+}
+
+func normalizeConversation(upstream UpstreamContext) UpstreamContext {
+	if upstream.ConversationID != "" && upstream.ParentMessageID != "" {
+		upstream.ConversationState = "resumed"
+		if upstream.ConversationReason == "" {
+			upstream.ConversationReason = "same_account"
+		}
+		return upstream
+	}
+	upstream.ConversationState = "new"
+	if upstream.ConversationReason == "" {
+		upstream.ConversationReason = "no_prior"
+	}
+	return upstream
 }
 
 func newUpstreamVoiceSessionID() string {
@@ -966,6 +1021,106 @@ func (s *Service) postWMResponse(token, offerSDP, sessionJSON, proxy, deviceID s
 	return resp.StatusCode, resp.Header.Get("content-type"), string(raw), resp.Header.Get("Retry-After"), nil
 }
 
+type avasSessionPayload struct {
+	Model        string `json:"model"`
+	Instructions string `json:"instructions"`
+	Audio        struct {
+		Output struct {
+			Voice string `json:"voice"`
+		} `json:"output"`
+	} `json:"audio"`
+	Delegation struct {
+		Type string `json:"type"`
+	} `json:"delegation"`
+	InitialItems []map[string]any `json:"initial_items"`
+}
+
+func buildAVASSession(voice string, upstream UpstreamContext) avasSessionPayload {
+	p := avasSessionPayload{Model: "gpt-live-1-codex", InitialItems: []map[string]any{}}
+	p.Audio.Output.Voice = normalizeVoice(voice)
+	p.Delegation.Type = "client"
+	return p
+}
+
+func (s *Service) postAVASResponse(token, offerSDP string, payload avasSessionPayload, proxy, deviceID string) (status int, contentType, answer, location string, err error) {
+	body, err := json.Marshal(map[string]any{"sdp": offerSDP, "session": payload})
+	if err != nil {
+		return 0, "", "", "", err
+	}
+	client := httpclient.New(s.httpOptions, proxy)
+	req, err := http.NewRequest(http.MethodPost, firstNonEmpty(s.avasURL, avasURL), bytes.NewReader(body))
+	if err != nil {
+		return 0, "", "", "", err
+	}
+	req.Header = s.authHeaders(token, deviceID, map[string]string{"content-type": "application/json", "openai-alpha": "quicksilver=v2", "originator": "codex_cli_rs"})
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, "", "", "", err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	return resp.StatusCode, resp.Header.Get("content-type"), string(raw), resp.Header.Get("Location"), nil
+}
+
+func normalizeAVASEvent(data []byte) []byte {
+	var event map[string]any
+	if json.Unmarshal(data, &event) != nil {
+		return append([]byte(nil), data...)
+	}
+	inner, _ := json.Marshal(event)
+	out, _ := json.Marshal(map[string]any{"type": "data_message", "data": string(inner)})
+	return out
+}
+
+func avasCallID(location string) string {
+	location = strings.TrimRight(strings.TrimSpace(location), "/")
+	if location == "" {
+		return ""
+	}
+	part := location[strings.LastIndex(location, "/")+1:]
+	return strings.TrimSpace(part)
+}
+
+func (s *Service) startAVASSideband(ctx context.Context, media relay.Session, callID, token, proxy string) error {
+	injector, ok := media.(relay.EventInjector)
+	if !ok {
+		return errors.New("avas sideband requires gateway media relay")
+	}
+	if callID == "" {
+		return errors.New("avas response omitted call id")
+	}
+	h := fhttp.Header{}
+	h.Set("Authorization", "Bearer "+token)
+	h.Set("openai-alpha", "quicksilver=v2")
+	h.Set("originator", "codex_cli_rs")
+	h.Set("User-Agent", s.cfg.DefaultUA)
+	dialer := websocket.Dialer{HandshakeTimeout: 20 * time.Second}
+	if strings.TrimSpace(proxy) != "" && !strings.EqualFold(strings.TrimSpace(proxy), httpclient.ProxyDirect) {
+		dialer.Proxy = func(*fhttp.Request) (*url.URL, error) { return url.Parse(proxy) }
+	}
+	endpoint := firstNonEmpty(s.avasSidebandURL, "wss://api.openai.com/v1/live/") + callID
+	conn, _, err := dialer.Dial(endpoint, h)
+	if err != nil {
+		return fmt.Errorf("avas sideband handshake: %w", err)
+	}
+	go func() {
+		defer conn.Close()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			_ = injector.InjectEvent(normalizeAVASEvent(data))
+		}
+	}()
+	return nil
+}
+
 // ProbeResult is the outcome of a lightweight account liveness check.
 type ProbeResult struct {
 	AccountID        int64  `json:"account_id"`
@@ -1236,6 +1391,13 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 		ParentMessageID:        strings.TrimSpace(req.UpstreamParentMessageID),
 		UpstreamVoiceSessionID: strings.TrimSpace(req.UpstreamVoiceSessionID),
 	}
+	if requestUpstream.ConversationID != "" && requestUpstream.ParentMessageID != "" {
+		requestUpstream.ConversationState = "resumed"
+		requestUpstream.ConversationReason = "same_account"
+	} else {
+		requestUpstream.ConversationState = "new"
+		requestUpstream.ConversationReason = "no_prior"
+	}
 	upstreamForWM := requestUpstream
 	if durable != nil {
 		// Fill gaps from durable metadata before applying the live binding.
@@ -1259,6 +1421,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 			upstreamForWM = mergeUpstreamContext(upstreamForWM, requestUpstream)
 		}
 	}
+	upstreamForWM = normalizeConversation(upstreamForWM)
 	if strings.TrimSpace(upstreamForWM.UpstreamVoiceSessionID) == "" {
 		upstreamForWM.UpstreamVoiceSessionID = newUpstreamVoiceSessionID()
 	}
@@ -1273,6 +1436,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 	var lastError string
 	var lastDetail any
 	lastStatus := 0
+	resumeRefusedRetried := false
 
 	for attempt := 1; attempt <= s.cfg.MaxAccountAttempts; attempt++ {
 		token, account, err := s.pickAccountForSession(preferredToken, preferredAccountID, excluded)
@@ -1334,7 +1498,14 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 		}
 
 		wmStarted := time.Now()
-		status, contentType, text, retryAfter, err := s.postWMResponse(token, wmOffer, sessionJSON, explicitProxy, account.DeviceID)
+		var status int
+		var contentType, text, retryAfter, upstreamLocation string
+		if s.cfg.VoiceUpstreamRoute == "avas" {
+			avasPayload := buildAVASSession(voice, upstreamForWM)
+			status, contentType, text, upstreamLocation, err = s.postAVASResponse(token, wmOffer, avasPayload, explicitProxy, account.DeviceID)
+		} else {
+			status, contentType, text, retryAfter, err = s.postWMResponse(token, wmOffer, sessionJSON, explicitProxy, account.DeviceID)
+		}
 		health := s.reportOutcome(token, wmStarted, status, contentType, text, retryAfter, err)
 		if err != nil {
 			closeMediaOnFailure("upstream_request_failed")
@@ -1372,7 +1543,31 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 			continue
 		}
 
-		if (status != 200 && status != 201) || !strings.HasPrefix(strings.TrimLeft(text, " \t\r\n"), "v=0") {
+		if s.cfg.VoiceUpstreamRoute == "avas" {
+			if status != http.StatusCreated || !strings.HasPrefix(strings.TrimLeft(text, " \t\r\n"), "v=0") {
+				if upstreamForWM.ConversationState == "resumed" && !resumeRefusedRetried {
+					resumeRefusedRetried = true
+					upstreamForWM.ConversationID = ""
+					upstreamForWM.ParentMessageID = ""
+					upstreamForWM.ConversationState = "new"
+					upstreamForWM.ConversationReason = "upstream_refused"
+					sessionJSON = buildSessionJSON(voice, options.VoiceMode, options.LanguageCode, upstreamForWM)
+					closeMediaOnFailure("upstream_refused")
+					continue
+				}
+				closeMediaOnFailure("upstream_rejected")
+				return nil, &ServiceError{Message: fmt.Sprintf("codex realtime failed status=%d", status), StatusCode: 502, Detail: truncate(text, 500)}
+			}
+		} else if (status != 200 && status != 201) || !strings.HasPrefix(strings.TrimLeft(text, " \t\r\n"), "v=0") {
+			if upstreamForWM.ConversationState == "resumed" && !resumeRefusedRetried {
+				resumeRefusedRetried = true
+				upstreamForWM.ConversationID = ""
+				upstreamForWM.ParentMessageID = ""
+				upstreamForWM.ConversationState = "new"
+				upstreamForWM.ConversationReason = "upstream_refused"
+				sessionJSON = buildSessionJSON(voice, options.VoiceMode, options.LanguageCode, upstreamForWM)
+				continue
+			}
 			closeMediaOnFailure("upstream_rejected")
 			kind := classifyProbeBody(contentType, text)
 			s.logger.Warn("upstream_realtime_rejected", "account_id", account.ID, "upstream_status", status, "content_kind", kind, "attempt", attempt)
@@ -1384,6 +1579,13 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 				Message:    msg,
 				StatusCode: 502,
 				Detail:     truncate(text, 500),
+			}
+		}
+		if s.cfg.VoiceUpstreamRoute == "avas" && media != nil {
+			callID := avasCallID(upstreamLocation)
+			if err := s.startAVASSideband(context.Background(), media, callID, token, explicitProxy); err != nil {
+				closeMediaOnFailure("sideband_failed")
+				return nil, &ServiceError{Message: "codex realtime sideband failed", StatusCode: 502, Detail: truncate(err.Error(), 300)}
 			}
 		}
 
@@ -1425,9 +1627,12 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 		var call *callState
 		if media != nil {
 			call = &callState{
+				owner: owner,
 				voice: voice, voiceMode: options.VoiceMode, language: options.LanguageCode,
 				accountID: account.ID, token: token, proxy: account.Proxy, deviceID: account.DeviceID,
-				stop: make(chan struct{}),
+				conversation:       conversationState(upstreamForWM),
+				conversationReason: conversationReason(upstreamForWM),
+				stop:               make(chan struct{}),
 			}
 			if s.cfg.RelayHandoffEnabled {
 				call.transcript = newTranscriptTail(s.cfg.RelayHandoffMaxChars)
@@ -1439,6 +1644,11 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 			media.SetEventObserver(func(data []byte) {
 				if boundCall.transcript != nil {
 					boundCall.transcript.Observe(data)
+					boundCall.mu.Lock()
+					boundCall.contextChars = boundCall.transcript.ContextChars()
+					chars := boundCall.contextChars
+					boundCall.mu.Unlock()
+					s.persistSessionMetrics(voiceSessionID, boundCall, chars)
 				}
 				s.learnUpstreamIDs(voiceSessionID, func(b *sessionBinding) bool { return b.media == boundMedia }, data)
 			})
@@ -1475,6 +1685,8 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 			UpstreamVoiceSessionID:  upstreamOut.UpstreamVoiceSessionID,
 			UpstreamConversationID:  upstreamOut.ConversationID,
 			UpstreamParentMessageID: upstreamOut.ParentMessageID,
+			Conversation:            conversationState(upstreamOut),
+			ConversationReason:      conversationReason(upstreamOut),
 		}, nil
 	}
 
@@ -1616,6 +1828,10 @@ func orDefault(s, def string) string {
 // persistCallSession writes metadata-only call session state for admin listing
 // and sticky resume. Chat content is never stored here.
 func (s *Service) persistCallSession(owner, voiceSessionID string, accountID int64, voiceName, voiceMode, languageCode string, upstream UpstreamContext) {
+	s.persistCallSessionMetrics(owner, voiceSessionID, accountID, voiceName, voiceMode, languageCode, upstream, conversationState(upstream), conversationReason(upstream), 0)
+}
+
+func (s *Service) persistCallSessionMetrics(owner, voiceSessionID string, accountID int64, voiceName, voiceMode, languageCode string, upstream UpstreamContext, conversation, reason string, contextChars int) {
 	if s == nil || s.records == nil {
 		return
 	}
@@ -1631,6 +1847,9 @@ func (s *Service) persistCallSession(owner, voiceSessionID string, accountID int
 		UpstreamConversationID:  upstream.ConversationID,
 		UpstreamParentMessageID: upstream.ParentMessageID,
 		UpstreamVoiceSessionID:  upstream.UpstreamVoiceSessionID,
+		Conversation:            conversation,
+		ConversationReason:      reason,
+		ContextChars:            contextChars,
 		Voice:                   voiceName,
 		VoiceMode:               voiceMode,
 		LanguageCode:            languageCode,
@@ -1638,6 +1857,20 @@ func (s *Service) persistCallSession(owner, voiceSessionID string, accountID int
 	}
 	if err := s.records.Upsert(item); err != nil {
 		s.logger.Warn("call_session_persist_failed", "voice_session_id", voiceSessionID, "error", err)
+	}
+}
+
+func (s *Service) persistSessionMetrics(voiceSessionID string, call *callState, contextChars int) {
+	if s == nil || call == nil || s.records == nil {
+		return
+	}
+	call.mu.Lock()
+	owner, accountID, voice, mode, lang := call.owner, call.accountID, call.voice, call.voiceMode, call.language
+	conversation, reason := call.conversation, call.conversationReason
+	call.mu.Unlock()
+	if _, err := s.records.UpdateMetrics(owner, voiceSessionID, conversation, reason, contextChars); err != nil {
+		// The binding may have been released before the observer drained its last frame.
+		s.logger.Debug("call_session_metrics_update_skipped", "voice_session_id", voiceSessionID, "account_id", accountID, "voice", voice, "mode", mode, "language", lang, "error", err)
 	}
 }
 

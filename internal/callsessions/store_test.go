@@ -94,6 +94,19 @@ func TestCallSessionUpsertUpdateAndList(t *testing.T) {
 	}
 }
 
+func TestCallSessionContextMetricsPersist(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Upsert(Session{VoiceSessionID: "vs_metrics", Owner: "api_key:1", AccountID: 2, Conversation: "resumed"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.UpdateMetrics("api_key:1", "vs_metrics", "new", "account_changed", 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Conversation != "new" || got.ConversationReason != "account_changed" || got.ContextChars != 42 {
+		t.Fatalf("metrics=%+v", got)
+	}
+}
 
 func TestMarkAllActiveReleasedOnStartup(t *testing.T) {
 	s := newTestStore(t)

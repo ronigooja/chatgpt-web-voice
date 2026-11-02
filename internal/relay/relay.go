@@ -67,6 +67,13 @@ type Session interface {
 	AbortUpstreamSwap(reason string) error
 }
 
+// EventInjector is implemented by media sessions whose upstream has a
+// sideband event stream. Injected events are delivered to the downstream
+// oai-events channel and do not alter the media path.
+type EventInjector interface {
+	InjectEvent(data []byte) error
+}
+
 // LegTermination is the close record of one upstream leg that was replaced
 // while peer A stayed up. It carries no peer A result.
 type LegTermination struct {

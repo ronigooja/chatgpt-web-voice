@@ -12,10 +12,11 @@ import (
 // a forced account change can hand the conversation to a new session as text.
 // It is never written to disk, never logged, and dropped with the media session.
 type transcriptTail struct {
-	mu       sync.Mutex
-	maxChars int
-	turns    []transcriptTurn
-	cur      transcriptTurn
+	mu           sync.Mutex
+	maxChars     int
+	turns        []transcriptTurn
+	cur          transcriptTurn
+	contextChars int
 }
 
 type transcriptTurn struct {
@@ -151,9 +152,28 @@ func (t *transcriptTail) applyOpsLocked(raw json.RawMessage) {
 
 func (t *transcriptTail) flushLocked() {
 	if t.cur.Role != "" && strings.TrimSpace(t.cur.Text) != "" {
+		t.contextChars += len(t.cur.Text)
 		t.turns = append(t.turns, t.cur)
 		t.trimLocked()
 	}
+	t.cur = transcriptTurn{}
+}
+
+func (t *transcriptTail) ContextChars() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	n := t.contextChars
+	if t.cur.Role != "" {
+		n += len(t.cur.Text)
+	}
+	return n
+}
+
+func (t *transcriptTail) ResetContextChars() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.contextChars = 0
+	t.turns = nil
 	t.cur = transcriptTurn{}
 }
 
