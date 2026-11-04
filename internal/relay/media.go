@@ -134,15 +134,16 @@ type pionSession struct {
 	proxyUpstreamAPI *webrtc.API
 	configuration    webrtc.Configuration
 
-	id                 string
-	done               chan struct{}
-	closeOnce          sync.Once
-	closeErr           error
-	failureOnce        sync.Once
-	clientChannelMu    sync.Mutex
-	clientChannelError bool
-	peerAUnclean       bool
-	releaseSlot        func()
+	id                  string
+	done                chan struct{}
+	closeOnce           sync.Once
+	closeErr            error
+	failureOnce         sync.Once
+	clientChannelMu     sync.Mutex
+	clientChannelError  bool
+	peerAUnclean        bool
+	clientChannelClosed bool
+	releaseSlot         func()
 
 	mu          sync.Mutex
 	onClose     func(string)
@@ -226,6 +227,12 @@ type dataChannelBridge struct {
 
 	observeMu sync.RWMutex
 	observe   func([]byte)
+}
+
+func (b *dataChannelBridge) downstreamClosed() bool {
+	b.downstreamMu.Lock()
+	defer b.downstreamMu.Unlock()
+	return b.downstream != nil && b.downstream.ReadyState() == webrtc.DataChannelStateClosed
 }
 
 func (b *dataChannelBridge) sendDownstream(data []byte) error {
@@ -386,18 +393,29 @@ func (r *PionRelay) NewSession(ctx context.Context, clientOffer string, route Ro
 	}
 	session.bridge = newDataChannelBridge(session.done, session.logger, func(err error) {
 		session.clientChannelMu.Lock()
+		if session.bridge.downstreamClosed() && !session.clientChannelError && !session.peerAUnclean {
+			session.clientChannelClosed = true
+			session.clientChannelMu.Unlock()
+			session.CloseWithReason("client_closed")
+			return
+		}
+		if session.clientChannelClosed {
+			session.clientChannelMu.Unlock()
+			return
+		}
 		session.clientChannelError = true
 		session.clientChannelMu.Unlock()
 		session.fail("data_channel_failed", err)
 	}, func() {
 		session.clientChannelMu.Lock()
-		unclean := session.clientChannelError || session.peerAUnclean
-		session.clientChannelMu.Unlock()
-		if unclean {
+		if session.clientChannelError || session.peerAUnclean {
+			session.clientChannelMu.Unlock()
 			session.fail("data_channel_failed", errors.New("client DataChannel closed after error"))
-		} else {
-			session.CloseWithReason("client_closed")
+			return
 		}
+		session.clientChannelClosed = true
+		session.clientChannelMu.Unlock()
+		session.CloseWithReason("client_closed")
 	}, session.markActiveChannelOpen)
 	session.bridge.setObserver(session.observeEvent)
 	session.installPeerAHandler()
