@@ -36,6 +36,10 @@ not identify a build containing this fork's changes.
 
 When AVAS rejects session creation before returning an accepted SDP, `POST /v1/voice/sessions` returns HTTP 422 with `{"error":"upstream_rejected","established":false,"upstream_status":<status>}`. Clients may query the owner-scoped result with `GET /v1/voice/requests/{request_id}/outcome`; it returns `never_established`, `open`, `released`, or `unknown`.
 
+### WM final-turn text diagnosis
+
+Set `VOICE_ZOE_FINAL_TURN_DEBUG_TEXT=true` together with `VOICE_ZOE_FINAL_TURN=true` only while diagnosing final-turn text accumulation. It logs spoken and assistant text to the container log, including diagnostic message and patch details. Keep it off during normal operation and purge the logs after use.
+
 ## 网页效果
 
 ![image-20260724144852569](./README.assets/image-20260724144852569.png)
