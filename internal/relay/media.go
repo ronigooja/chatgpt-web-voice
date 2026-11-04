@@ -134,12 +134,15 @@ type pionSession struct {
 	proxyUpstreamAPI *webrtc.API
 	configuration    webrtc.Configuration
 
-	id          string
-	done        chan struct{}
-	closeOnce   sync.Once
-	closeErr    error
-	failureOnce sync.Once
-	releaseSlot func()
+	id                 string
+	done               chan struct{}
+	closeOnce          sync.Once
+	closeErr           error
+	failureOnce        sync.Once
+	clientChannelMu    sync.Mutex
+	clientChannelError bool
+	peerAUnclean       bool
+	releaseSlot        func()
 
 	mu          sync.Mutex
 	onClose     func(string)
@@ -209,16 +212,17 @@ type dataChannelPipe struct {
 }
 
 type dataChannelBridge struct {
-	done         <-chan struct{}
-	logger       *slog.Logger
-	downToUp     *dataChannelPipe
-	upToDown     *dataChannelPipe
-	closeOnce    sync.Once
-	closeErr     error
-	downstreamMu sync.Mutex
-	downstream   *webrtc.DataChannel
-	upstreamMu   sync.Mutex
-	upstream     *webrtc.DataChannel
+	done          <-chan struct{}
+	logger        *slog.Logger
+	onClientClose func()
+	downToUp      *dataChannelPipe
+	upToDown      *dataChannelPipe
+	closeOnce     sync.Once
+	closeErr      error
+	downstreamMu  sync.Mutex
+	downstream    *webrtc.DataChannel
+	upstreamMu    sync.Mutex
+	upstream      *webrtc.DataChannel
 
 	observeMu sync.RWMutex
 	observe   func([]byte)
@@ -381,7 +385,19 @@ func (r *PionRelay) NewSession(ctx context.Context, clientOffer string, route Ro
 		logger:           r.logger.With("media_session_id", id),
 	}
 	session.bridge = newDataChannelBridge(session.done, session.logger, func(err error) {
+		session.clientChannelMu.Lock()
+		session.clientChannelError = true
+		session.clientChannelMu.Unlock()
 		session.fail("data_channel_failed", err)
+	}, func() {
+		session.clientChannelMu.Lock()
+		unclean := session.clientChannelError || session.peerAUnclean
+		session.clientChannelMu.Unlock()
+		if unclean {
+			session.fail("data_channel_failed", errors.New("client DataChannel closed after error"))
+		} else {
+			session.CloseWithReason("client_closed")
+		}
 	}, session.markActiveChannelOpen)
 	session.bridge.setObserver(session.observeEvent)
 	session.installPeerAHandler()
@@ -823,8 +839,14 @@ func (s *pionSession) installPeerAHandler() {
 			logger.Info("relay peer connected")
 		case webrtc.PeerConnectionStateDisconnected:
 			logger.Warn("relay peer disconnected")
+			s.clientChannelMu.Lock()
+			s.peerAUnclean = true
+			s.clientChannelMu.Unlock()
 		case webrtc.PeerConnectionStateFailed:
 			logger.Warn("relay peer failed")
+			s.clientChannelMu.Lock()
+			s.peerAUnclean = true
+			s.clientChannelMu.Unlock()
 			go s.fail("peer_a_failed", errors.New("peer-a failed"))
 		case webrtc.PeerConnectionStateClosed:
 			select {
@@ -974,8 +996,8 @@ func isClosedMediaError(err error, done <-chan struct{}) bool {
 	return errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed)
 }
 
-func newDataChannelBridge(done <-chan struct{}, logger *slog.Logger, onError func(error), onUpstreamOpen func()) *dataChannelBridge {
-	bridge := &dataChannelBridge{done: done, logger: logger}
+func newDataChannelBridge(done <-chan struct{}, logger *slog.Logger, onError func(error), onClientClose func(), onUpstreamOpen func()) *dataChannelBridge {
+	bridge := &dataChannelBridge{done: done, logger: logger, onClientClose: onClientClose}
 	bridge.downToUp = newDataChannelPipe("a-to-b", done, logger, onError, onUpstreamOpen)
 	bridge.upToDown = newDataChannelPipe("b-to-a", done, logger, onError, nil)
 	return bridge
@@ -1126,7 +1148,11 @@ func (b *dataChannelBridge) bindSource(channel *webrtc.DataChannel, destination 
 		case <-b.done:
 			return
 		default:
-			destination.reportError(fmt.Errorf("%s DataChannel closed", destination.name))
+			if destination.name == "a-to-b" && b.onClientClose != nil {
+				b.onClientClose()
+			} else {
+				destination.reportError(fmt.Errorf("%s DataChannel closed", destination.name))
+			}
 		}
 	})
 }

@@ -285,6 +285,9 @@ func TestOneSidedCloseClosesSession(t *testing.T) {
 			if tr.Reason != reason.Load().(string) || tr.Reason == "" || tr.Reason == "closed" {
 				t.Fatalf("reason %q handler %v", tr.Reason, reason.Load())
 			}
+			if side == "client" && tr.Reason != "client_closed" {
+				t.Fatalf("client close reason %q, want client_closed", tr.Reason)
+			}
 			select {
 			case <-fired:
 				t.Fatal("handler fired twice")
