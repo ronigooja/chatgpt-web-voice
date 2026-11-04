@@ -66,8 +66,32 @@ func TestWMFinalTurnConsecutiveTurnsResetText(t *testing.T) {
 func TestWMFinalTurnAmbiguousDropResetsNextTurn(t *testing.T) {
 	in := &zoeFakeInjector{}
 	m := newWMFinalTurnMapper("s", &zoeFakeLogger{}, in)
+	runZ(m, zadd("U1", "user", "in_progress"), zops(`{"o":"append","p":"/message/content/parts/0/text","v":"stale"}`), zadd("U2", "user", "in_progress"), zops(`{"o":"append","p":"/message/content/parts/0/text","v":"clean"}`), zstatusOp())
+	assertTranscripts(t, in, "clean")
+}
+
+func TestWMFinalTurnAssistantAddCommitThenNextTurnIsClean(t *testing.T) {
+	in := &zoeFakeInjector{}
+	m := newWMFinalTurnMapper("s", &zoeFakeLogger{}, in)
 	runZ(m, zadd("U1", "user", "in_progress"), zops(`{"o":"append","p":"/message/content/parts/0/text","v":"stale"}`), zadd("A1", "assistant", "in_progress"), zadd("U2", "user", "in_progress"), zops(`{"o":"append","p":"/message/content/parts/0/text","v":"clean"}`), zstatusOp())
 	assertTranscripts(t, in, "stale", "clean")
+}
+
+func TestWMFinalTurnToolAddDropsActiveUser(t *testing.T) {
+	l := &zoeFakeLogger{}
+	in := &zoeFakeInjector{}
+	m := newWMFinalTurnMapper("s", l, in)
+	runZ(m, zadd("U", "user", "in_progress"), zops(`{"o":"append","p":"/message/content/parts/0/text","v":"text"}`), zadd("T", "tool", "in_progress"), zstatusOp())
+	if len(in.events) != 0 || !strings.Contains(strings.Join(l.logs, " "), "ambiguous_interleave") {
+		t.Fatal("tool add must drop the active user turn")
+	}
+}
+
+func TestWMFinalTurnLateStatusAfterAssistantAddCommitDoesNotEmitAgain(t *testing.T) {
+	in := &zoeFakeInjector{}
+	m := newWMFinalTurnMapper("s", &zoeFakeLogger{}, in)
+	runZ(m, zadd("U", "user", "in_progress"), zops(`{"o":"append","p":"/message/content/parts/0/text","v":"once"}`), zadd("A", "assistant", "in_progress"), zstatusTop(), zstatusTop())
+	assertTranscripts(t, in, "once")
 }
 
 func TestWMFinalTurnEmptyDropResetsNextTurn(t *testing.T) {
