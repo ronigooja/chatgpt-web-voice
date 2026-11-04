@@ -24,6 +24,7 @@ type downstreamVoiceStub struct {
 	createError   error
 	generation    int64
 	releaseCount  int
+	contextPatch  voice.UpstreamContext
 }
 
 func (s *downstreamVoiceStub) CreateSession(req voice.CreateSessionRequest) (*voice.SessionResult, error) {
@@ -65,8 +66,12 @@ func (s *downstreamVoiceStub) ReleaseAccountLease(owner, leaseID string, generat
 }
 
 func (s *downstreamVoiceStub) UpdateSessionContext(owner, id string, patch voice.UpstreamContext) (voice.UpstreamContext, error) {
+	s.contextPatch = patch
 	if owner != "api_key:1" || id != "vs_test" {
 		return voice.UpstreamContext{}, &voice.ServiceError{Message: "voice session not found", StatusCode: http.StatusNotFound}
+	}
+	if patch.TextProvided && strings.TrimSpace(patch.Text) == "" {
+		return voice.UpstreamContext{}, &voice.ServiceError{Message: "live context text must not be blank", StatusCode: http.StatusBadRequest}
 	}
 	return patch, nil
 }
@@ -344,10 +349,35 @@ func TestDownstreamOpeningContextAuthAndStrictJSON(t *testing.T) {
 }
 
 func TestDownstreamSessionContextAcceptsText(t *testing.T) {
-	handler, secret, _ := newDownstreamTestHandler(t, &downstreamVoiceStub{})
+	stub := &downstreamVoiceStub{}
+	handler, secret, _ := newDownstreamTestHandler(t, stub)
 	resp := performDownstreamRequest(t, handler, http.MethodPost, "/v1/voice/sessions/vs_test/context", secret, map[string]any{"text": "Zoe result"})
 	if resp.Code != http.StatusOK || !strings.Contains(resp.Body.String(), "vs_test") {
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if stub.contextPatch.Text != "Zoe result" {
+		t.Fatalf("text=%q", stub.contextPatch.Text)
+	}
+}
+
+func TestDownstreamSessionContextAuthAndOwnerScoping(t *testing.T) {
+	handler, _, other := newDownstreamTestHandler(t, &downstreamVoiceStub{})
+	path := "/v1/voice/sessions/vs_test/context"
+	if got := performDownstreamRequest(t, handler, http.MethodPost, path, "", map[string]any{"text": "secret"}); got.Code != http.StatusUnauthorized {
+		t.Fatalf("without key status=%d", got.Code)
+	}
+	if got := performDownstreamRequest(t, handler, http.MethodPost, path, other, map[string]any{"text": "secret"}); got.Code != http.StatusNotFound {
+		t.Fatalf("wrong owner status=%d", got.Code)
+	}
+}
+
+func TestDownstreamSessionContextRejectsBlankText(t *testing.T) {
+	handler, secret, _ := newDownstreamTestHandler(t, &downstreamVoiceStub{})
+	for _, text := range []string{"", " \t\n "} {
+		got := performDownstreamRequest(t, handler, http.MethodPost, "/v1/voice/sessions/vs_test/context", secret, map[string]any{"text": text})
+		if got.Code != http.StatusBadRequest {
+			t.Errorf("text %q status=%d", text, got.Code)
+		}
 	}
 }
 

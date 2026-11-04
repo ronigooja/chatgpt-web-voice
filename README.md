@@ -290,7 +290,7 @@ Authorization: Bearer vgw_live_<密钥>
 | `GET` | `/v1/health` | 健康检查 |
 | `GET` | `/v1/voice/config` | 音色、语言、STUN、DataChannel 约定 |
 | `POST` | `/v1/voice/sessions` | 建立或恢复语音会话（SDP 交换） |
-| `POST` | `/v1/voice/sessions/{voice_session_id}/context` | Upstream continuity metadata |
+| `POST` | `/v1/voice/sessions/{voice_session_id}/context` | Upstream continuity metadata; optional `text` appends one typed-user message |
 | `POST` | `/v1/voice/sessions/{voice_session_id}/opening-context` | Apply bounded, versioned opening context |
 | `GET` | `/v1/voice/sessions/{voice_session_id}/title` | 拉取上游会话标题 |
 | `POST` | `/v1/voice/sessions/{voice_session_id}/uploads` | 申请通话中图片直传凭证（绑定粘性账号） |
@@ -309,6 +309,8 @@ Authorization: Bearer vgw_live_<密钥>
    客户端自己维护 `RTCPeerConnection` 与 DataChannel。  
    学到上游 `conversation_id` 等后，调用  
    `POST /v1/voice/sessions/{voice_session_id}/context` 写入网关。
+
+The context request may include `text` to append a plain typed-user message to the active upstream conversation. `text` is trimmed, must contain non-whitespace content, and is limited to 600 Unicode runes. Injection is supported only for the WM route; AVAS and sessions without an active media binding return `501`. The envelope is JSON-escaped and fixes the message role to `user`; the text is not written to logs or error messages. Retries send the message again (no deduplication state is kept). Whether the voice model **SPEAKS** the appended text is **UNVERIFIED** pending a live-call experiment.
 
 3. **通话中发图（可选）**  
    必须先有**活跃**内存绑定（未 hangup）。  

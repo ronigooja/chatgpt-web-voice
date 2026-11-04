@@ -104,6 +104,7 @@ type UpstreamContext struct {
 	ConversationReason     string `json:"conversation_reason,omitempty"`
 	ConversationConfirmed  *bool  `json:"conversation_confirmed,omitempty"`
 	Text                   string `json:"text,omitempty"`
+	TextProvided           bool   `json:"-"`
 }
 
 type sessionBinding struct {
@@ -585,6 +586,14 @@ func (s *Service) UpdateSessionContext(owner, voiceSessionID string, patch Upstr
 	if sessionID == "" {
 		return UpstreamContext{}, &ServiceError{Message: "voice session id is required", StatusCode: 400}
 	}
+	text := strings.TrimSpace(patch.Text)
+	if patch.TextProvided && text == "" {
+		return UpstreamContext{}, &ServiceError{Message: "live context text must not be blank", StatusCode: 400}
+	}
+	patch.Text = text
+	if text != "" && utf8.RuneCountInString(text) > 600 {
+		return UpstreamContext{}, &ServiceError{Message: "live context text is too large", StatusCode: 413}
+	}
 	now := time.Now()
 	s.mu.Lock()
 	s.cleanupBindingsLocked(now)
@@ -594,10 +603,7 @@ func (s *Service) UpdateSessionContext(owner, voiceSessionID string, patch Upstr
 		return UpstreamContext{}, &ServiceError{Message: "voice session does not belong to caller", StatusCode: 403}
 	}
 	if item != nil {
-		if text := strings.TrimSpace(patch.Text); text != "" {
-			if utf8.RuneCountInString(text) > 600 {
-				return UpstreamContext{}, &ServiceError{Message: "live context text is too large", StatusCode: 413}
-			}
+		if text != "" {
 			if s.cfg.VoiceUpstreamRoute == "avas" {
 				return UpstreamContext{}, &ServiceError{Message: "live context injection is not supported on avas", StatusCode: 501}
 			}
@@ -633,6 +639,9 @@ func (s *Service) UpdateSessionContext(owner, voiceSessionID string, patch Upstr
 	s.mu.Unlock()
 
 	// Memory binding gone (typical after hangup): update durable metadata only.
+	if text != "" {
+		return UpstreamContext{}, &ServiceError{Message: "live context injection is not supported without an active media session", StatusCode: 501}
+	}
 	if s.records == nil {
 		return UpstreamContext{}, &ServiceError{Message: "voice session not found", StatusCode: 404}
 	}
