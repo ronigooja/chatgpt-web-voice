@@ -102,6 +102,7 @@ type UpstreamContext struct {
 	ConversationState      string `json:"conversation,omitempty"`
 	ConversationReason     string `json:"conversation_reason,omitempty"`
 	ConversationConfirmed  *bool  `json:"conversation_confirmed,omitempty"`
+	Text                   string `json:"text,omitempty"`
 }
 
 type sessionBinding struct {
@@ -592,6 +593,22 @@ func (s *Service) UpdateSessionContext(owner, voiceSessionID string, patch Upstr
 		return UpstreamContext{}, &ServiceError{Message: "voice session does not belong to caller", StatusCode: 403}
 	}
 	if item != nil {
+		if text := strings.TrimSpace(patch.Text); text != "" {
+			if s.cfg.VoiceUpstreamRoute == "avas" {
+				return UpstreamContext{}, &ServiceError{Message: "live context injection is not supported on avas", StatusCode: 501}
+			}
+			injector, ok := item.media.(relay.UpstreamEventInjector)
+			if !ok {
+				return UpstreamContext{}, &ServiceError{Message: "live context injection is not supported on this route", StatusCode: 501}
+			}
+			payload, err := relay.UserTextEvent(text)
+			if err != nil {
+				return UpstreamContext{}, &ServiceError{Message: "context encoding failed", StatusCode: 500}
+			}
+			if err := injector.SendUpstreamEvent([]byte(payload)); err != nil {
+				return UpstreamContext{}, &ServiceError{Message: "context delivery failed", StatusCode: 502}
+			}
+		}
 		merged := mergeUpstreamContext(item.upstreamContext(), patch)
 		item.ConversationID = merged.ConversationID
 		item.ParentMessageID = merged.ParentMessageID
