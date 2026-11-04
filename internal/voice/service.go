@@ -1804,7 +1804,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 			var finalTurn zoeTurnMapper
 			if s.cfg.ZoeFinalTurn && s.cfg.VoiceUpstreamRoute == "wm" {
 				if injector, ok := media.(relay.EventInjector); ok {
-					finalTurn = newWMFinalTurnMapper(voiceSessionID, s.logger, injector)
+					finalTurn = newWMFinalTurnMapper(voiceSessionID, s.logger, injector, s.cfg.ZoeFinalTurnDebugText)
 				}
 			}
 			media.SetEventObserver(func(data []byte) {

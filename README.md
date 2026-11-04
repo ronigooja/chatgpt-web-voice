@@ -32,6 +32,10 @@ not identify a build containing this fork's changes.
 
 未验证：累计文本是否完全等于用户实际说出的内容；补丁归属消息依赖上游帧的顺序；AVAS 映射尚未实现。
 
+### WM final-turn text diagnosis
+
+Set `VOICE_ZOE_FINAL_TURN_DEBUG_TEXT=true` together with `VOICE_ZOE_FINAL_TURN=true` only while diagnosing final-turn text accumulation. It logs spoken and assistant text to the container log, including diagnostic message and patch details. Keep it off during normal operation and purge the logs after use.
+
 ## 网页效果
 
 ![image-20260724144852569](./README.assets/image-20260724144852569.png)

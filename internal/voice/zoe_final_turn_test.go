@@ -196,3 +196,19 @@ func TestWMFinalTurnLogsDoNotContainTranscriptOrID(t *testing.T) {
 		t.Fatal("sensitive data logged")
 	}
 }
+
+func TestWMFinalTurnDebugTextLogsStatsAndPatches(t *testing.T) {
+	l := &zoeFakeLogger{}
+	in := &zoeFakeInjector{}
+	m := newWMFinalTurnMapper("s", l, in, true)
+	runZ(m, zframe(`{"v":{"message":{"id":"ID","status":"in_progress","author":{"role":"user"},"content":{"parts":[""]}}}}`), zops(`{"o":"append","p":"/message/content/parts/0/text","v":"ab"},{"o":"append","p":"/message/content/parts/1/text","v":"cd"},{"o":"replace","p":"/message/content/parts/0/text","v":"ef"}`), zstatusOp())
+	joined := strings.Join(l.logs, " ")
+	for _, want := range []string{"zoe_debug_message", "zoe_debug_text_patch", "transcript ef", "turn_id", "append_ops", "replace_ops", "parts", "kind:init"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing %q: %s", want, joined)
+		}
+	}
+	if len(in.events) != 1 {
+		t.Fatal("event missing")
+	}
+}
