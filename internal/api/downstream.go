@@ -10,6 +10,13 @@ import (
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/voice"
 )
 
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
 func (s *Server) downstreamHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "version": "v1"})
 }
@@ -129,10 +136,10 @@ func (s *Server) downstreamSessionContext(w http.ResponseWriter, r *http.Request
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var body struct {
-		UpstreamConversationID  string `json:"upstream_conversation_id"`
-		UpstreamParentMessageID string `json:"upstream_parent_message_id"`
-		UpstreamVoiceSessionID  string `json:"upstream_voice_session_id"`
-		Text                    string `json:"text,omitempty"`
+		UpstreamConversationID  string  `json:"upstream_conversation_id"`
+		UpstreamParentMessageID string  `json:"upstream_parent_message_id"`
+		UpstreamVoiceSessionID  string  `json:"upstream_voice_session_id"`
+		Text                    *string `json:"text"`
 	}
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
@@ -144,7 +151,8 @@ func (s *Server) downstreamSessionContext(w http.ResponseWriter, r *http.Request
 		ConversationID:         body.UpstreamConversationID,
 		ParentMessageID:        body.UpstreamParentMessageID,
 		UpstreamVoiceSessionID: body.UpstreamVoiceSessionID,
-		Text:                   body.Text,
+		Text:                   stringValue(body.Text),
+		TextProvided:           body.Text != nil,
 	})
 	if err != nil {
 		writeDownstreamServiceError(w, err)
