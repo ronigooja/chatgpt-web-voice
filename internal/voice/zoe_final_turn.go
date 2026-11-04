@@ -4,6 +4,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -25,16 +28,23 @@ type wmFinalTurnMapper struct {
 	session                    string
 	logger                     interface{ Info(string, ...any) }
 	injector                   relay.EventInjector
+	debug                      bool
+	appends, replaces          int
+	parts                      map[int]struct{}
+	initial                    int
+	ops                        []map[string]any
 }
 
-func newWMFinalTurnMapper(session string, logger interface{ Info(string, ...any) }, injector relay.EventInjector) *wmFinalTurnMapper {
-	return &wmFinalTurnMapper{session: session, logger: logger, injector: injector, done: map[string]struct{}{}}
+func newWMFinalTurnMapper(session string, logger interface{ Info(string, ...any) }, injector relay.EventInjector, debug ...bool) *wmFinalTurnMapper {
+	d := len(debug) > 0 && debug[0]
+	return &wmFinalTurnMapper{session: session, logger: logger, injector: injector, done: map[string]struct{}{}, debug: d, parts: map[int]struct{}{}}
 }
 
 type finalTurnAction struct {
 	event          []byte
 	id, text, drop string
 	commitReason   string
+	debug          map[string]any
 }
 
 func (m *wmFinalTurnMapper) Observe(data []byte) {
@@ -109,15 +119,37 @@ func (m *wmFinalTurnMapper) add(raw json.RawMessage, a *[]finalTurnAction) {
 			m.commit("assistant_add", a)
 		} else {
 			m.resetTurn()
+			m.resetStats()
 			*a = append(*a, finalTurnAction{drop: "ambiguous_interleave"})
 		}
 	}
 	m.lastAddedID, m.lastAddedRole = v.Message.ID, v.Message.Author.Role
+	if m.debug {
+		parts := make([]string, 0, len(v.Message.Content.Parts))
+		var preview string
+		for _, p := range v.Message.Content.Parts {
+			var s string
+			var x struct {
+				Text string `json:"text"`
+			}
+			if json.Unmarshal(p, &s) != nil {
+				_ = json.Unmarshal(p, &x)
+				s = x.Text
+			}
+			parts = append(parts, fmt.Sprintf("%T", p))
+			preview += s
+		}
+		if utf8.RuneCountInString(preview) > 200 {
+			preview = string([]rune(preview)[:200])
+		}
+		m.logger.Info("zoe_debug_message", "role", v.Message.Author.Role, "status", v.Message.Status, "content_types", parts, "part_count", len(v.Message.Content.Parts), "text", preview)
+	}
 	if v.Message.Author.Role != "user" || v.Message.Status != "in_progress" {
 		return
 	}
 	m.resetTurn()
 	m.id, m.active = v.Message.ID, true
+	m.resetStats()
 	for _, p := range v.Message.Content.Parts {
 		var s string
 		if json.Unmarshal(p, &s) == nil {
@@ -131,6 +163,8 @@ func (m *wmFinalTurnMapper) add(raw json.RawMessage, a *[]finalTurnAction) {
 			}
 		}
 	}
+	m.initial = utf8.RuneCountInString(m.text)
+	m.ops = append(m.ops, map[string]any{"kind": "init", "part": -1, "runes": m.initial})
 	if utf8.RuneCountInString(m.text) > zoeFinalTurnMax {
 		m.oversized = true
 		m.text = ""
@@ -141,15 +175,36 @@ func (m *wmFinalTurnMapper) apply(o, p string, v json.RawMessage, a *[]finalTurn
 		m.finish(v, a)
 		return
 	}
-	if m.active && appendTextPath.MatchString(p) && (o == "append" || o == "replace") {
+	if appendTextPath.MatchString(p) && (o == "append" || o == "replace") {
 		var t string
 		if json.Unmarshal(v, &t) != nil {
 			return
 		}
+		part := textPart(p)
+		if m.debug {
+			msg := t
+			if utf8.RuneCountInString(msg) > 200 {
+				msg = string([]rune(msg)[:200])
+			}
+			state := "not_active"
+			if m.active {
+				state = "active"
+			}
+			m.logger.Info("zoe_debug_text_patch", "message_state", state, "part", part, "op", o, "text", msg)
+		}
+		if !m.active {
+			return
+		}
+		m.parts[part] = struct{}{}
 		if o == "replace" {
+			m.replaces++
 			m.text = t
 		} else {
+			m.appends++
 			m.text += t
+		}
+		if len(m.ops) < 40 {
+			m.ops = append(m.ops, map[string]any{"kind": o, "part": part, "runes": utf8.RuneCountInString(t)})
 		}
 		if utf8.RuneCountInString(m.text) > zoeFinalTurnMax {
 			m.oversized = true
@@ -169,17 +224,19 @@ func (m *wmFinalTurnMapper) finish(v json.RawMessage, a *[]finalTurnAction) {
 
 func (m *wmFinalTurnMapper) commit(reason string, a *[]finalTurnAction) {
 	id, text, oversized := m.id, strings.TrimSpace(m.text), m.oversized
-	m.resetTurn()
 	m.commitData(id, text, oversized, reason, a)
 }
 
 func (m *wmFinalTurnMapper) commitData(id, text string, oversized bool, reason string, a *[]finalTurnAction) {
+	debug := m.debugFields()
+	m.resetTurn()
+	m.resetStats()
 	if oversized {
-		*a = append(*a, finalTurnAction{drop: "oversized"})
+		*a = append(*a, finalTurnAction{drop: "oversized", debug: debug})
 		return
 	}
 	if text == "" {
-		*a = append(*a, finalTurnAction{drop: "empty"})
+		*a = append(*a, finalTurnAction{drop: "empty", debug: debug})
 		return
 	}
 	if len(id) < 1 || len(id) > 256 {
@@ -205,7 +262,35 @@ func (m *wmFinalTurnMapper) commitData(id, text string, oversized bool, reason s
 		Revision   int    `json:"revision"`
 		Transcript string `json:"transcript"`
 	}{"user_audio_turn.final", id, 1, text})
-	*a = append(*a, finalTurnAction{event: b, id: id, text: text, commitReason: reason})
+	*a = append(*a, finalTurnAction{event: b, id: id, text: text, commitReason: reason, debug: debug})
+}
+func (m *wmFinalTurnMapper) resetStats() {
+	m.appends = 0
+	m.replaces = 0
+	m.initial = 0
+	m.parts = map[int]struct{}{}
+	m.ops = nil
+}
+func (m *wmFinalTurnMapper) debugFields() map[string]any {
+	if !m.debug {
+		return nil
+	}
+	p := []int{}
+	for n := range m.parts {
+		p = append(p, n)
+	}
+	return map[string]any{"transcript": strings.TrimSpace(m.text), "turn_id": m.id, "append_ops": m.appends, "replace_ops": m.replaces, "parts": p, "initial_runes": m.initial, "ops": m.ops}
+}
+
+var textPathPart = regexp.MustCompile(`/parts/(\d+)/text$`)
+
+func textPart(p string) int {
+	x := textPathPart.FindStringSubmatch(p)
+	if len(x) < 2 {
+		return -1
+	}
+	n, _ := strconv.Atoi(x[1])
+	return n
 }
 
 func (m *wmFinalTurnMapper) resetTurn() {
@@ -217,13 +302,21 @@ func (m *wmFinalTurnMapper) resetTurn() {
 func (m *wmFinalTurnMapper) deliver(as []finalTurnAction) {
 	for _, a := range as {
 		if a.drop != "" {
-			m.logger.Info("zoe_final_turn_dropped", "voice_session_id", m.session, "reason", a.drop)
+			args := []any{"voice_session_id", m.session, "reason", a.drop}
+			for k, v := range a.debug {
+				args = append(args, k, v)
+			}
+			m.logger.Info("zoe_final_turn_dropped", args...)
 			continue
 		}
 		if m.injector.InjectEvent(a.event) != nil {
 			continue
 		}
 		h := sha256.Sum256([]byte(a.id))
-		m.logger.Info("zoe_final_turn_emitted", "voice_session_id", m.session, "transcript_runes", utf8.RuneCountInString(a.text), "sha256_prefix", hex.EncodeToString(h[:])[:8], "commit_reason", a.commitReason)
+		args := []any{"voice_session_id", m.session, "transcript_runes", utf8.RuneCountInString(a.text), "sha256_prefix", hex.EncodeToString(h[:])[:8], "commit_reason", a.commitReason}
+		for k, v := range a.debug {
+			args = append(args, k, v)
+		}
+		m.logger.Info("zoe_final_turn_emitted", args...)
 	}
 }

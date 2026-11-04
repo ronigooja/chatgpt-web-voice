@@ -56,6 +56,17 @@ func TestLoadZoeFinalTurnDefaultsOff(t *testing.T) {
 	}
 }
 
+func TestLoadZoeFinalTurnDebugTextDefaultsOffAndLoads(t *testing.T) {
+	t.Setenv("VOICE_ZOE_FINAL_TURN_DEBUG_TEXT", "")
+	if Load().ZoeFinalTurnDebugText {
+		t.Fatal("debug text must default off")
+	}
+	t.Setenv("VOICE_ZOE_FINAL_TURN_DEBUG_TEXT", "true")
+	if !Load().ZoeFinalTurnDebugText {
+		t.Fatal("debug text override not loaded")
+	}
+}
+
 func TestLoadEventShapeSamplingDefaultsOffAndCaps(t *testing.T) {
 	t.Setenv("VOICE_EVENT_SHAPE_SAMPLING", "")
 	t.Setenv("VOICE_EVENT_SHAPE_SAMPLING_MAX_FRAMES", "")
