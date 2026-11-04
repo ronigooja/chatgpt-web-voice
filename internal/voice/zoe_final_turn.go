@@ -104,15 +104,14 @@ func (m *wmFinalTurnMapper) add(raw json.RawMessage, a *[]finalTurnAction) {
 		return
 	}
 	if m.active {
-		m.active = false
-		m.text = ""
-		m.oversized = false
+		m.resetTurn()
 		*a = append(*a, finalTurnAction{drop: "ambiguous_interleave"})
 	}
 	m.lastAddedID, m.lastAddedRole = v.Message.ID, v.Message.Author.Role
 	if v.Message.Author.Role != "user" || v.Message.Status != "in_progress" {
 		return
 	}
+	m.resetTurn()
 	m.id, m.active = v.Message.ID, true
 	for _, p := range v.Message.Content.Parts {
 		var s string
@@ -159,8 +158,9 @@ func (m *wmFinalTurnMapper) finish(v json.RawMessage, a *[]finalTurnAction) {
 		return
 	}
 	id, text := m.id, strings.TrimSpace(m.text)
-	m.active = false
-	if m.oversized {
+	oversized := m.oversized
+	m.resetTurn()
+	if oversized {
 		*a = append(*a, finalTurnAction{drop: "oversized"})
 		return
 	}
@@ -192,6 +192,13 @@ func (m *wmFinalTurnMapper) finish(v json.RawMessage, a *[]finalTurnAction) {
 		Transcript string `json:"transcript"`
 	}{"user_audio_turn.final", id, 1, text})
 	*a = append(*a, finalTurnAction{event: b, id: id, text: text})
+}
+
+func (m *wmFinalTurnMapper) resetTurn() {
+	m.active = false
+	m.oversized = false
+	m.id = ""
+	m.text = ""
 }
 func (m *wmFinalTurnMapper) deliver(as []finalTurnAction) {
 	for _, a := range as {

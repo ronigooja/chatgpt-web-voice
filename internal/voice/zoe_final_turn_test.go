@@ -53,6 +53,53 @@ func TestWMFinalTurnUserTurnEmitsConcatenatedText(t *testing.T) {
 		t.Fatalf("%v", got)
 	}
 }
+
+func TestWMFinalTurnConsecutiveTurnsResetText(t *testing.T) {
+	in := &zoeFakeInjector{}
+	m := newWMFinalTurnMapper("s", &zoeFakeLogger{}, in)
+	runZ(m, zadd("U1", "user", "in_progress"), zops(`{"o":"append","p":"/message/content/parts/0/text","v":"你好"}`), zstatusOp(), zadd("A1", "assistant", "finished_successfully"))
+	runZ(m, zaddWithPart("U2", "今天天气", "user", "in_progress"), zops(`{"o":"append","p":"/message/content/parts/0/text","v":"怎么样"}`), zstatusOp(), zadd("A2", "assistant", "finished_successfully"))
+	runZ(m, zadd("U3", "user", "in_progress"), zops(`{"o":"append","p":"/message/content/parts/0/text","v":"行,帮我总结"}`), zstatusOp())
+	assertTranscripts(t, in, "你好", "今天天气怎么样", "行,帮我总结")
+}
+
+func TestWMFinalTurnAmbiguousDropResetsNextTurn(t *testing.T) {
+	in := &zoeFakeInjector{}
+	m := newWMFinalTurnMapper("s", &zoeFakeLogger{}, in)
+	runZ(m, zadd("U1", "user", "in_progress"), zops(`{"o":"append","p":"/message/content/parts/0/text","v":"stale"}`), zadd("A1", "assistant", "in_progress"), zadd("U2", "user", "in_progress"), zops(`{"o":"append","p":"/message/content/parts/0/text","v":"clean"}`), zstatusOp())
+	assertTranscripts(t, in, "clean")
+}
+
+func TestWMFinalTurnEmptyDropResetsNextTurn(t *testing.T) {
+	in := &zoeFakeInjector{}
+	m := newWMFinalTurnMapper("s", &zoeFakeLogger{}, in)
+	runZ(m, zadd("U1", "user", "in_progress"), zstatusOp(), zadd("U2", "user", "in_progress"), zops(`{"o":"append","p":"/message/content/parts/0/text","v":"clean"}`), zstatusOp())
+	assertTranscripts(t, in, "clean")
+}
+
+func TestWMFinalTurnOversizedDropResetsNextTurn(t *testing.T) {
+	in := &zoeFakeInjector{}
+	m := newWMFinalTurnMapper("s", &zoeFakeLogger{}, in)
+	runZ(m, zadd("U1", "user", "in_progress"), zops(fmt.Sprintf(`{"o":"append","p":"/message/content/parts/0/text","v":%q}`, strings.Repeat("x", zoeFinalTurnMax+1))), zstatusOp(), zadd("U2", "user", "in_progress"), zops(`{"o":"append","p":"/message/content/parts/0/text","v":"clean"}`), zstatusOp())
+	assertTranscripts(t, in, "clean")
+}
+
+func zaddWithPart(id, part, role, status string) []byte {
+	return []byte(fmt.Sprintf(`{"type":"data_message","data":{"type":"chat_message_delta","payload":{"delta":{"v":{"message":{"id":%q,"status":%q,"author":{"role":%q},"content":{"parts":[%q]}}}}}}}`, id, status, role, part))
+}
+
+func assertTranscripts(t *testing.T, in *zoeFakeInjector, want ...string) {
+	t.Helper()
+	if len(in.events) != len(want) {
+		t.Fatalf("events=%d want=%d", len(in.events), len(want))
+	}
+	for i, b := range in.events {
+		var got map[string]any
+		if err := json.Unmarshal(b, &got); err != nil || got["transcript"] != want[i] {
+			t.Fatalf("event %d=%v want %q", i, got, want[i])
+		}
+	}
+}
 func TestWMFinalTurnFirstFinishedThenNormalWorks(t *testing.T) {
 	in := &zoeFakeInjector{}
 	m := newWMFinalTurnMapper("s", &zoeFakeLogger{}, in)
