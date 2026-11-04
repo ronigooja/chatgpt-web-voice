@@ -1799,6 +1799,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 		}
 		voiceSessionID := s.bindVoiceSessionMedia(owner, targetSessionID, token, account, upstreamForWM, media, mediaID, call)
 		if media != nil {
+			media.SetEventShapeMetadata(voiceSessionID, s.cfg.VoiceUpstreamRoute)
 			boundMedia, boundCall := media, call
 			media.SetEventObserver(func(data []byte) {
 				s.learnUpstreamIDs(voiceSessionID, func(b *sessionBinding) bool { return b.media == boundMedia }, data)

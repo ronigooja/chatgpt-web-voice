@@ -45,6 +45,35 @@ func TestLoadDefaultsToDevelopmentEnvironment(t *testing.T) {
 	}
 }
 
+func TestLoadEventShapeSamplingDefaultsOffAndCaps(t *testing.T) {
+	t.Setenv("VOICE_EVENT_SHAPE_SAMPLING", "")
+	t.Setenv("VOICE_EVENT_SHAPE_SAMPLING_MAX_FRAMES", "")
+	cfg := Load()
+	if cfg.VoiceEventShapeSampling || cfg.VoiceEventShapeSamplingMaxFrames != 400 {
+		t.Fatalf("unexpected sampler defaults: %+v", cfg)
+	}
+	t.Setenv("VOICE_EVENT_SHAPE_SAMPLING", "true")
+	t.Setenv("VOICE_EVENT_SHAPE_SAMPLING_MAX_FRAMES", "2000")
+	cfg = Load()
+	if !cfg.VoiceEventShapeSampling || cfg.VoiceEventShapeSamplingMaxFrames != 2000 {
+		t.Fatalf("sampler override not loaded: %+v", cfg)
+	}
+}
+
+func TestValidateRejectsEventShapeSamplingFrameBounds(t *testing.T) {
+	t.Setenv("VOICE_AUTH_USERNAME", "admin")
+	t.Setenv("VOICE_AUTH_PASSWORD", "secret")
+	t.Setenv("VOICE_TOKEN_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	cfg := Load()
+	for _, n := range []int{2001, -1} {
+		bad := cfg
+		bad.VoiceEventShapeSamplingMaxFrames = n
+		if bad.Validate() == nil {
+			t.Fatalf("frame bound %d must fail", n)
+		}
+	}
+}
+
 func TestLoadDefaultsTo8090(t *testing.T) {
 	t.Setenv("VOICE_LISTEN_ADDR", "")
 	cfg := Load()

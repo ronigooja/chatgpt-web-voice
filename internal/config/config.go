@@ -119,8 +119,10 @@ type Config struct {
 	// RelayHandoffEnabled keeps the recent conversation text in memory so a
 	// forced account change can hand it to the new session as a text message.
 	// RelayHandoffMaxChars bounds what is kept and sent. Nothing is persisted.
-	RelayHandoffEnabled  bool
-	RelayHandoffMaxChars int
+	RelayHandoffEnabled              bool
+	RelayHandoffMaxChars             int
+	VoiceEventShapeSampling          bool
+	VoiceEventShapeSamplingMaxFrames int
 }
 
 func env(name, def string) string {
@@ -256,10 +258,12 @@ func Load() Config {
 		RelayUDPPortMax:  envInt("VOICE_RELAY_UDP_PORT_MAX", 0),
 		RelayPublicIP:    env("VOICE_RELAY_PUBLIC_IP", ""),
 
-		RelayRebuildMinutes:      envInt("VOICE_RELAY_REBUILD_MINUTES", 45),
-		RelayRebuildReadySeconds: envInt("VOICE_RELAY_REBUILD_READY_SECONDS", 30),
-		RelayHandoffEnabled:      envBool("VOICE_RELAY_HANDOFF", true),
-		RelayHandoffMaxChars:     envInt("VOICE_RELAY_HANDOFF_MAX_CHARS", 6000),
+		RelayRebuildMinutes:              envInt("VOICE_RELAY_REBUILD_MINUTES", 45),
+		RelayRebuildReadySeconds:         envInt("VOICE_RELAY_REBUILD_READY_SECONDS", 30),
+		RelayHandoffEnabled:              envBool("VOICE_RELAY_HANDOFF", true),
+		RelayHandoffMaxChars:             envInt("VOICE_RELAY_HANDOFF_MAX_CHARS", 6000),
+		VoiceEventShapeSampling:          envBool("VOICE_EVENT_SHAPE_SAMPLING", false),
+		VoiceEventShapeSamplingMaxFrames: envInt("VOICE_EVENT_SHAPE_SAMPLING_MAX_FRAMES", 400),
 	}
 }
 
@@ -322,6 +326,9 @@ func (c Config) Validate() error {
 	}
 	if c.RelayHandoffEnabled && (c.RelayHandoffMaxChars < 500 || c.RelayHandoffMaxChars > 50000) {
 		return fmt.Errorf("VOICE_RELAY_HANDOFF_MAX_CHARS must be between 500 and 50000")
+	}
+	if c.VoiceEventShapeSamplingMaxFrames < 0 || c.VoiceEventShapeSamplingMaxFrames > 2000 {
+		return fmt.Errorf("VOICE_EVENT_SHAPE_SAMPLING_MAX_FRAMES must be between 1 and 2000 (or zero for the default)")
 	}
 	if strings.TrimSpace(c.DatabaseFile) == "" {
 		return fmt.Errorf("VOICE_DATABASE_FILE is required")

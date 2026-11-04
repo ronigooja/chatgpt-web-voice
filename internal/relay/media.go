@@ -68,6 +68,7 @@ type PionRelay struct {
 	configuration    webrtc.Configuration
 	limiter          *sessionLimiter
 	logger           *slog.Logger
+	eventShapeConfig eventShapeConfig
 }
 
 var _ Relay = (*PionRelay)(nil)
@@ -155,8 +156,9 @@ type pionSession struct {
 	// toClientRewrite keeps the client-facing RTP stream continuous across legs.
 	toClientRewrite rtpRewriter
 
-	observerMu sync.RWMutex
-	observer   func([]byte)
+	observerMu   sync.RWMutex
+	observer     func([]byte)
+	shapeSampler *eventShapeSampler
 }
 
 // SetEventObserver implements Session.
@@ -166,9 +168,18 @@ func (s *pionSession) SetEventObserver(observer func([]byte)) {
 	s.observerMu.Unlock()
 }
 
+func (s *pionSession) SetEventShapeMetadata(voiceSessionID, route string) {
+	if s.shapeSampler != nil {
+		s.shapeSampler.setMetadata(voiceSessionID, route)
+	}
+}
+
 func (s *pionSession) InjectEvent(data []byte) error {
 	if s == nil || s.bridge == nil {
 		return errors.New("relay event bridge unavailable")
+	}
+	if s.shapeSampler != nil {
+		s.shapeSampler.observe(data, "sideband", "b-to-a")
 	}
 	return s.bridge.sendDownstream(data)
 }
@@ -220,8 +231,9 @@ type dataChannelBridge struct {
 	upstreamMu   sync.Mutex
 	upstream     *webrtc.DataChannel
 
-	observeMu sync.RWMutex
-	observe   func([]byte)
+	observeMu    sync.RWMutex
+	observe      func([]byte)
+	shapeObserve func([]byte, string, string)
 }
 
 func (b *dataChannelBridge) sendDownstream(data []byte) error {
@@ -291,6 +303,7 @@ func New(cfg Config, logger *slog.Logger) (*PionRelay, error) {
 		configuration:    webrtc.Configuration{ICEServers: iceServers},
 		limiter:          &sessionLimiter{limit: cfg.EffectiveMaxSessions()},
 		logger:           logger,
+		eventShapeConfig: eventShapeConfig{enabled: cfg.EventShapeSampling, maxFrames: cfg.EventShapeSamplingMaxFrames, route: cfg.EventShapeRoute},
 	}, nil
 }
 
@@ -380,10 +393,16 @@ func (r *PionRelay) NewSession(ctx context.Context, clientOffer string, route Ro
 		configuration:    r.configuration,
 		logger:           r.logger.With("media_session_id", id),
 	}
+	if r.eventShapeConfig.enabled {
+		session.shapeSampler = newEventShapeSampler(session.logger, id, r.eventShapeConfig.route, r.eventShapeConfig.maxFrames)
+	}
 	session.bridge = newDataChannelBridge(session.done, session.logger, func(err error) {
 		session.fail("data_channel_failed", err)
 	}, session.markActiveChannelOpen)
 	session.bridge.setObserver(session.observeEvent)
+	if session.shapeSampler != nil {
+		session.bridge.setShapeObserver(session.shapeSampler.observe)
+	}
 	session.installPeerAHandler()
 	session.logger.Info("relay session created")
 
@@ -701,6 +720,9 @@ func (s *pionSession) CloseWithReason(reason string) error {
 
 		result := Termination{SessionID: s.id, Reason: reason}
 		result.DataChannels = componentResult(s.bridge.close())
+		if s.shapeSampler != nil {
+			s.shapeSampler.close()
+		}
 		// A pending swap leg is part of this session: any error closing it
 		// must keep the session's termination unclean.
 		var tunnelErrs, peerBErrs []error
@@ -1033,6 +1055,12 @@ func (b *dataChannelBridge) setObserver(observe func([]byte)) {
 	b.observeMu.Unlock()
 }
 
+func (b *dataChannelBridge) setShapeObserver(observe func([]byte, string, string)) {
+	b.observeMu.Lock()
+	b.shapeObserve = observe
+	b.observeMu.Unlock()
+}
+
 // owns reports whether channel is the bridge's current upstream channel.
 func (b *dataChannelBridge) owns(channel *webrtc.DataChannel) bool {
 	b.upstreamMu.Lock()
@@ -1067,6 +1095,12 @@ func (b *dataChannelBridge) bindUpstreamSource(channel *webrtc.DataChannel) {
 			b.observeMu.RUnlock()
 			if observe != nil {
 				observe(payload)
+			}
+			b.observeMu.RLock()
+			shapeObserve := b.shapeObserve
+			b.observeMu.RUnlock()
+			if shapeObserve != nil {
+				shapeObserve(payload, "datachannel", "b-to-a")
 			}
 		}
 		select {
@@ -1113,6 +1147,14 @@ func (b *dataChannelBridge) bindSource(channel *webrtc.DataChannel, destination 
 			return
 		}
 		payload := append([]byte(nil), message.Data...)
+		if message.IsString {
+			b.observeMu.RLock()
+			shapeObserve := b.shapeObserve
+			b.observeMu.RUnlock()
+			if shapeObserve != nil {
+				shapeObserve(payload, "datachannel", "a-to-b")
+			}
+		}
 		select {
 		case destination.queue <- dataChannelMessage{data: payload, isString: message.IsString}:
 		case <-b.done:

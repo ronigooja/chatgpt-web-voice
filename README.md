@@ -209,6 +209,24 @@ needs no port mapping. If the UDP range is unset, the relay uses ephemeral ports
 
 ### 生产环境可改
 
+### OAI event shape sampler (diagnostic only)
+
+The optional sampler records only the structure of text `oai-events` frames so an
+operator can inspect final-turn signals during a real voice call. It is disabled
+by default and emits no parsing or sampler logs while disabled. To enable it for
+a bounded investigation, set `VOICE_EVENT_SHAPE_SAMPLING=true` and optionally
+set `VOICE_EVENT_SHAPE_SAMPLING_MAX_FRAMES` (default `400`, hard maximum `2000`),
+then restart the gateway. Disable it by setting `VOICE_EVENT_SHAPE_SAMPLING=false`
+and restarting again. Each frame and close summary includes the configured
+`wm`/`avas` route; AVAS sideband frames are marked `source=sideband`.
+
+The output contains types, bounded JSON key paths and scalar kind/length buckets.
+Only a strict allowlist of final-state and patch keys can disclose short,
+identifier-safe scalar values; transcript/message/content text, IDs, tokens,
+SDP, ICE, audio and authorization data are never logged. This is diagnostic
+only, not an observability or audit facility; treat logs as sensitive and remove
+them after the investigation.
+
 生产镜像已固定 `VOICE_ENV=production`、上游 `curl-impersonate`、数据路径、会话参数等。  
 `docker-compose.yml` 通常只写：
 

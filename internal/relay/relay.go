@@ -45,6 +45,8 @@ type Session interface {
 	// text event the active upstream sends to the client. It must not block.
 	// Events from a pending or retired leg are never delivered.
 	SetEventObserver(func(data []byte))
+	// SetEventShapeMetadata supplies diagnostic-only identifiers after allocation.
+	SetEventShapeMetadata(voiceSessionID, route string)
 
 	// BeginUpstreamSwap creates a replacement upstream leg (a new peer B) and
 	// returns its SDP offer for the upstream service. The current leg keeps

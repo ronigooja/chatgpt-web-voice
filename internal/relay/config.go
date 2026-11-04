@@ -29,7 +29,10 @@ type Config struct {
 	// ICEServers are used by the client-facing peer only.
 	ICEServers []ICEServer
 	// DisablePrivateRemoteIPs drops client-facing candidates from private, loopback, and link-local addresses.
-	DisablePrivateRemoteIPs bool
+	DisablePrivateRemoteIPs     bool
+	EventShapeSampling          bool
+	EventShapeSamplingMaxFrames int
+	EventShapeRoute             string
 
 	includeLoopback bool // tests only
 }

@@ -535,6 +535,8 @@ func (m *fakeMedia) SetEventObserver(f func([]byte)) {
 	m.mu.Unlock()
 }
 
+func (m *fakeMedia) SetEventShapeMetadata(string, string) {}
+
 func (m *fakeMedia) emit(data string) {
 	m.mu.Lock()
 	f := m.observer

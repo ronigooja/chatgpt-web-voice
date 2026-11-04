@@ -121,10 +121,13 @@ func Run() error {
 	voiceService := voice.New(cfg, accountPool, logger).WithCallSessions(callSessionStore).WithMediaEvidence(mediaEvidenceStore)
 	if cfg.RelayEnabled {
 		mediaRelay, err := relay.New(relay.Config{
-			MaxSessions: cfg.RelayMaxSessions,
-			UDPPortMin:  uint16(cfg.RelayUDPPortMin),
-			UDPPortMax:  uint16(cfg.RelayUDPPortMax),
-			PublicIP:    cfg.RelayPublicIP,
+			MaxSessions:                 cfg.RelayMaxSessions,
+			UDPPortMin:                  uint16(cfg.RelayUDPPortMin),
+			UDPPortMax:                  uint16(cfg.RelayUDPPortMax),
+			PublicIP:                    cfg.RelayPublicIP,
+			EventShapeSampling:          cfg.VoiceEventShapeSampling,
+			EventShapeSamplingMaxFrames: cfg.VoiceEventShapeSamplingMaxFrames,
+			EventShapeRoute:             cfg.VoiceUpstreamRoute,
 		}, logger)
 		if err != nil {
 			return fmt.Errorf("media relay setup failed: %w", err)
