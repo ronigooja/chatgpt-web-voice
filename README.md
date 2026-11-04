@@ -26,6 +26,12 @@ not identify a build containing this fork's changes.
 - 下游 `/v1` 接入：只持 API Key + `voice_session_id` 即可建连 / 恢复
 - 粘性账号与上游续聊线索由网关持久化，不向下游暴露池内账号信息
 
+### Zoe 用户语音回合完成事件
+
+设置 `VOICE_ZOE_FINAL_TURN=true` 时，WM 上游完成一个有文本的用户语音回合后，网关通过下游事件通道发送严格的顶层 JSON：`{"type":"user_audio_turn.final","turn_id":"<message id>","revision":1,"transcript":"<text>"}`。功能默认关闭，AVAS 不支持。状态只保留当前媒体会话，文本超过 20000 个字符、为空、格式错误或出现消息交错时均不发送；重复 ID 只发送一次，且只在最近添加的用户消息完成时发送。观察器在触发状态帧入队前运行，因此事件可能先于该状态帧抵达客户端。
+
+未验证：累计文本是否完全等于用户实际说出的内容；补丁归属消息依赖上游帧的顺序；AVAS 映射尚未实现。
+
 ## 网页效果
 
 ![image-20260724144852569](./README.assets/image-20260724144852569.png)

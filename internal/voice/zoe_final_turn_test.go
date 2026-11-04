@@ -1,0 +1,151 @@
+package voice
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+	"testing"
+)
+
+type zoeFakeInjector struct{ events [][]byte }
+
+func (f *zoeFakeInjector) InjectEvent(b []byte) error {
+	f.events = append(f.events, append([]byte(nil), b...))
+	return nil
+}
+
+type zoeFakeLogger struct{ logs []string }
+
+func (f *zoeFakeLogger) Info(msg string, args ...any) { f.logs = append(f.logs, fmt.Sprint(msg, args)) }
+func zframe(v string) []byte {
+	return []byte(`{"type":"data_message","data":` + mustJSON(`{"type":"chat_message_delta","payload":{"delta":`+v+`}}`) + `}`)
+}
+func mustJSON(s string) string { b, _ := json.Marshal(s); return string(b) }
+func zadd(id, role, status string) []byte {
+	return zframe(fmt.Sprintf(`{"v":{"message":{"id":%q,"status":%q,"author":{"role":%q},"content":{"parts":[""]}}}}`, id, status, role))
+}
+func zops(ops string) []byte { return zframe(`{"v":[` + ops + `]}`) }
+func zstatusTop() []byte {
+	return zframe(`{"o":"replace","p":"/message/status","v":"finished_successfully"}`)
+}
+func zstatusOp() []byte {
+	return zops(`{"o":"replace","p":"/message/status","v":"finished_successfully"}`)
+}
+func newZ() *wmFinalTurnMapper {
+	f := &zoeFakeInjector{}
+	return newWMFinalTurnMapper("s", &zoeFakeLogger{}, f)
+}
+func runZ(m *wmFinalTurnMapper, fs ...[]byte) {
+	for _, f := range fs {
+		m.Observe(f)
+	}
+}
+func TestWMFinalTurnUserTurnEmitsConcatenatedText(t *testing.T) {
+	in := &zoeFakeInjector{}
+	m := newWMFinalTurnMapper("s", &zoeFakeLogger{}, in)
+	runZ(m, zadd("U1", "user", "in_progress"), zops(`{"o":"append","p":"/message/content/parts/0/text","v":" hello"}`), zops(`{"o":"append","p":"/message/content/parts/0/text","v":" brave"}`), zops(`{"o":"append","p":"/message/content/parts/0/text","v":" world "},{"o":"replace","p":"/message/metadata/av_app_service_bidi_turn_end_time_s","v":1.5}`), zstatusTop())
+	if len(in.events) != 1 {
+		t.Fatalf("events=%d", len(in.events))
+	}
+	var got map[string]any
+	json.Unmarshal(in.events[0], &got)
+	if got["turn_id"] != "U1" || got["transcript"] != "hello brave world" {
+		t.Fatalf("%v", got)
+	}
+}
+func TestWMFinalTurnFirstFinishedThenNormalWorks(t *testing.T) {
+	in := &zoeFakeInjector{}
+	m := newWMFinalTurnMapper("s", &zoeFakeLogger{}, in)
+	runZ(m, zadd("first", "user", "finished_successfully"), zadd("U2", "user", "in_progress"), zops(`{"o":"append","p":"/message/content/parts/0/text","v":"ok"}`), zstatusOp())
+	if len(in.events) != 1 {
+		t.Fatal("later turn missing")
+	}
+}
+func TestWMFinalTurnAssistantNeverEmits(t *testing.T) {
+	in := &zoeFakeInjector{}
+	m := newWMFinalTurnMapper("s", &zoeFakeLogger{}, in)
+	runZ(m, zadd("A", "assistant", "in_progress"), zops(`{"o":"append","p":"/message/content/parts/0/text","v":"x"}`), zstatusOp())
+	if len(in.events) != 0 {
+		t.Fatal("assistant emitted")
+	}
+}
+func TestWMFinalTurnAssistantAddDropsUser(t *testing.T) {
+	l := &zoeFakeLogger{}
+	in := &zoeFakeInjector{}
+	m := newWMFinalTurnMapper("s", l, in)
+	runZ(m, zadd("U", "user", "in_progress"), zadd("A", "assistant", "in_progress"), zstatusOp())
+	if len(in.events) != 0 || !strings.Contains(strings.Join(l.logs, " "), "ambiguous_interleave") {
+		t.Fatal("not dropped")
+	}
+}
+func TestWMFinalTurnAssistantStatusDoesNotFinishUser(t *testing.T) {
+	in := &zoeFakeInjector{}
+	m := newWMFinalTurnMapper("s", &zoeFakeLogger{}, in)
+	runZ(m, zadd("U", "user", "in_progress"), zadd("A", "assistant", "in_progress"), zstatusOp())
+	if len(in.events) != 0 {
+		t.Fatal("wrong message finished")
+	}
+}
+func TestWMFinalTurnDuplicateStatusEmitsOnce(t *testing.T) {
+	in := &zoeFakeInjector{}
+	m := newWMFinalTurnMapper("s", &zoeFakeLogger{}, in)
+	runZ(m, zadd("U", "user", "in_progress"), zops(`{"o":"append","p":"/message/content/parts/0/text","v":"x"}`), zstatusOp(), zstatusOp())
+	if len(in.events) != 1 {
+		t.Fatal("duplicate emitted")
+	}
+}
+func TestWMFinalTurnEmptyTextDropped(t *testing.T) {
+	l := &zoeFakeLogger{}
+	m := newWMFinalTurnMapper("s", l, &zoeFakeInjector{})
+	runZ(m, zadd("U", "user", "in_progress"), zstatusOp())
+	if !strings.Contains(strings.Join(l.logs, " "), "empty") {
+		t.Fatal("empty not dropped")
+	}
+}
+func TestWMFinalTurnOversizedDropped(t *testing.T) {
+	l := &zoeFakeLogger{}
+	m := newWMFinalTurnMapper("s", l, &zoeFakeInjector{})
+	runZ(m, zadd("U", "user", "in_progress"), zops(fmt.Sprintf(`{"o":"append","p":"/message/content/parts/0/text","v":%q}`, strings.Repeat("x", 20001))), zstatusOp())
+	if !strings.Contains(strings.Join(l.logs, " "), "oversized") {
+		t.Fatal("oversized not dropped")
+	}
+}
+func TestWMFinalTurnNoiseDoesNotBreakTurn(t *testing.T) {
+	in := &zoeFakeInjector{}
+	m := newWMFinalTurnMapper("s", &zoeFakeLogger{}, in)
+	runZ(m, zadd("U", "user", "in_progress"), zframe(`{"type":"url_moderation"}`), zframe(`{"type":"usage_update"}`), zframe(`{"type":"conversation_update"}`), zframe(`{"type":"spawn_update"}`), zframe(`{"type":"thinking_update"}`), zops(`{"o":"append","p":"/message/content/parts/0/text","v":"x"}`), zstatusOp())
+	if len(in.events) != 1 {
+		t.Fatal("noise broke turn")
+	}
+}
+func TestWMFinalTurnMalformedAndOversizedIgnored(t *testing.T) {
+	m := newZ()
+	runZ(m, []byte("bad"), []byte(`{"type":"other"}`), []byte(strings.Repeat("x", 1<<20+1)))
+	if m.active {
+		t.Fatal("malformed changed state")
+	}
+}
+func TestWMFinalTurnRingEvictsFIFO(t *testing.T) {
+	in := &zoeFakeInjector{}
+	m := newWMFinalTurnMapper("s", &zoeFakeLogger{}, in)
+	for i := 0; i < 300; i++ {
+		id := fmt.Sprintf("%03d", i)
+		runZ(m, zadd(id, "user", "in_progress"), zops(fmt.Sprintf(`{"o":"append","p":"/message/content/parts/0/text","v":%q}`, "x")), zstatusOp())
+	}
+	n := len(in.events)
+	runZ(m, zadd("000", "user", "in_progress"), zops(`{"o":"append","p":"/message/content/parts/0/text","v":"x"}`), zstatusOp())
+	if len(in.events) != n+1 {
+		t.Fatal("old id did not evict")
+	}
+	runZ(m, zadd("299", "user", "in_progress"), zops(`{"o":"append","p":"/message/content/parts/0/text","v":"x"}`), zstatusOp())
+	if len(in.events) != n+1 {
+		t.Fatal("latest id evicted")
+	}
+}
+func TestWMFinalTurnLogsDoNotContainTranscriptOrID(t *testing.T) {
+	l := &zoeFakeLogger{}
+	runZ(newWMFinalTurnMapper("s", l, &zoeFakeInjector{}), zadd("SECRET-ID", "user", "in_progress"), zops(`{"o":"append","p":"/message/content/parts/0/text","v":"SECRET-TEXT"}`), zstatusOp())
+	if strings.Contains(strings.Join(l.logs, " "), "SECRET") {
+		t.Fatal("sensitive data logged")
+	}
+}

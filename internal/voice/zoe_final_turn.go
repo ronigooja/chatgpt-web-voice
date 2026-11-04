@@ -15,18 +15,27 @@ const zoeFinalTurnMax = 20000
 
 type zoeTurnMapper interface{ Observe([]byte) }
 type wmFinalTurnMapper struct {
-	mu                sync.Mutex
-	active, oversized bool
-	id, text          string
-	done              map[string]struct{}
-	session           string
-	logger            interface{ Info(string, ...any) }
-	injector          relay.EventInjector
+	mu                         sync.Mutex
+	active, oversized          bool
+	id, text                   string
+	lastAddedID, lastAddedRole string
+	done                       map[string]struct{}
+	doneRing                   [256]string
+	doneCount, doneNext        int
+	session                    string
+	logger                     interface{ Info(string, ...any) }
+	injector                   relay.EventInjector
 }
 
 func newWMFinalTurnMapper(session string, logger interface{ Info(string, ...any) }, injector relay.EventInjector) *wmFinalTurnMapper {
 	return &wmFinalTurnMapper{session: session, logger: logger, injector: injector, done: map[string]struct{}{}}
 }
+
+type finalTurnAction struct {
+	event          []byte
+	id, text, drop string
+}
+
 func (m *wmFinalTurnMapper) Observe(data []byte) {
 	if len(data) > 1<<20 {
 		return
@@ -53,54 +62,33 @@ func (m *wmFinalTurnMapper) Observe(data []byte) {
 		return
 	}
 	var d struct {
-		V json.RawMessage `json:"v"`
-	}
-	if json.Unmarshal(e.Payload.Delta, &d) != nil || len(d.V) == 0 {
-		return
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if d.V[0] == '{' {
-		m.add(d.V)
-		return
-	}
-	if d.V[0] != '[' {
-		return
-	}
-	var ops []struct {
 		O, P string
 		V    json.RawMessage
 	}
-	if json.Unmarshal(d.V, &ops) != nil {
+	if json.Unmarshal(e.Payload.Delta, &d) != nil {
 		return
 	}
-	for _, op := range ops {
-		if op.O == "replace" && op.P == "/message/status" {
-			var st string
-			if json.Unmarshal(op.V, &st) == nil {
-				m.finish(st)
+	m.mu.Lock()
+	var actions []finalTurnAction
+	if len(d.V) > 0 && d.V[0] == '{' {
+		m.add(d.V, &actions)
+	} else if len(d.V) > 0 && d.V[0] == '[' {
+		var ops []struct {
+			O, P string
+			V    json.RawMessage
+		}
+		if json.Unmarshal(d.V, &ops) == nil {
+			for _, op := range ops {
+				m.apply(op.O, op.P, op.V, &actions)
 			}
-			continue
 		}
-		if !appendTextPath.MatchString(op.P) || !m.active || (op.O != "append" && op.O != "replace") {
-			continue
-		}
-		var t string
-		if json.Unmarshal(op.V, &t) != nil {
-			continue
-		}
-		if op.O == "replace" {
-			m.text = t
-		} else {
-			m.text += t
-		}
-		if utf8.RuneCountInString(m.text) > zoeFinalTurnMax {
-			m.oversized = true
-			m.text = ""
-		}
+	} else if d.O == "replace" && d.P == "/message/status" {
+		m.finish(d.V, &actions)
 	}
+	m.mu.Unlock()
+	m.deliver(actions)
 }
-func (m *wmFinalTurnMapper) add(raw json.RawMessage) {
+func (m *wmFinalTurnMapper) add(raw json.RawMessage, a *[]finalTurnAction) {
 	var v struct {
 		Message *struct {
 			ID, Status string
@@ -119,8 +107,9 @@ func (m *wmFinalTurnMapper) add(raw json.RawMessage) {
 		m.active = false
 		m.text = ""
 		m.oversized = false
-		m.logger.Info("zoe_final_turn_dropped", "voice_session_id", m.session, "reason", "ambiguous_interleave")
+		*a = append(*a, finalTurnAction{drop: "ambiguous_interleave"})
 	}
+	m.lastAddedID, m.lastAddedRole = v.Message.ID, v.Message.Author.Role
 	if v.Message.Author.Role != "user" || v.Message.Status != "in_progress" {
 		return
 	}
@@ -129,13 +118,13 @@ func (m *wmFinalTurnMapper) add(raw json.RawMessage) {
 		var s string
 		if json.Unmarshal(p, &s) == nil {
 			m.text += s
-			continue
-		}
-		var x struct {
-			Text string `json:"text"`
-		}
-		if json.Unmarshal(p, &x) == nil {
-			m.text += x.Text
+		} else {
+			var x struct {
+				Text string `json:"text"`
+			}
+			if json.Unmarshal(p, &x) == nil {
+				m.text += x.Text
+			}
 		}
 	}
 	if utf8.RuneCountInString(m.text) > zoeFinalTurnMax {
@@ -143,33 +132,57 @@ func (m *wmFinalTurnMapper) add(raw json.RawMessage) {
 		m.text = ""
 	}
 }
-func (m *wmFinalTurnMapper) finish(status string) {
-	if status != "finished_successfully" || !m.active {
+func (m *wmFinalTurnMapper) apply(o, p string, v json.RawMessage, a *[]finalTurnAction) {
+	if o == "replace" && p == "/message/status" {
+		m.finish(v, a)
+		return
+	}
+	if m.active && appendTextPath.MatchString(p) && (o == "append" || o == "replace") {
+		var t string
+		if json.Unmarshal(v, &t) != nil {
+			return
+		}
+		if o == "replace" {
+			m.text = t
+		} else {
+			m.text += t
+		}
+		if utf8.RuneCountInString(m.text) > zoeFinalTurnMax {
+			m.oversized = true
+			m.text = ""
+		}
+	}
+}
+func (m *wmFinalTurnMapper) finish(v json.RawMessage, a *[]finalTurnAction) {
+	var st string
+	if json.Unmarshal(v, &st) != nil || st != "finished_successfully" || !m.active || m.lastAddedID != m.id || m.lastAddedRole != "user" {
 		return
 	}
 	id, text := m.id, strings.TrimSpace(m.text)
 	m.active = false
 	if m.oversized {
-		m.drop("oversized")
+		*a = append(*a, finalTurnAction{drop: "oversized"})
 		return
 	}
 	if text == "" {
-		m.drop("empty")
+		*a = append(*a, finalTurnAction{drop: "empty"})
 		return
 	}
 	if len(id) < 1 || len(id) > 256 {
-		m.drop("empty")
 		return
 	}
 	if _, ok := m.done[id]; ok {
-		m.drop("duplicate")
+		*a = append(*a, finalTurnAction{drop: "duplicate"})
 		return
 	}
-	if len(m.done) >= 256 {
-		for k := range m.done {
-			delete(m.done, k)
-			break
-		}
+	if m.doneCount < 256 {
+		m.doneRing[m.doneCount] = id
+		m.doneCount++
+	} else {
+		old := m.doneRing[m.doneNext]
+		delete(m.done, old)
+		m.doneRing[m.doneNext] = id
+		m.doneNext = (m.doneNext + 1) % 256
 	}
 	m.done[id] = struct{}{}
 	b, _ := json.Marshal(struct {
@@ -178,13 +191,18 @@ func (m *wmFinalTurnMapper) finish(status string) {
 		Revision   int    `json:"revision"`
 		Transcript string `json:"transcript"`
 	}{"user_audio_turn.final", id, 1, text})
-	if m.injector.InjectEvent(b) == nil {
-		h := sha256.Sum256([]byte(id))
-		m.logger.Info("zoe_final_turn_emitted", "voice_session_id", m.session, "transcript_runes", utf8.RuneCountInString(text), "sha256_prefix", hex.EncodeToString(h[:])[:8])
-	}
+	*a = append(*a, finalTurnAction{event: b, id: id, text: text})
 }
-func (m *wmFinalTurnMapper) drop(reason string) {
-	m.text = ""
-	m.oversized = false
-	m.logger.Info("zoe_final_turn_dropped", "voice_session_id", m.session, "reason", reason)
+func (m *wmFinalTurnMapper) deliver(as []finalTurnAction) {
+	for _, a := range as {
+		if a.drop != "" {
+			m.logger.Info("zoe_final_turn_dropped", "voice_session_id", m.session, "reason", a.drop)
+			continue
+		}
+		if m.injector.InjectEvent(a.event) != nil {
+			continue
+		}
+		h := sha256.Sum256([]byte(a.id))
+		m.logger.Info("zoe_final_turn_emitted", "voice_session_id", m.session, "transcript_runes", utf8.RuneCountInString(a.text), "sha256_prefix", hex.EncodeToString(h[:])[:8])
+	}
 }
