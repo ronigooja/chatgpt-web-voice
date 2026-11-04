@@ -123,6 +123,7 @@ type Config struct {
 	RelayHandoffMaxChars             int
 	VoiceEventShapeSampling          bool
 	VoiceEventShapeSamplingMaxFrames int
+	ZoeFinalTurn                     bool
 }
 
 func env(name, def string) string {
@@ -264,6 +265,7 @@ func Load() Config {
 		RelayHandoffMaxChars:             envInt("VOICE_RELAY_HANDOFF_MAX_CHARS", 6000),
 		VoiceEventShapeSampling:          envBool("VOICE_EVENT_SHAPE_SAMPLING", false),
 		VoiceEventShapeSamplingMaxFrames: envInt("VOICE_EVENT_SHAPE_SAMPLING_MAX_FRAMES", 400),
+		ZoeFinalTurn:                     envBool("VOICE_ZOE_FINAL_TURN", false),
 	}
 }
 

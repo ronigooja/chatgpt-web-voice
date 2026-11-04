@@ -1801,7 +1801,16 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 		if media != nil {
 			media.SetEventShapeMetadata(voiceSessionID, s.cfg.VoiceUpstreamRoute)
 			boundMedia, boundCall := media, call
+			var finalTurn zoeTurnMapper
+			if s.cfg.ZoeFinalTurn && s.cfg.VoiceUpstreamRoute == "wm" {
+				if injector, ok := media.(relay.EventInjector); ok {
+					finalTurn = newWMFinalTurnMapper(voiceSessionID, s.logger, injector)
+				}
+			}
 			media.SetEventObserver(func(data []byte) {
+				if finalTurn != nil {
+					finalTurn.Observe(data)
+				}
 				s.learnUpstreamIDs(voiceSessionID, func(b *sessionBinding) bool { return b.media == boundMedia }, data)
 				s.mu.Lock()
 				if current := s.bindings[voiceSessionID]; current != nil && current.media == boundMedia && current.call == boundCall {
