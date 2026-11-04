@@ -132,6 +132,7 @@ func (s *Server) downstreamSessionContext(w http.ResponseWriter, r *http.Request
 		UpstreamConversationID  string `json:"upstream_conversation_id"`
 		UpstreamParentMessageID string `json:"upstream_parent_message_id"`
 		UpstreamVoiceSessionID  string `json:"upstream_voice_session_id"`
+		Text                    string `json:"text,omitempty"`
 	}
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
@@ -143,6 +144,7 @@ func (s *Server) downstreamSessionContext(w http.ResponseWriter, r *http.Request
 		ConversationID:         body.UpstreamConversationID,
 		ParentMessageID:        body.UpstreamParentMessageID,
 		UpstreamVoiceSessionID: body.UpstreamVoiceSessionID,
+		Text:                   body.Text,
 	})
 	if err != nil {
 		writeDownstreamServiceError(w, err)
