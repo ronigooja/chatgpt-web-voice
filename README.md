@@ -221,8 +221,14 @@ and restarting again. Each frame and close summary includes the configured
 `wm`/`avas` route; AVAS sideband frames are marked `source=sideband`.
 
 The output contains types, bounded JSON key paths and scalar kind/length buckets.
-Only a strict allowlist of final-state and patch keys can disclose short,
-identifier-safe scalar values; transcript/message/content text, IDs, tokens,
+Paths are limited to depth 7 and 128 entries per frame, with deterministic
+sorted object-key traversal. Boolean values are disclosed only for `end_turn`,
+`is_final`, `final`, `done`, `complete`, and `completed`. For patches, values
+are disclosed only when the sibling `p` is exactly `/message/status`,
+`/message/end_turn`, or `/message/channel`, and the value is a boolean or a
+lowercase/underscore token of at most 40 characters. Otherwise only a strict
+allowlist of final-state scalar values can disclose short,
+identifier-safe values; transcript/message/content text, IDs, tokens,
 SDP, ICE, audio and authorization data are never logged. This is diagnostic
 only, not an observability or audit facility; treat logs as sensitive and remove
 them after the investigation.

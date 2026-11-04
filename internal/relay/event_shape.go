@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -14,8 +15,8 @@ import (
 const (
 	defaultEventShapeMaxFrames = 400
 	maxEventShapeFrames        = 2000
-	maxEventShapePaths         = 64
-	maxEventShapeDepth         = 5
+	maxEventShapePaths         = 128
+	maxEventShapeDepth         = 7
 	maxEventShapeParseBytes    = 1 << 20
 )
 
@@ -55,6 +56,7 @@ var safeShapeValue = regexp.MustCompile(`^[A-Za-z0-9_./:\-\[\]]{1,64}$`)
 var safeShapeKey = regexp.MustCompile(`^[A-Za-z0-9_\-]{1,32}$`)
 var uuidShapeValue = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 var hexShapeValue = regexp.MustCompile(`(?i)^[0-9a-f]{24,}$`)
+var patchShapeValue = regexp.MustCompile(`^[a-z_]{1,40}$`)
 
 func newEventShapeSampler(logger *slog.Logger, mediaID, route string, maxFrames int) *eventShapeSampler {
 	if maxFrames <= 0 {
@@ -184,8 +186,8 @@ func shapeFrame(raw []byte) (outerType, innerType string, paths []string, finali
 func collectShapePaths(root map[string]any) ([]string, bool) {
 	paths := make([]string, 0, maxEventShapePaths)
 	finalish := false
-	var walk func(any, string, int)
-	walk = func(value any, path string, depth int) {
+	var walk func(any, string, int, bool)
+	walk = func(value any, path string, depth int, patchValueAllowed bool) {
 		if len(paths) >= maxEventShapePaths || depth > maxEventShapeDepth {
 			return
 		}
@@ -193,9 +195,14 @@ func collectShapePaths(root map[string]any) ([]string, bool) {
 		valueText := ""
 		if str, ok := value.(string); ok {
 			valueText = shapeDisclosure(path, str)
+			if patchValueAllowed && patchShapeValue.MatchString(str) {
+				valueText = "=" + str
+			}
+		} else if b, ok := value.(bool); ok && (isFinalShapeKey(keyFromPath(path)) || patchValueAllowed) {
+			valueText = fmt.Sprintf("=%t", b)
 		}
 		paths = append(paths, path+"="+kind+valueText)
-		key := path[strings.LastIndex(path, ".")+1:]
+		key := keyFromPath(path)
 		if allowedShapeValueKeys[key] && isFinalShapeKey(key) {
 			finalish = true
 		}
@@ -204,8 +211,17 @@ func collectShapePaths(root map[string]any) ([]string, bool) {
 			if depth == maxEventShapeDepth {
 				return
 			}
-			for k, child := range v {
-				walk(child, path+"."+shapeKey(k), depth+1)
+			keys := make([]string, 0, len(v))
+			for k := range v {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			patchPath := ""
+			if p, ok := v["p"].(string); ok && (p == "/message/status" || p == "/message/end_turn" || p == "/message/channel") {
+				patchPath = p
+			}
+			for _, k := range keys {
+				walk(v[k], path+"."+shapeKey(k), depth+1, k == "v" && patchPath != "")
 				if len(paths) >= maxEventShapePaths {
 					return
 				}
@@ -213,7 +229,7 @@ func collectShapePaths(root map[string]any) ([]string, bool) {
 		case []any:
 			if depth < maxEventShapeDepth {
 				for _, child := range v {
-					walk(child, path+".[]", depth+1)
+					walk(child, path+".[]", depth+1, false)
 					if len(paths) >= maxEventShapePaths {
 						return
 					}
@@ -221,11 +237,18 @@ func collectShapePaths(root map[string]any) ([]string, bool) {
 			}
 		}
 	}
-	for key, value := range root {
-		walk(value, shapeKey(key), 1)
+	keys := make([]string, 0, len(root))
+	for key := range root {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		walk(root[key], shapeKey(key), 1, false)
 	}
 	return paths, finalish
 }
+
+func keyFromPath(path string) string { return path[strings.LastIndex(path, ".")+1:] }
 
 func shapeKind(v any) string {
 	switch v.(type) {

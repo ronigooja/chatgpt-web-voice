@@ -2,7 +2,9 @@ package relay
 
 import (
 	"bytes"
+	"fmt"
 	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -115,5 +117,38 @@ func TestEventShapeSamplerLogsNormalDeltaAndFinalish(t *testing.T) {
 	got := logs.String()
 	if !strings.Contains(got, "outer_type=data_message") || !strings.Contains(got, "inner_type=chat_message_delta") || !strings.Contains(got, "type=string=chat_message_delta") || !strings.Contains(got, "finalish_key_observed=true") {
 		t.Fatalf("normal delta/finalish shape missing: %s", got)
+	}
+}
+
+func TestEventShapeSamplerDisclosesDeepRolesDirectionsBooleansAndSafePatchValues(t *testing.T) {
+	var logs bytes.Buffer
+	s := newEventShapeSampler(slog.New(slog.NewTextHandler(&logs, nil)), "media-deep", "wm", 1)
+	s.observe([]byte(`{"type":"data_message","data":{"message":{"author":{"role":"user","assistant":{"role":"assistant"}},"content":{"parts":[{"content_type":"audio_transcription","direction":"in"}]},"end_turn":true,"patches":[{"p":"/message/status","v":"finished_successfully"},{"p":"/message/end_turn","v":false},{"p":"/message/content/parts/0/text","v":"a distinctive secret sentence"},{"p":"/message/metadata/foo","v":"secretvalue"}]}}}`), "datachannel", "b-to-a")
+	s.close()
+	got := logs.String()
+	for _, want := range []string{"role=string=user", "role=string=assistant", "content_type=string=audio_transcription", "direction=string=in", "end_turn=bool=true", "v=string=finished_successfully", "v=bool=false"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in %s", want, got)
+		}
+	}
+	for _, forbidden := range []string{"a distinctive secret sentence", "secretvalue"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("secret disclosed: %s", got)
+		}
+	}
+}
+
+func TestEventShapeSamplerCollectsDeterministicallyAndCapsPaths(t *testing.T) {
+	frame := map[string]any{}
+	for i := 0; i < 200; i++ {
+		frame[fmt.Sprintf("key%03d", i)] = i
+	}
+	one, _ := collectShapePaths(frame)
+	two, _ := collectShapePaths(frame)
+	if !reflect.DeepEqual(one, two) {
+		t.Fatalf("path order differs: %v vs %v", one, two)
+	}
+	if len(one) != maxEventShapePaths {
+		t.Fatalf("path cap=%d, want %d", len(one), maxEventShapePaths)
 	}
 }
