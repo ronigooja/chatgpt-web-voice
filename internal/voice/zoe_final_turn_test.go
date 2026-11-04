@@ -67,7 +67,7 @@ func TestWMFinalTurnAmbiguousDropResetsNextTurn(t *testing.T) {
 	in := &zoeFakeInjector{}
 	m := newWMFinalTurnMapper("s", &zoeFakeLogger{}, in)
 	runZ(m, zadd("U1", "user", "in_progress"), zops(`{"o":"append","p":"/message/content/parts/0/text","v":"stale"}`), zadd("A1", "assistant", "in_progress"), zadd("U2", "user", "in_progress"), zops(`{"o":"append","p":"/message/content/parts/0/text","v":"clean"}`), zstatusOp())
-	assertTranscripts(t, in, "clean")
+	assertTranscripts(t, in, "stale", "clean")
 }
 
 func TestWMFinalTurnEmptyDropResetsNextTurn(t *testing.T) {
@@ -121,16 +121,56 @@ func TestWMFinalTurnAssistantAddDropsUser(t *testing.T) {
 	in := &zoeFakeInjector{}
 	m := newWMFinalTurnMapper("s", l, in)
 	runZ(m, zadd("U", "user", "in_progress"), zadd("A", "assistant", "in_progress"), zstatusOp())
-	if len(in.events) != 0 || !strings.Contains(strings.Join(l.logs, " "), "ambiguous_interleave") {
-		t.Fatal("not dropped")
+	if len(in.events) != 0 || !strings.Contains(strings.Join(l.logs, " "), "empty") {
+		t.Fatal("empty user turn not dropped")
 	}
+}
+
+func TestWMFinalTurnAssistantAddCommitsUserBeforeLateStatus(t *testing.T) {
+	l := &zoeFakeLogger{}
+	in := &zoeFakeInjector{}
+	m := newWMFinalTurnMapper("s", l, in)
+	runZ(m, zaddWithPart("U", "帮我", "user", "in_progress"),
+		zops(`{"o":"append","p":"/message/content/parts/0/text","v":"研究"}`),
+		zops(`{"o":"append","p":"/message/content/parts/0/text","v":"一下"}`),
+		zops(`{"o":"append","p":"/message/content/parts/0/text","v":"今天的"}`),
+		zops(`{"o":"append","p":"/message/content/parts/0/text","v":"天气"}`),
+		zadd("A", "assistant", "in_progress"), zstatusTop())
+	if len(in.events) != 1 {
+		t.Fatalf("events=%d", len(in.events))
+	}
+	var got map[string]any
+	json.Unmarshal(in.events[0], &got)
+	if got["transcript"] != "帮我研究一下今天的天气" {
+		t.Fatalf("%v", got)
+	}
+	if !strings.Contains(strings.Join(l.logs, " "), "commit_reason assistant_add") {
+		t.Fatal("assistant-add commit reason missing")
+	}
+}
+
+func TestWMFinalTurnAssistantAddWithEmptyUserTextDrops(t *testing.T) {
+	l := &zoeFakeLogger{}
+	m := newWMFinalTurnMapper("s", l, &zoeFakeInjector{})
+	runZ(m, zadd("U", "user", "in_progress"), zadd("A", "assistant", "in_progress"))
+	if !strings.Contains(strings.Join(l.logs, " "), "empty") {
+		t.Fatal("empty user text not dropped")
+	}
+}
+
+func TestWMFinalTurnMixedAssistantAndStatusOrdering(t *testing.T) {
+	in := &zoeFakeInjector{}
+	m := newWMFinalTurnMapper("s", &zoeFakeLogger{}, in)
+	runZ(m, zaddWithPart("U1", "first", "user", "in_progress"), zadd("A1", "assistant", "in_progress"), zstatusTop(),
+		zaddWithPart("U2", "second", "user", "in_progress"), zstatusTop())
+	assertTranscripts(t, in, "first", "second")
 }
 func TestWMFinalTurnAssistantStatusDoesNotFinishUser(t *testing.T) {
 	in := &zoeFakeInjector{}
 	m := newWMFinalTurnMapper("s", &zoeFakeLogger{}, in)
 	runZ(m, zadd("U", "user", "in_progress"), zadd("A", "assistant", "in_progress"), zstatusOp())
 	if len(in.events) != 0 {
-		t.Fatal("wrong message finished")
+		t.Fatal("empty user turn emitted")
 	}
 }
 func TestWMFinalTurnDuplicateStatusEmitsOnce(t *testing.T) {

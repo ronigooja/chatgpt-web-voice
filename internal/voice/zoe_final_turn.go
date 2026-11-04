@@ -34,6 +34,7 @@ func newWMFinalTurnMapper(session string, logger interface{ Info(string, ...any)
 type finalTurnAction struct {
 	event          []byte
 	id, text, drop string
+	commitReason   string
 }
 
 func (m *wmFinalTurnMapper) Observe(data []byte) {
@@ -104,8 +105,12 @@ func (m *wmFinalTurnMapper) add(raw json.RawMessage, a *[]finalTurnAction) {
 		return
 	}
 	if m.active {
-		m.resetTurn()
-		*a = append(*a, finalTurnAction{drop: "ambiguous_interleave"})
+		if v.Message.Author.Role == "assistant" {
+			m.commit("assistant_add", a)
+		} else {
+			m.resetTurn()
+			*a = append(*a, finalTurnAction{drop: "ambiguous_interleave"})
+		}
 	}
 	m.lastAddedID, m.lastAddedRole = v.Message.ID, v.Message.Author.Role
 	if v.Message.Author.Role != "user" || v.Message.Status != "in_progress" {
@@ -159,7 +164,16 @@ func (m *wmFinalTurnMapper) finish(v json.RawMessage, a *[]finalTurnAction) {
 	}
 	id, text := m.id, strings.TrimSpace(m.text)
 	oversized := m.oversized
+	m.commitData(id, text, oversized, "status_patch", a)
+}
+
+func (m *wmFinalTurnMapper) commit(reason string, a *[]finalTurnAction) {
+	id, text, oversized := m.id, strings.TrimSpace(m.text), m.oversized
 	m.resetTurn()
+	m.commitData(id, text, oversized, reason, a)
+}
+
+func (m *wmFinalTurnMapper) commitData(id, text string, oversized bool, reason string, a *[]finalTurnAction) {
 	if oversized {
 		*a = append(*a, finalTurnAction{drop: "oversized"})
 		return
@@ -191,7 +205,7 @@ func (m *wmFinalTurnMapper) finish(v json.RawMessage, a *[]finalTurnAction) {
 		Revision   int    `json:"revision"`
 		Transcript string `json:"transcript"`
 	}{"user_audio_turn.final", id, 1, text})
-	*a = append(*a, finalTurnAction{event: b, id: id, text: text})
+	*a = append(*a, finalTurnAction{event: b, id: id, text: text, commitReason: reason})
 }
 
 func (m *wmFinalTurnMapper) resetTurn() {
@@ -210,6 +224,6 @@ func (m *wmFinalTurnMapper) deliver(as []finalTurnAction) {
 			continue
 		}
 		h := sha256.Sum256([]byte(a.id))
-		m.logger.Info("zoe_final_turn_emitted", "voice_session_id", m.session, "transcript_runes", utf8.RuneCountInString(a.text), "sha256_prefix", hex.EncodeToString(h[:])[:8])
+		m.logger.Info("zoe_final_turn_emitted", "voice_session_id", m.session, "transcript_runes", utf8.RuneCountInString(a.text), "sha256_prefix", hex.EncodeToString(h[:])[:8], "commit_reason", a.commitReason)
 	}
 }

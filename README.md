@@ -28,7 +28,7 @@ not identify a build containing this fork's changes.
 
 ### Zoe 用户语音回合完成事件
 
-设置 `VOICE_ZOE_FINAL_TURN=true` 时，WM 上游完成一个有文本的用户语音回合后，网关通过下游事件通道发送严格的顶层 JSON：`{"type":"user_audio_turn.final","turn_id":"<message id>","revision":1,"transcript":"<text>"}`。功能默认关闭，AVAS 不支持。状态只保留当前媒体会话，文本超过 20000 个字符、为空、格式错误或出现消息交错时均不发送；重复 ID 只发送一次，且只在最近添加的用户消息完成时发送。观察器在触发状态帧入队前运行，因此事件可能先于该状态帧抵达客户端。
+设置 `VOICE_ZOE_FINAL_TURN=true` 时，WM 上游完成一个有文本的用户语音回合后，网关通过下游事件通道发送严格的顶层 JSON：`{"type":"user_audio_turn.final","turn_id":"<message id>","revision":1,"transcript":"<text>"}`。功能默认关闭，AVAS 不支持。状态只保留当前媒体会话，文本超过 20000 个字符、为空、格式错误或出现消息交错时均不发送；重复 ID 只发送一次，且只在最近添加的用户消息完成时发送。若有文本的用户消息仍为 `in_progress`，随后收到 assistant 的首个 add，也会将其视为用户回合结束并发送（日志 `commit_reason=assistant_add`）；这是一次 live capture 的证据，AVAS 仍未验证。其他角色的 add、第二个 user add 以及空/超长文本继续 fail-closed。观察器在触发状态帧入队前运行，因此事件可能先于该状态帧抵达客户端。
 
 未验证：累计文本是否完全等于用户实际说出的内容；补丁归属消息依赖上游帧的顺序；AVAS 映射尚未实现。
 
