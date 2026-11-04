@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	fhttp "github.com/bogdanfinn/fhttp"
 	"github.com/bogdanfinn/websocket"
@@ -594,6 +595,9 @@ func (s *Service) UpdateSessionContext(owner, voiceSessionID string, patch Upstr
 	}
 	if item != nil {
 		if text := strings.TrimSpace(patch.Text); text != "" {
+			if utf8.RuneCountInString(text) > 600 {
+				return UpstreamContext{}, &ServiceError{Message: "live context text is too large", StatusCode: 413}
+			}
 			if s.cfg.VoiceUpstreamRoute == "avas" {
 				return UpstreamContext{}, &ServiceError{Message: "live context injection is not supported on avas", StatusCode: 501}
 			}

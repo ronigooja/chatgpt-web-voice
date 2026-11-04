@@ -343,6 +343,14 @@ func TestDownstreamOpeningContextAuthAndStrictJSON(t *testing.T) {
 	}
 }
 
+func TestDownstreamSessionContextAcceptsText(t *testing.T) {
+	handler, secret, _ := newDownstreamTestHandler(t, &downstreamVoiceStub{})
+	resp := performDownstreamRequest(t, handler, http.MethodPost, "/v1/voice/sessions/vs_test/context", secret, map[string]any{"text": "Zoe result"})
+	if resp.Code != http.StatusOK || !strings.Contains(resp.Body.String(), "vs_test") {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+}
+
 func TestDownstreamSessionGenerationOnlyWhenMediaIsRelayed(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
