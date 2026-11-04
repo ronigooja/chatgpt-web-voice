@@ -52,6 +52,7 @@ var allowedShapeValueKeys = map[string]bool{
 	"final": true, "done": true, "complete": true, "completed": true, "o": true, "p": true,
 }
 var safeShapeValue = regexp.MustCompile(`^[A-Za-z0-9_./:\-\[\]]{1,64}$`)
+var safeShapeKey = regexp.MustCompile(`^[A-Za-z0-9_\-]{1,32}$`)
 var uuidShapeValue = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 var hexShapeValue = regexp.MustCompile(`(?i)^[0-9a-f]{24,}$`)
 
@@ -204,7 +205,7 @@ func collectShapePaths(root map[string]any) ([]string, bool) {
 				return
 			}
 			for k, child := range v {
-				walk(child, path+"."+k, depth+1)
+				walk(child, path+"."+shapeKey(k), depth+1)
 				if len(paths) >= maxEventShapePaths {
 					return
 				}
@@ -221,7 +222,7 @@ func collectShapePaths(root map[string]any) ([]string, bool) {
 		}
 	}
 	for key, value := range root {
-		walk(value, key, 1)
+		walk(value, shapeKey(key), 1)
 	}
 	return paths, finalish
 }
@@ -245,10 +246,19 @@ func shapeKind(v any) string {
 	}
 }
 func shapeString(v any) string {
-	if s, ok := v.(string); ok && safeShapeValue.MatchString(s) {
+	if s, ok := v.(string); ok {
+		if !safeShapeValue.MatchString(s) || uuidShapeValue.MatchString(s) || hexShapeValue.MatchString(s) || len(s) > 24 && looksLikeEncoded(s) {
+			return ""
+		}
 		return s
 	}
 	return ""
+}
+func shapeKey(key string) string {
+	if !safeShapeKey.MatchString(key) || uuidShapeValue.MatchString(key) || hexShapeValue.MatchString(key) || len(key) > 24 && looksLikeEncoded(key) {
+		return "<key>"
+	}
+	return key
 }
 func isFinalShapeKey(key string) bool {
 	return key == "end_turn" || key == "is_final" || key == "final" || key == "done" || key == "complete" || key == "completed" || key == "finish_type" || key == "finish_details"

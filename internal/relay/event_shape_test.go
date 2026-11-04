@@ -84,3 +84,36 @@ func TestEventShapeSamplerDisabledByDefaultHasNoOutput(t *testing.T) {
 		t.Fatalf("disabled sampler emitted output: %q", logs.String())
 	}
 }
+
+func TestEventShapeSamplerRedactsIDLikeTypes(t *testing.T) {
+	var logs bytes.Buffer
+	s := newEventShapeSampler(slog.New(slog.NewTextHandler(&logs, nil)), "media-types", "wm", 1)
+	s.observe([]byte(`{"type":"0123456789abcdef0123456789abcdef0123456789","data":{"type":"550e8400-e29b-41d4-a716-446655440000"}}`), "datachannel", "b-to-a")
+	s.close()
+	got := logs.String()
+	if strings.Contains(got, "0123456789abcdef0123456789abcdef0123456789") || strings.Contains(got, "550e8400-e29b-41d4-a716-446655440000") {
+		t.Fatalf("ID-like type disclosed: %s", got)
+	}
+}
+
+func TestEventShapeSamplerSanitizesDynamicKeys(t *testing.T) {
+	var logs bytes.Buffer
+	s := newEventShapeSampler(slog.New(slog.NewTextHandler(&logs, nil)), "media-keys", "wm", 1)
+	s.observe([]byte(`{"type":"data_message","data":{"550e8400-e29b-41d4-a716-446655440000":"uuid secret","hello world用户":"user secret","role":"user"}}`), "datachannel", "b-to-a")
+	s.close()
+	got := logs.String()
+	if strings.Contains(got, "550e8400-e29b-41d4-a716-446655440000") || strings.Contains(got, "hello world用户") || !strings.Contains(got, "role=string=user") {
+		t.Fatalf("dynamic key disclosed or normal key missing: %s", got)
+	}
+}
+
+func TestEventShapeSamplerLogsNormalDeltaAndFinalish(t *testing.T) {
+	var logs bytes.Buffer
+	s := newEventShapeSampler(slog.New(slog.NewTextHandler(&logs, nil)), "media-positive", "wm", 1)
+	s.observe([]byte(`{"type":"data_message","data":{"type":"chat_message_delta","end_turn":true,"is_final":true}}`), "datachannel", "b-to-a")
+	s.close()
+	got := logs.String()
+	if !strings.Contains(got, "outer_type=data_message") || !strings.Contains(got, "inner_type=chat_message_delta") || !strings.Contains(got, "type=string=chat_message_delta") || !strings.Contains(got, "finalish_key_observed=true") {
+		t.Fatalf("normal delta/finalish shape missing: %s", got)
+	}
+}
