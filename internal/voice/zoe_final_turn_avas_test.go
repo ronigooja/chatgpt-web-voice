@@ -112,3 +112,38 @@ func TestAVASFinalTurnRetriesAfterInjectionFailure(t *testing.T) {
 		t.Fatalf("retry not emitted: open=%q events=%d", *open, len(in.events))
 	}
 }
+
+type avasCaptureLogger struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *avasCaptureLogger) Info(msg string, args ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = append(l.lines, fmt.Sprint(append([]any{msg}, args...)...))
+}
+
+func (l *avasCaptureLogger) text() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return strings.Join(l.lines, "\n")
+}
+
+func TestAVASDebugTextLogsOnlyWhenEnabled(t *testing.T) {
+	turn := avasData(map[string]any{"type": "turn.done", "turn": map[string]any{"role": "assistant", "transcript": "ASSISTANT-SAID-THIS"}})
+	for _, enabled := range []bool{false, true} {
+		logger := &avasCaptureLogger{}
+		m := newAVASFinalTurnMapper("s", logger, &avasFakeInjector{}, nil, enabled)
+		m.Observe(turn)
+		m.Observe(delegation("d", "client", "DELEGATED-REQUEST"))
+		got := logger.text()
+		has := strings.Contains(got, "ASSISTANT-SAID-THIS") && strings.Contains(got, "DELEGATED-REQUEST")
+		if has != enabled {
+			t.Fatalf("debug=%v but text logged=%v: %s", enabled, has, got)
+		}
+		if !enabled && strings.Contains(got, "zoe_debug_message") {
+			t.Fatalf("debug line logged with the switch off: %s", got)
+		}
+	}
+}
