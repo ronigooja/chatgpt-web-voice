@@ -18,10 +18,11 @@ type avasFinalTurnMapper struct {
 	logger      interface{ Info(string, ...any) }
 	injector    relay.EventInjector
 	open        func(string)
+	debugText   bool
 }
 
-func newAVASFinalTurnMapper(session string, logger interface{ Info(string, ...any) }, injector relay.EventInjector, open func(string)) *avasFinalTurnMapper {
-	return &avasFinalTurnMapper{session: session, logger: logger, injector: injector, done: map[string]struct{}{}, open: open}
+func newAVASFinalTurnMapper(session string, logger interface{ Info(string, ...any) }, injector relay.EventInjector, open func(string), debugText ...bool) *avasFinalTurnMapper {
+	return &avasFinalTurnMapper{session: session, logger: logger, injector: injector, done: map[string]struct{}{}, open: open, debugText: len(debugText) > 0 && debugText[0]}
 }
 
 func (m *avasFinalTurnMapper) Observe(data []byte) {
@@ -40,7 +41,8 @@ func (m *avasFinalTurnMapper) Observe(data []byte) {
 	var e struct {
 		Type string `json:"type"`
 		Turn struct {
-			Role string `json:"role"`
+			Role       string `json:"role"`
+			Transcript string `json:"transcript"`
 		} `json:"turn"`
 		Item struct {
 			ID, Target string
@@ -49,6 +51,22 @@ func (m *avasFinalTurnMapper) Observe(data []byte) {
 	}
 	if json.Unmarshal(in, &e) != nil {
 		return
+	}
+	if m.debugText && (e.Type == "turn.done" || e.Type == "delegation.created") {
+		preview := e.Turn.Transcript
+		if e.Type == "delegation.created" {
+			var b strings.Builder
+			for _, part := range e.Item.Content {
+				if part.Type == "input_text" {
+					b.WriteString(part.Text)
+				}
+			}
+			preview = b.String()
+		}
+		if utf8.RuneCountInString(preview) > 200 {
+			preview = string([]rune(preview)[:200])
+		}
+		m.logger.Info("zoe_debug_message", "event", e.Type, "role", e.Turn.Role, "target", e.Item.Target, "text", preview)
 	}
 	if e.Type == "turn.created" && e.Turn.Role == "user" {
 		if m.open != nil {

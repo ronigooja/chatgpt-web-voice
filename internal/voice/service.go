@@ -2052,7 +2052,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 							b.openDelegation = id
 						}
 						s.mu.Unlock()
-					})
+					}, s.cfg.ZoeFinalTurnDebugText)
 				}
 			}
 			media.SetEventObserver(func(data []byte) {
