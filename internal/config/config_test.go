@@ -67,6 +67,17 @@ func TestLoadZoeFinalTurnDebugTextDefaultsOffAndLoads(t *testing.T) {
 	}
 }
 
+func TestProbeConfigRejectsOversizedText(t *testing.T) {
+	t.Setenv("VOICE_PROBE_SPEAKABLE_TEXT", "")
+	if cfg := Load(); cfg.ProbeSpeakableText != "" {
+		t.Fatalf("empty probe text=%q", cfg.ProbeSpeakableText)
+	}
+	t.Setenv("VOICE_PROBE_SPEAKABLE_TEXT", strings.Repeat("x", 401))
+	if err := Load().Validate(); err == nil || !strings.Contains(err.Error(), "VOICE_PROBE_SPEAKABLE_TEXT") {
+		t.Fatalf("oversized probe text error=%v", err)
+	}
+}
+
 func TestLoadEventShapeSamplingDefaultsOffAndCaps(t *testing.T) {
 	t.Setenv("VOICE_EVENT_SHAPE_SAMPLING", "")
 	t.Setenv("VOICE_EVENT_SHAPE_SAMPLING_MAX_FRAMES", "")

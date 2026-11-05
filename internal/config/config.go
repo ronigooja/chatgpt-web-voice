@@ -125,6 +125,7 @@ type Config struct {
 	VoiceEventShapeSamplingMaxFrames int
 	ZoeFinalTurn                     bool
 	ZoeFinalTurnDebugText            bool
+	ProbeSpeakableText               string
 }
 
 func env(name, def string) string {
@@ -268,6 +269,7 @@ func Load() Config {
 		VoiceEventShapeSamplingMaxFrames: envInt("VOICE_EVENT_SHAPE_SAMPLING_MAX_FRAMES", 400),
 		ZoeFinalTurn:                     envBool("VOICE_ZOE_FINAL_TURN", false),
 		ZoeFinalTurnDebugText:            envBool("VOICE_ZOE_FINAL_TURN_DEBUG_TEXT", false),
+		ProbeSpeakableText:               strings.TrimSpace(envRaw("VOICE_PROBE_SPEAKABLE_TEXT", "")),
 	}
 }
 
@@ -280,6 +282,9 @@ func normalizeVoiceRoute(raw string) string {
 
 // Validate rejects configurations that would leave protected content exposed.
 func (c Config) Validate() error {
+	if len([]byte(strings.TrimSpace(c.ProbeSpeakableText))) > 400 {
+		return fmt.Errorf("VOICE_PROBE_SPEAKABLE_TEXT must be at most 400 bytes")
+	}
 	switch strings.ToLower(strings.TrimSpace(c.Environment)) {
 	case EnvironmentDevelopment, EnvironmentProduction:
 	default:

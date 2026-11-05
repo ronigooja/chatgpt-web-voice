@@ -147,3 +147,32 @@ func TestAVASDebugTextLogsOnlyWhenEnabled(t *testing.T) {
 		}
 	}
 }
+
+func TestProbeLogsReactionOnlyWhenSwitchSetAndHidesTextWhenDebugOff(t *testing.T) {
+	for _, tc := range []struct {
+		probe, debug bool
+		wantText     bool
+	}{
+		{false, false, false},
+		{true, false, false},
+		{true, true, true},
+	} {
+		logger := &avasCaptureLogger{}
+		m, _, _ := avasMapper()
+		m.logger = logger
+		m.debugText = tc.debug
+		if tc.probe {
+			m.configureProbe("configured exact text", func(string, string) error { return nil })
+		}
+		m.Observe(delegation("probe-log", "client", "request"))
+		m.Observe(avasData(map[string]any{"type": "output_audio.delta"}))
+		m.Observe(avasData(map[string]any{"type": "turn.done", "turn": map[string]string{"role": "assistant", "transcript": "UPSTREAM TEXT"}}))
+		got := logger.text()
+		if strings.Contains(got, "probe_speakable_sent") != tc.probe || strings.Contains(got, "probe_upstream_reaction") != tc.probe {
+			t.Fatalf("probe=%v logs=%s", tc.probe, got)
+		}
+		if strings.Contains(got, "UPSTREAM TEXT") != tc.wantText {
+			t.Fatalf("debug=%v text logging=%v logs=%s", tc.debug, tc.wantText, got)
+		}
+	}
+}

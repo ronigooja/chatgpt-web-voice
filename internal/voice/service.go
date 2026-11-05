@@ -2043,7 +2043,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 				if injector, ok := media.(relay.EventInjector); ok {
 					finalTurn = newWMFinalTurnMapper(voiceSessionID, s.logger, injector, s.cfg.ZoeFinalTurnDebugText)
 				}
-			} else if s.cfg.ZoeFinalTurn && s.cfg.VoiceUpstreamRoute == "avas" {
+			} else if (s.cfg.ZoeFinalTurn || s.cfg.ProbeSpeakableText != "") && s.cfg.VoiceUpstreamRoute == "avas" {
 				if injector, ok := media.(relay.EventInjector); ok {
 					finalTurn = newAVASFinalTurnMapper(voiceSessionID, s.logger, injector, func(id string) {
 						s.mu.Lock()
@@ -2053,6 +2053,19 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 						}
 						s.mu.Unlock()
 					}, s.cfg.ZoeFinalTurnDebugText)
+					if s.cfg.ProbeSpeakableText != "" {
+						mapper := finalTurn.(*avasFinalTurnMapper)
+						mapper.configureProbe(s.cfg.ProbeSpeakableText, func(id, text string) error {
+							s.mu.Lock()
+							b := s.bindings[voiceSessionID]
+							var writer *avasSidebandWriter
+							if b != nil && b.media == boundMedia {
+								writer = b.avasSideband
+							}
+							s.mu.Unlock()
+							return sendAVASContext(writer, id, text)
+						})
+					}
 				}
 			}
 			media.SetEventObserver(func(data []byte) {

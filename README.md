@@ -38,6 +38,11 @@ When AVAS rejects session creation before returning an accepted SDP, `POST /v1/v
 
 ### WM final-turn text diagnosis
 
+`VOICE_PROBE_SPEAKABLE_TEXT` enables a temporary AVAS speakable-text diagnostic probe.
+When set, the configured text is sent to the AVAS `speakable` channel for client delegations.
+The probe records whether AVAS speaks the exact configured sentence and does not emit Zoe final turns.
+Leave this variable unset during normal operation; it is diagnostic only and must not be enabled in production.
+
 Set `VOICE_ZOE_FINAL_TURN_DEBUG_TEXT=true` together with `VOICE_ZOE_FINAL_TURN=true` only while diagnosing final-turn text accumulation. It logs spoken and assistant text to the container log, including diagnostic message and patch details. Keep it off during normal operation and purge the logs after use.
 
 ## 网页效果

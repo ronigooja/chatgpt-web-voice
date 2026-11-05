@@ -63,7 +63,7 @@ type avasRig struct {
 	id       string
 }
 
-func newAVASRig(t *testing.T) *avasRig {
+func newAVASRig(t *testing.T, probe ...string) *avasRig {
 	t.Helper()
 	up := &avasUpstream{ready: make(chan struct{}), release: make(chan struct{})}
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
@@ -103,6 +103,10 @@ func newAVASRig(t *testing.T) *avasRig {
 	if _, err := pool.Create(accounts.Account{AccessToken: jwt, Status: "正常"}); err != nil {
 		t.Fatal(err)
 	}
+	probeText := ""
+	if len(probe) > 0 {
+		probeText = probe[0]
+	}
 	svc := New(config.Config{
 		Environment:        config.EnvironmentDevelopment,
 		SkipSSLVerify:      true,
@@ -114,6 +118,7 @@ func newAVASRig(t *testing.T) *avasRig {
 		SessionTTLSeconds:  180,
 		VoiceUpstreamRoute: "avas",
 		ZoeFinalTurn:       true,
+		ProbeSpeakableText: probeText,
 	}, pool, nil)
 	svc.avasURL = server.URL + "/calls"
 	u, _ := url.Parse(sideband.URL)
@@ -156,6 +161,19 @@ func contentText(t *testing.T, frame map[string]any) string {
 		t.Fatalf("frame content=%v", frame["content"])
 	}
 	return parts[0].(map[string]any)["text"].(string)
+}
+
+func finalTurnCount(m *fakeMedia) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	count := 0
+	for _, raw := range m.injected {
+		var event map[string]any
+		if json.Unmarshal([]byte(raw), &event) == nil && event["type"] == "user_audio_turn.final" {
+			count++
+		}
+	}
+	return count
 }
 
 func TestAVASContextGoesToSidebandNotDataChannel(t *testing.T) {
@@ -389,6 +407,52 @@ func TestAVASContextWriteDoesNotHoldServiceMutex(t *testing.T) {
 	}
 	if len(r.upstream.waitFrames(t, 1)) != 1 {
 		t.Fatal("blocked frame was not delivered")
+	}
+}
+
+func TestProbeSpeakableOffByDefaultKeepsZoeFinalTurnAndSendsNoContext(t *testing.T) {
+	r := newAVASRig(t)
+	r.delegate(t, "probe-off", "original request")
+	if got := r.upstream.received(); len(got) != 0 {
+		t.Fatalf("probe sent context frames: %v", got)
+	}
+	if finalTurnCount(r.media) != 1 {
+		t.Fatal("Zoe final turn was not emitted")
+	}
+}
+
+func TestProbeSpeakableSendsExactTextOnSidebandAndSkipsZoe(t *testing.T) {
+	const want = "Say this exact sentence"
+	r := newAVASRig(t, want)
+	r.upstream.push(t, map[string]any{"type": "delegation.created", "item": map[string]any{"id": "probe-on", "target": "client", "content": []map[string]string{{"type": "input_text", "text": "request"}}}})
+	frame := r.upstream.waitFrames(t, 1)[0]
+	if frame["type"] != "delegation.context.append" || frame["channel"] != "speakable" || frame["delegation_item_id"] != "probe-on" || contentText(t, frame) != want {
+		t.Fatalf("frame=%v", frame)
+	}
+	if finalTurnCount(r.media) != 0 {
+		t.Fatalf("Zoe final turn was emitted: %v", r.media.injected)
+	}
+}
+
+func TestProbeSpeakableIgnoresServerTargetAndBlankDelegation(t *testing.T) {
+	r := newAVASRig(t, "probe")
+	r.upstream.push(t, map[string]any{"type": "delegation.created", "item": map[string]any{"id": "server", "target": "server", "content": []map[string]string{{"type": "input_text", "text": "x"}}}})
+	r.upstream.push(t, map[string]any{"type": "delegation.created", "item": map[string]any{"id": "blank", "target": "client", "content": []map[string]string{{"type": "input_text", "text": "  "}}}})
+	time.Sleep(150 * time.Millisecond)
+	if got := r.upstream.received(); len(got) != 0 {
+		t.Fatalf("ignored delegations sent frames: %v", got)
+	}
+}
+
+func TestProbeSpeakableSendsOncePerDelegationID(t *testing.T) {
+	r := newAVASRig(t, "probe")
+	for i := 0; i < 2; i++ {
+		r.upstream.push(t, map[string]any{"type": "delegation.created", "item": map[string]any{"id": "same", "target": "client", "content": []map[string]string{{"type": "input_text", "text": "x"}}}})
+	}
+	r.upstream.waitFrames(t, 1)
+	time.Sleep(150 * time.Millisecond)
+	if got := r.upstream.received(); len(got) != 1 {
+		t.Fatalf("frames=%v", got)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/relay"
@@ -19,10 +20,20 @@ type avasFinalTurnMapper struct {
 	injector    relay.EventInjector
 	open        func(string)
 	debugText   bool
+	probeText   string
+	probeSend   func(string, string) error
+	probeSeen   map[string]struct{}
+	probeAt     map[string]time.Time
+	probeReact  map[string]int
 }
 
 func newAVASFinalTurnMapper(session string, logger interface{ Info(string, ...any) }, injector relay.EventInjector, open func(string), debugText ...bool) *avasFinalTurnMapper {
-	return &avasFinalTurnMapper{session: session, logger: logger, injector: injector, done: map[string]struct{}{}, open: open, debugText: len(debugText) > 0 && debugText[0]}
+	return &avasFinalTurnMapper{session: session, logger: logger, injector: injector, done: map[string]struct{}{}, open: open, debugText: len(debugText) > 0 && debugText[0], probeSeen: map[string]struct{}{}, probeAt: map[string]time.Time{}, probeReact: map[string]int{}}
+}
+
+func (m *avasFinalTurnMapper) configureProbe(text string, send func(string, string) error) {
+	m.probeText = strings.TrimSpace(text)
+	m.probeSend = send
 }
 
 func (m *avasFinalTurnMapper) Observe(data []byte) {
@@ -68,6 +79,21 @@ func (m *avasFinalTurnMapper) Observe(data []byte) {
 		}
 		m.logger.Info("zoe_debug_message", "event", e.Type, "role", e.Turn.Role, "target", e.Item.Target, "text", preview)
 	}
+	if m.probeSend != nil && (e.Type == "output_audio.delta" || (e.Type == "turn.done" && e.Turn.Role == "assistant")) {
+		m.mu.Lock()
+		for id, sentAt := range m.probeAt {
+			if m.probeReact[id] >= 2 {
+				continue
+			}
+			m.probeReact[id]++
+			args := []any{"delegation_item_id", id, "event", e.Type, "ms_since_probe_sent", time.Since(sentAt).Milliseconds()}
+			if e.Type == "turn.done" && m.debugText {
+				args = append(args, "text", e.Turn.Transcript)
+			}
+			m.logger.Info("probe_upstream_reaction", args...)
+		}
+		m.mu.Unlock()
+	}
 	if e.Type == "turn.created" && e.Turn.Role == "user" {
 		if m.open != nil {
 			m.open("")
@@ -85,6 +111,24 @@ func (m *avasFinalTurnMapper) Observe(data []byte) {
 	}
 	text := strings.TrimSpace(b.String())
 	if text == "" {
+		return
+	}
+	if m.probeSend != nil && m.probeText != "" {
+		createdAt := time.Now()
+		m.mu.Lock()
+		_, seen := m.probeSeen[e.Item.ID]
+		m.mu.Unlock()
+		if seen {
+			return
+		}
+		if err := m.probeSend(e.Item.ID, m.probeText); err != nil {
+			return
+		}
+		m.mu.Lock()
+		m.probeSeen[e.Item.ID] = struct{}{}
+		m.probeAt[e.Item.ID] = time.Now()
+		m.mu.Unlock()
+		m.logger.Info("probe_speakable_sent", "delegation_item_id", e.Item.ID, "ms_since_delegation_created", time.Since(createdAt).Milliseconds(), "text_runes", utf8.RuneCountInString(m.probeText))
 		return
 	}
 	m.mu.Lock()
