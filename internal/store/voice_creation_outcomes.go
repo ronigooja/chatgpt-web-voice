@@ -79,3 +79,7 @@ func (db *DB) MediaOutcome(voiceSessionID string, generation int64) (string, err
 		return "unknown", nil
 	}
 }
+
+// DeleteOldVoiceCreationOutcomes is exposed for startup-cleanup tests and
+// delegates to the same migration cleanup rule used by Open.
+func (db *DB) DeleteOldVoiceCreationOutcomes() error { return db.cleanupVoiceCreationOutcomes() }

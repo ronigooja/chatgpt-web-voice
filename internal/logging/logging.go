@@ -134,10 +134,22 @@ func RequestID(ctx context.Context) string {
 
 func requestID(r *http.Request) string {
 	incoming := strings.TrimSpace(r.Header.Get("X-Request-ID"))
-	if incoming != "" && len(incoming) <= 128 && !strings.ContainsAny(incoming, "\r\n\t") {
+	if validRequestID(incoming) {
 		return incoming
 	}
 	return uuid.NewString()
+}
+
+func validRequestID(value string) bool {
+	if len(value) < 1 || len(value) > 128 {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < 0x21 || value[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 func remoteIP(remoteAddr string) string {

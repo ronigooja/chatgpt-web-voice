@@ -283,6 +283,14 @@ func (s *Service) WithCreationOutcomes(records CreationOutcomeStore) *Service {
 	return s
 }
 
+// WithAVASURL overrides the AVAS endpoint for integration harnesses.
+func (s *Service) WithAVASURL(raw string) *Service {
+	if s != nil {
+		s.avasURL = strings.TrimSpace(raw)
+	}
+	return s
+}
+
 // CreationOutcome returns the derived owner-scoped outcome for a request.
 func (s *Service) CreationOutcome(owner, requestID string) (string, bool) {
 	return s.creationOutcome(owner, requestID)
@@ -1771,6 +1779,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 	var lastDetail any
 	lastStatus := 0
 	resumeRefusedRetried := false
+	allAttemptsCleanRejection := true
 	outcomeDone := false
 	outcomeFinal := "unknown"
 	defer func() {
@@ -1783,6 +1792,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 	for attempt := 1; attempt <= s.cfg.MaxAccountAttempts; attempt++ {
 		token, account, err := s.pickAccountForSession(preferredToken, preferredAccountID, excluded)
 		if err != nil {
+			allAttemptsCleanRejection = false
 			outcomeFinal = "unknown"
 			if preferredToken != "" || preferredAccountID > 0 {
 				s.ReleaseSession(owner, req.VoiceSessionID)
@@ -1804,6 +1814,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 			}
 		}
 		if err != nil {
+			allAttemptsCleanRejection = false
 			if ae, ok := err.(*accounts.Error); ok {
 				return nil, &ServiceError{Message: ae.Message, StatusCode: 503}
 			}
@@ -1857,6 +1868,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 		}
 		health := s.reportOutcome(token, wmStarted, status, contentType, text, retryAfter, err)
 		if err != nil {
+			allAttemptsCleanRejection = false
 			closeMediaOnFailure("upstream_request_failed")
 			s.logger.Error("upstream_realtime_request_failed", "account_id", account.ID, "attempt", attempt, "error", err)
 			return nil, &ServiceError{
@@ -1867,6 +1879,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 		}
 
 		if status == 401 && classifyProbeBody(contentType, text) != "html" {
+			allAttemptsCleanRejection = false
 			closeMediaOnFailure("upstream_unauthorized")
 			lastStatus = status
 			lastError = "account token invalid"
@@ -2127,7 +2140,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 		}, nil
 	}
 
-	if s.cfg.VoiceUpstreamRoute == "avas" && lastStatus != 0 && lastStatus != 401 {
+	if s.cfg.VoiceUpstreamRoute == "avas" && allAttemptsCleanRejection && lastStatus != 0 {
 		outcomeFinal = "never_established"
 		msg := fmt.Sprintf("realtime/wm failed status=%d", lastStatus)
 		if classifyProbeBody("", fmt.Sprint(lastDetail)) == "html" {

@@ -2,7 +2,6 @@ package voice
 
 import (
 	"errors"
-	"time"
 
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/store"
 )
@@ -26,9 +25,7 @@ func (s *Service) creationOutcome(owner, requestID string) (string, bool) {
 		return "unknown", false
 	}
 	if row.Outcome == "pending" {
-		if updated, err := time.Parse(time.RFC3339Nano, row.UpdatedAt); err == nil && time.Since(updated) <= 2*time.Minute {
-			return "unknown", true
-		}
+		// A pending create may still be in flight or may have crashed; neither is provable.
 		return "unknown", true
 	}
 	if row.Outcome != "established" {

@@ -11,8 +11,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dyhhhhhh/chatgpt-web-voice/internal/accounts"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/apikeys"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/auth"
+	"github.com/dyhhhhhh/chatgpt-web-voice/internal/config"
+	"github.com/dyhhhhhh/chatgpt-web-voice/internal/logging"
+	"github.com/dyhhhhhh/chatgpt-web-voice/internal/secretbox"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/store"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/voice"
 )
@@ -25,6 +29,15 @@ type downstreamVoiceStub struct {
 	generation    int64
 	releaseCount  int
 	lastContext   voice.UpstreamContext
+	outcomes      map[string]string
+}
+
+func (s *downstreamVoiceStub) CreationOutcome(owner, requestID string) (string, bool) {
+	if owner != "api_key:1" || s.outcomes == nil {
+		return "unknown", false
+	}
+	outcome, ok := s.outcomes[requestID]
+	return outcome, ok
 }
 
 func (s *downstreamVoiceStub) CreateSession(req voice.CreateSessionRequest) (*voice.SessionResult, error) {
@@ -306,6 +319,229 @@ func TestDownstreamConfigAndSessionIsolation(t *testing.T) {
 	otherResp := performDownstreamRequest(t, handler, http.MethodDelete, "/v1/voice/sessions/vs_test", otherSecret, nil)
 	if otherResp.Code != http.StatusNotFound {
 		t.Fatalf("other-key release status=%d body=%s", otherResp.Code, otherResp.Body.String())
+	}
+}
+
+func TestDownstreamOutcomeEndpointUsesRealAPIKeyAuthAndRequestHeader(t *testing.T) {
+	voiceStub := &downstreamVoiceStub{outcomes: map[string]string{"never": "never_established", "open": "open", "released": "released", "unknown": "unknown"}}
+	handler, secret, otherSecret := newDownstreamTestHandler(t, voiceStub)
+	req := httptest.NewRequest(http.MethodGet, "/v1/voice/requests/never/outcome", nil)
+	req.Header.Set("Authorization", "Bearer "+secret)
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK || !strings.Contains(resp.Body.String(), `"outcome":"never_established"`) {
+		t.Fatalf("never status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	other := httptest.NewRequest(http.MethodGet, "/v1/voice/requests/never/outcome", nil)
+	other.Header.Set("Authorization", "Bearer "+otherSecret)
+	otherResp := httptest.NewRecorder()
+	handler.ServeHTTP(otherResp, other)
+	if otherResp.Code != http.StatusNotFound {
+		t.Fatalf("other owner status=%d body=%s", otherResp.Code, otherResp.Body.String())
+	}
+	missing := performDownstreamRequest(t, handler, http.MethodGet, "/v1/voice/requests/missing/outcome", secret, nil)
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("missing status=%d body=%s", missing.Code, missing.Body.String())
+	}
+}
+
+func TestDownstreamCreateUsesClientRequestIDThroughRealHTTPMux(t *testing.T) {
+	voiceStub := &downstreamVoiceStub{}
+	handler, secret, _ := newDownstreamTestHandler(t, voiceStub)
+	request := httptest.NewRequest(http.MethodPost, "/v1/voice/sessions", strings.NewReader(`{"offer_sdp":"v=0\r\noffer\r\n"}`))
+	request.Header.Set("Authorization", "Bearer "+secret)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Request-ID", "zoe-header-request")
+	response := httptest.NewRecorder()
+	logging.HTTPMiddleware(slog.New(slog.NewTextHandler(io.Discard, nil)), handler).ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if voiceStub.createRequest.RequestID != "zoe-header-request" {
+		t.Fatalf("request id=%q", voiceStub.createRequest.RequestID)
+	}
+}
+
+func TestDownstreamOutcomeEndpointDerivesOpenReleasedAndUnknownFromPersistentMedia(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "voice.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	keys := apikeys.NewStore(db)
+	created, err := keys.Create("real outcome client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateVoiceCreationOutcome("api_key:1", "open-req"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateVoiceCreationOutcome("api_key:1", "open-req", "established", "vs-open", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateVoiceCreationOutcome("api_key:1", "released-req"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateVoiceCreationOutcome("api_key:1", "released-req", "established", "vs-released", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateVoiceCreationOutcome("api_key:1", "unknown-req"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateVoiceCreationOutcome("api_key:1", "unknown-req", "established", "vs-unknown", 1); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []struct{ id, state, evidence string }{{"vs-open", "active", ""}, {"vs-released", "terminated", "ev-1"}, {"vs-unknown", "unknown", ""}} {
+		if _, err := db.Conn().Exec(`INSERT INTO voice_media_sessions (voice_session_id, media_generation, owner, account_id, lease_id, lease_generation, relay_session_id, state, evidence_id, created_at, updated_at) VALUES (?, 1, 'api_key:1', 1, ?, 1, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`, row.id, "lease-"+row.id, "relay-"+row.id, row.state, row.evidence); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service := voice.New(config.Config{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil))).WithCreationOutcomes(db)
+	server := New(Dependencies{Voice: service, APIKeys: keys})
+	mux := http.NewServeMux()
+	server.RegisterDownstream(mux)
+	handler := auth.NewAPIKeyManager(keys, slog.New(slog.NewTextHandler(io.Discard, nil))).Require(mux)
+	for _, tc := range []struct{ request, want string }{{"open-req", "open"}, {"released-req", "released"}, {"unknown-req", "unknown"}} {
+		req := httptest.NewRequest(http.MethodGet, "/v1/voice/requests/"+tc.request+"/outcome", nil)
+		req.Header.Set("Authorization", "Bearer "+created.Secret)
+		resp := httptest.NewRecorder()
+		handler.ServeHTTP(resp, req)
+		if resp.Code != http.StatusOK || !strings.Contains(resp.Body.String(), `"outcome":"`+tc.want+`"`) {
+			t.Fatalf("%s status=%d body=%s", tc.request, resp.Code, resp.Body.String())
+		}
+	}
+}
+
+func TestDownstreamAVASRejectionMapsTo422WithEstablishedFalse(t *testing.T) {
+	voiceStub := &downstreamVoiceStub{createError: &voice.ServiceError{StatusCode: http.StatusBadGateway, CreationRejected: true, UpstreamStatus: 429}}
+	handler, secret, _ := newDownstreamTestHandler(t, voiceStub)
+	request := httptest.NewRequest(http.MethodPost, "/v1/voice/sessions", strings.NewReader(`{"offer_sdp":"v=0\r\noffer\r\n"}`))
+	request.Header.Set("Authorization", "Bearer "+secret)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["error"] != "upstream_rejected" || body["established"] != false || body["upstream_status"] != float64(429) {
+		t.Fatalf("body=%s", response.Body.String())
+	}
+}
+
+func TestRealHTTPMuxAVASUpstreamNon201Returns422NeverEstablished(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "voice.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	pool := accounts.NewPoolFromDB(db)
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i + 3)
+	}
+	box, err := secretbox.New(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.WithBox(box)
+	if _, err := pool.Create(accounts.Account{AccessToken: "synthetic-token", Status: "正常"}); err != nil {
+		t.Fatal(err)
+	}
+	attempts := 0
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusBadGateway)
+		if _, err := io.WriteString(w, "avas rejected"); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	defer upstream.Close()
+	service := voice.New(config.Config{SkipSSLVerify: true, UpstreamTransport: config.TransportGo, MaxAccountAttempts: 1, VoiceUpstreamRoute: "avas"}, pool, slog.New(slog.NewTextHandler(io.Discard, nil))).WithCreationOutcomes(db)
+	service.WithAVASURL(upstream.URL + "/calls")
+	keys := apikeys.NewStore(db)
+	created, err := keys.Create("real avas client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := New(Dependencies{Voice: service, APIKeys: keys})
+	mux := http.NewServeMux()
+	server.RegisterDownstream(mux)
+	handler := logging.HTTPMiddleware(slog.New(slog.NewTextHandler(io.Discard, nil)), auth.NewAPIKeyManager(keys, slog.New(slog.NewTextHandler(io.Discard, nil))).Require(mux))
+	request := httptest.NewRequest(http.MethodPost, "/v1/voice/sessions", strings.NewReader(`{"offer_sdp":"v=0\r\noffer\r\n"}`))
+	request.Header.Set("Authorization", "Bearer "+created.Secret)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Request-ID", "real-avas-rejection")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if attempts != 1 {
+		t.Fatalf("upstream attempts=%d", attempts)
+	}
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"error":"upstream_rejected"`) || !strings.Contains(response.Body.String(), `"established":false`) || !strings.Contains(response.Body.String(), `"upstream_status":502`) {
+		t.Fatalf("body=%s", response.Body.String())
+	}
+	outcome := httptest.NewRecorder()
+	lookup := httptest.NewRequest(http.MethodGet, "/v1/voice/requests/real-avas-rejection/outcome", nil)
+	lookup.Header.Set("Authorization", "Bearer "+created.Secret)
+	handler.ServeHTTP(outcome, lookup)
+	if outcome.Code != http.StatusOK || !strings.Contains(outcome.Body.String(), `"outcome":"never_established"`) {
+		t.Fatalf("outcome status=%d body=%s", outcome.Code, outcome.Body.String())
+	}
+}
+
+func TestOutcomeEndpointSurvivesStoreAndServiceRestartForNeverEstablishedAndReleased(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "voice.db")
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := apikeys.NewStore(db)
+	created, err := keys.Create("restart client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateVoiceCreationOutcome("api_key:1", "restart-never"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateVoiceCreationOutcome("api_key:1", "restart-never", "never_established", "", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateVoiceCreationOutcome("api_key:1", "restart-released"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateVoiceCreationOutcome("api_key:1", "restart-released", "established", "vs-restart", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Conn().Exec(`INSERT INTO voice_media_sessions (voice_session_id, media_generation, owner, account_id, lease_id, lease_generation, relay_session_id, state, evidence_id, created_at, updated_at) VALUES ('vs-restart', 1, 'api_key:1', 1, 'lease-restart', 1, 'relay-restart', 'terminated', 'ev-restart', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	service := voice.New(config.Config{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil))).WithCreationOutcomes(db)
+	server := New(Dependencies{Voice: service, APIKeys: apikeys.NewStore(db)})
+	mux := http.NewServeMux()
+	server.RegisterDownstream(mux)
+	handler := auth.NewAPIKeyManager(apikeys.NewStore(db), slog.New(slog.NewTextHandler(io.Discard, nil))).Require(mux)
+	for _, tc := range []struct{ id, want string }{{"restart-never", "never_established"}, {"restart-released", "released"}} {
+		req := httptest.NewRequest(http.MethodGet, "/v1/voice/requests/"+tc.id+"/outcome", nil)
+		req.Header.Set("Authorization", "Bearer "+created.Secret)
+		resp := httptest.NewRecorder()
+		handler.ServeHTTP(resp, req)
+		if resp.Code != http.StatusOK || !strings.Contains(resp.Body.String(), `"outcome":"`+tc.want+`"`) {
+			t.Fatalf("%s status=%d body=%s", tc.id, resp.Code, resp.Body.String())
+		}
 	}
 }
 

@@ -175,11 +175,11 @@ func (db *DB) migrate() error {
 }
 
 func (db *DB) cleanupVoiceCreationOutcomes() error {
-	if _, err := db.conn.Exec(`UPDATE voice_creation_outcomes SET outcome = 'unknown', updated_at = CURRENT_TIMESTAMP WHERE outcome = 'pending'`); err != nil {
-		return fmt.Errorf("mark pending voice creation outcomes unknown: %w", err)
-	}
 	if _, err := db.conn.Exec(`DELETE FROM voice_creation_outcomes WHERE updated_at < datetime('now', '-7 days')`); err != nil {
 		return fmt.Errorf("cleanup voice creation outcomes: %w", err)
+	}
+	if _, err := db.conn.Exec(`UPDATE voice_creation_outcomes SET outcome = 'unknown', updated_at = CURRENT_TIMESTAMP WHERE outcome = 'pending'`); err != nil {
+		return fmt.Errorf("mark pending voice creation outcomes unknown: %w", err)
 	}
 	return nil
 }
