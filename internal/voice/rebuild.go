@@ -29,6 +29,7 @@ type callState struct {
 	stop                  chan struct{}
 	stopOnce              sync.Once
 	transcript            *transcriptTail
+	forward               *transcriptForward
 	conversation          string
 	conversationReason    string
 	conversationConfirmed *bool
@@ -36,7 +37,7 @@ type callState struct {
 }
 
 func (c *callState) halt() {
-	c.stopOnce.Do(func() { close(c.stop) })
+	c.stopOnce.Do(func() { close(c.stop); c.forward.Close() })
 }
 
 // RebuildOutcome says what a rebuild attempt did.

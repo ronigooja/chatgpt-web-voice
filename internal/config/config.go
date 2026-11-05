@@ -86,6 +86,8 @@ type Config struct {
 	ClientVersion          string
 	ClientBuildNumber      string
 	VoiceUpstreamRoute     string
+	ZoeURL                 string
+	ZoeTokenFile           string
 	ListenAddr             string
 	TLS                    bool
 	TLSCertFile            string
@@ -267,6 +269,8 @@ func Load() Config {
 		VoiceEventShapeSampling:          envBool("VOICE_EVENT_SHAPE_SAMPLING", false),
 		VoiceEventShapeSamplingMaxFrames: envInt("VOICE_EVENT_SHAPE_SAMPLING_MAX_FRAMES", 400),
 		ZoeFinalTurn:                     envBool("VOICE_ZOE_FINAL_TURN", false),
+		ZoeURL:                           env("VOICE_ZOE_URL", ""),
+		ZoeTokenFile:                     env("VOICE_ZOE_TOKEN_FILE", ""),
 		ZoeFinalTurnDebugText:            envBool("VOICE_ZOE_FINAL_TURN_DEBUG_TEXT", false),
 	}
 }
@@ -280,6 +284,9 @@ func normalizeVoiceRoute(raw string) string {
 
 // Validate rejects configurations that would leave protected content exposed.
 func (c Config) Validate() error {
+	if _, err := c.ZoeTranscriptToken(); err != nil {
+		return err
+	}
 	switch strings.ToLower(strings.TrimSpace(c.Environment)) {
 	case EnvironmentDevelopment, EnvironmentProduction:
 	default:

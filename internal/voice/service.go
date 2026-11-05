@@ -199,6 +199,7 @@ type Service struct {
 	pool        AccountRepository
 	records     CallSessionStore
 	logger      *slog.Logger
+	zoeToken    string
 
 	// realtimeURL overrides the voice endpoint in tests.
 	realtimeURL string
@@ -227,7 +228,12 @@ func New(cfg config.Config, pool AccountRepository, logger *slog.Logger) *Servic
 	if logger == nil {
 		logger = slog.Default()
 	}
+	zoeToken, err := cfg.ZoeTranscriptToken()
+	if err != nil {
+		logger.Error("zoe_transcript_config_invalid", "error", err)
+	}
 	return &Service{
+		zoeToken:              zoeToken,
 		cfg:                   cfg,
 		httpOptions:           httpclient.FromConfig(cfg),
 		pool:                  pool,
@@ -2018,6 +2024,14 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 			}
 		}
 		voiceSessionID := s.bindVoiceSessionMedia(owner, targetSessionID, token, account, upstreamForWM, media, mediaID, call)
+		if call != nil {
+			call.forward = newTranscriptForward(s.cfg, s.zoeToken, voiceSessionID, mediaID.MediaGeneration, s.logger)
+			if call.forward != nil {
+				go call.forward.run()
+			} else if s.zoeToken != "" {
+				s.logger.Warn("zoe_transcript_unavailable", "reason", "missing_media_generation")
+			}
+		}
 		markOutcome("established", voiceSessionID, mediaID.MediaGeneration)
 		outcomeDone = true
 		if avasSideband != nil {
@@ -2056,6 +2070,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 				}
 			}
 			media.SetEventObserver(func(data []byte) {
+				boundCall.forward.Observe(data)
 				if finalTurn != nil {
 					finalTurn.Observe(data)
 				}
