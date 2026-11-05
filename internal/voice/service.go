@@ -1361,7 +1361,9 @@ func (s *Service) startAVASSideband(ctx context.Context, media relay.Session, ca
 	return writer, nil
 }
 
-func sendAVASContext(sender any, delegation, text string) error {
+type avasFrameSender interface{ send([]byte) error }
+
+func sendAVASContext(sender avasFrameSender, delegation, text string) error {
 	if !utf8.ValidString(text) {
 		return errors.New("context text must be valid UTF-8")
 	}
@@ -1370,15 +1372,6 @@ func sendAVASContext(sender any, delegation, text string) error {
 	}
 	if strings.TrimSpace(text) == "" {
 		return nil
-	}
-	write := func(raw []byte) error {
-		if w, ok := sender.(*avasSidebandWriter); ok {
-			return w.send(raw)
-		}
-		if injector, ok := sender.(relay.UpstreamEventInjector); ok { // legacy unit-test seam
-			return injector.SendUpstreamEvent(raw)
-		}
-		return errors.New("avas sideband writer unavailable")
 	}
 	for len(text) > 0 {
 		part := text
@@ -1400,7 +1393,7 @@ func sendAVASContext(sender any, delegation, text string) error {
 		if len(part) == 0 {
 			return errors.New("unable to split UTF-8 context")
 		}
-		if err := write(raw); err != nil {
+		if err := sender.send(raw); err != nil {
 			return err
 		}
 	}

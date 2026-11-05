@@ -30,14 +30,19 @@ type fakeRelay struct {
 }
 
 type testCallSessionStore struct {
+	mu   sync.Mutex
 	rows map[string]callsessions.Session
 }
 
 func (s *testCallSessionStore) Upsert(v callsessions.Session) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.rows[v.VoiceSessionID] = v
 	return nil
 }
 func (s *testCallSessionStore) UpdateUpstream(_, id string, _ int64, c, p, u string) (callsessions.Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	v := s.rows[id]
 	v.UpstreamConversationID = c
 	v.UpstreamParentMessageID = p
@@ -46,6 +51,8 @@ func (s *testCallSessionStore) UpdateUpstream(_, id string, _ int64, c, p, u str
 	return v, nil
 }
 func (s *testCallSessionStore) UpdateMetrics(_, id, conversation, reason string, confirmed *bool, chars int) (callsessions.Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	v := s.rows[id]
 	v.Conversation = conversation
 	v.ConversationReason = reason
@@ -55,6 +62,8 @@ func (s *testCallSessionStore) UpdateMetrics(_, id, conversation, reason string,
 	return v, nil
 }
 func (s *testCallSessionStore) UpdateOpeningContext(_, id, kind string, version, items, chars int, applied string) (callsessions.Session, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	v := s.rows[id]
 	if version <= v.OpeningContextVersion {
 		return v, false, nil
@@ -70,6 +79,8 @@ func (s *testCallSessionStore) UpdateOpeningContext(_, id, kind string, version,
 }
 func (s *testCallSessionStore) MarkReleased(_, _ string) error { return nil }
 func (s *testCallSessionStore) Get(_, id string) (callsessions.Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.rows[id], nil
 }
 
@@ -118,6 +129,7 @@ type fakeMedia struct {
 	swapAnswers    []string
 	pendingTexts   []string
 	upstreamEvents []string
+	injected       []string
 	committed      int
 	aborted        []string
 	beginErr       error
@@ -536,6 +548,19 @@ func (m *fakeMedia) SetEventObserver(f func([]byte)) {
 }
 
 func (m *fakeMedia) SetEventShapeMetadata(string, string) {}
+
+// InjectEvent mirrors the real session: sideband events reach the observer.
+// Events the gateway itself injects downstream are recorded separately.
+func (m *fakeMedia) InjectEvent(data []byte) error {
+	m.mu.Lock()
+	f := m.observer
+	m.injected = append(m.injected, string(data))
+	m.mu.Unlock()
+	if f != nil {
+		f(append([]byte(nil), data...))
+	}
+	return nil
+}
 
 func (m *fakeMedia) emit(data string) {
 	m.mu.Lock()

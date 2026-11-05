@@ -3,7 +3,6 @@ package voice
 import (
 	"encoding/json"
 	"errors"
-	"github.com/dyhhhhhh/chatgpt-web-voice/internal/relay"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -15,7 +14,7 @@ type contextSender struct {
 	callback func()
 }
 
-func (s *contextSender) SendUpstreamEvent(b []byte) error {
+func (s *contextSender) send(b []byte) error {
 	if s.callback != nil {
 		s.callback()
 	}
@@ -95,7 +94,6 @@ func TestAVASContextChunkBoundaries(t *testing.T) {
 func TestAVASContextSenderDoesNotNeedServiceMutex(t *testing.T) {
 	var called bool
 	s := &contextSender{callback: func() { called = true }}
-	var _ relay.UpstreamEventInjector = s
 	if err := sendAVASContext(s, "", "x"); err != nil {
 		t.Fatal(err)
 	}
