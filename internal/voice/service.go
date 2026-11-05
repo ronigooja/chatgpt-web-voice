@@ -130,7 +130,63 @@ type sessionBinding struct {
 	// call holds in-memory per-call data for rebuilds; nil for client-direct media.
 	call           *callState
 	avasCancel     context.CancelFunc
+	avasSideband   *avasSidebandWriter
 	openDelegation string
+}
+
+const avasContextMaxBytes = 8000
+
+type avasSidebandWriter struct {
+	conn    *websocket.Conn
+	mu      sync.Mutex
+	closed  bool
+	onClose func()
+}
+
+func (w *avasSidebandWriter) setOnClose(fn func()) {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	if w.closed {
+		w.mu.Unlock()
+		fn()
+		return
+	}
+	w.onClose = fn
+	w.mu.Unlock()
+}
+
+func (w *avasSidebandWriter) send(data []byte) error {
+	if w == nil {
+		return errors.New("avas sideband writer unavailable")
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return errors.New("avas sideband closed")
+	}
+	if err := w.conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		return err
+	}
+	return w.conn.WriteMessage(websocket.TextMessage, data)
+}
+
+func (w *avasSidebandWriter) close() {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	var onClose func()
+	if !w.closed {
+		w.closed = true
+		_ = w.conn.Close()
+		onClose = w.onClose
+	}
+	w.mu.Unlock()
+	if onClose != nil {
+		onClose()
+	}
 }
 
 // Service is the ChatGPT web voice gateway.
@@ -439,11 +495,21 @@ func (s *Service) onMediaClosed(owner, sessionID string, media relay.Session, me
 	item, ok := s.bindings[sessionID]
 	current := ok && item.Owner == owner && item.media == media
 	var call *callState
+	var sideband *avasSidebandWriter
+	var cancel context.CancelFunc
 	if current {
 		call = item.call
+		sideband, cancel = item.avasSideband, item.avasCancel
+		item.openDelegation = ""
 		delete(s.bindings, sessionID)
 	}
 	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if sideband != nil {
+		sideband.close()
+	}
 	if call != nil {
 		call.halt()
 	}
@@ -586,6 +652,27 @@ func (s *Service) UpdateSessionContext(owner, voiceSessionID string, patch Upstr
 	if sessionID == "" {
 		return UpstreamContext{}, &ServiceError{Message: "voice session id is required", StatusCode: 400}
 	}
+	if !utf8.ValidString(patch.Text) {
+		return UpstreamContext{}, &ServiceError{Message: "context text must be valid UTF-8", StatusCode: 400}
+	}
+	if len([]byte(patch.Text)) > avasContextMaxBytes {
+		return UpstreamContext{}, &ServiceError{Message: "context text is too large", StatusCode: 413}
+	}
+	if strings.TrimSpace(patch.Text) == "" && patch.Text != "" {
+		s.mu.Lock()
+		item := s.bindings[sessionID]
+		if item != nil && item.Owner != owner {
+			s.mu.Unlock()
+			return UpstreamContext{}, &ServiceError{Message: "voice session does not belong to caller", StatusCode: 403}
+		}
+		if item != nil {
+			out := item.upstreamContext()
+			s.mu.Unlock()
+			return out, nil
+		}
+		s.mu.Unlock()
+		return UpstreamContext{}, &ServiceError{Message: "voice session not found", StatusCode: 404}
+	}
 	now := time.Now()
 	s.mu.Lock()
 	s.cleanupBindingsLocked(now)
@@ -595,29 +682,34 @@ func (s *Service) UpdateSessionContext(owner, voiceSessionID string, patch Upstr
 		return UpstreamContext{}, &ServiceError{Message: "voice session does not belong to caller", StatusCode: 403}
 	}
 	if item != nil {
-		var avasMedia relay.UpstreamEventInjector
+		var avasWriter *avasSidebandWriter
 		var avasDelegation string
 		if s.cfg.VoiceUpstreamRoute == "avas" && strings.TrimSpace(patch.Text) != "" {
-			avasMedia, _ = item.media.(relay.UpstreamEventInjector)
+			avasWriter = item.avasSideband
 			avasDelegation = item.openDelegation
 		}
 		merged := mergeUpstreamContext(item.upstreamContext(), patch)
-		item.ConversationID = merged.ConversationID
-		item.ParentMessageID = merged.ParentMessageID
-		if strings.TrimSpace(merged.UpstreamVoiceSessionID) != "" {
-			item.UpstreamVoiceSessionID = merged.UpstreamVoiceSessionID
-		}
-		item.UpdatedAt = now
 		out := item.upstreamContext()
 		accountID := item.AccountID
 		s.mu.Unlock()
-		if avasMedia != nil {
-			if err := sendAVASContext(avasMedia, avasDelegation, patch.Text); err != nil {
+		if avasWriter != nil {
+			if err := sendAVASContext(avasWriter, avasDelegation, patch.Text); err != nil {
 				return UpstreamContext{}, &ServiceError{Message: "context delivery failed", StatusCode: 502}
 			}
 		} else if strings.TrimSpace(patch.Text) != "" && s.cfg.VoiceUpstreamRoute == "avas" {
 			return UpstreamContext{}, &ServiceError{Message: "context delivery failed", StatusCode: 502}
 		}
+		s.mu.Lock()
+		if current := s.bindings[sessionID]; current == item {
+			current.ConversationID = merged.ConversationID
+			current.ParentMessageID = merged.ParentMessageID
+			if strings.TrimSpace(merged.UpstreamVoiceSessionID) != "" {
+				current.UpstreamVoiceSessionID = merged.UpstreamVoiceSessionID
+			}
+			current.UpdatedAt = now
+			out = current.upstreamContext()
+		}
+		s.mu.Unlock()
 		if s.records != nil {
 			if _, err := s.records.UpdateUpstream(owner, sessionID, accountID, out.ConversationID, out.ParentMessageID, out.UpstreamVoiceSessionID); err != nil {
 				s.logger.Warn("call_session_upstream_persist_failed", "voice_session_id", sessionID, "error", err)
@@ -1224,13 +1316,13 @@ func avasCallID(location string) string {
 	return strings.TrimSpace(part)
 }
 
-func (s *Service) startAVASSideband(ctx context.Context, media relay.Session, callID, token, proxy string) error {
+func (s *Service) startAVASSideband(ctx context.Context, media relay.Session, callID, token, proxy string) (*avasSidebandWriter, error) {
 	injector, ok := media.(relay.EventInjector)
 	if !ok {
-		return errors.New("avas sideband requires gateway media relay")
+		return nil, errors.New("avas sideband requires gateway media relay")
 	}
 	if callID == "" {
-		return errors.New("avas response omitted call id")
+		return nil, errors.New("avas response omitted call id")
 	}
 	h := fhttp.Header{}
 	h.Set("Authorization", "Bearer "+token)
@@ -1244,10 +1336,15 @@ func (s *Service) startAVASSideband(ctx context.Context, media relay.Session, ca
 	endpoint := firstNonEmpty(s.avasSidebandURL, "wss://api.openai.com/v1/live/") + callID
 	conn, _, err := dialer.Dial(endpoint, h)
 	if err != nil {
-		return fmt.Errorf("avas sideband handshake: %w", err)
+		return nil, fmt.Errorf("avas sideband handshake: %w", err)
 	}
+	writer := &avasSidebandWriter{conn: conn}
 	go func() {
-		defer conn.Close()
+		<-ctx.Done()
+		writer.close()
+	}()
+	go func() {
+		defer writer.close()
 		for {
 			select {
 			case <-ctx.Done():
@@ -1261,13 +1358,27 @@ func (s *Service) startAVASSideband(ctx context.Context, media relay.Session, ca
 			_ = injector.InjectEvent(normalizeAVASEvent(data))
 		}
 	}()
-	return nil
+	return writer, nil
 }
 
-func sendAVASContext(injector relay.UpstreamEventInjector, delegation, text string) error {
-	text = strings.TrimSpace(text)
-	if text == "" {
+func sendAVASContext(sender any, delegation, text string) error {
+	if !utf8.ValidString(text) {
+		return errors.New("context text must be valid UTF-8")
+	}
+	if len([]byte(text)) > avasContextMaxBytes {
+		return errors.New("context text is too large")
+	}
+	if strings.TrimSpace(text) == "" {
 		return nil
+	}
+	write := func(raw []byte) error {
+		if w, ok := sender.(*avasSidebandWriter); ok {
+			return w.send(raw)
+		}
+		if injector, ok := sender.(relay.UpstreamEventInjector); ok { // legacy unit-test seam
+			return injector.SendUpstreamEvent(raw)
+		}
+		return errors.New("avas sideband writer unavailable")
 	}
 	for len(text) > 0 {
 		part := text
@@ -1286,7 +1397,10 @@ func sendAVASContext(injector relay.UpstreamEventInjector, delegation, text stri
 			payload["delegation_item_id"] = delegation
 		}
 		raw, _ := json.Marshal(payload)
-		if err := injector.SendUpstreamEvent(raw); err != nil {
+		if len(part) == 0 {
+			return errors.New("unable to split UTF-8 context")
+		}
+		if err := write(raw); err != nil {
 			return err
 		}
 	}
@@ -1782,9 +1896,21 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 				Detail:     truncate(text, 500),
 			}
 		}
+		var avasSideband *avasSidebandWriter
+		var avasCancel context.CancelFunc
 		if s.cfg.VoiceUpstreamRoute == "avas" && media != nil {
 			callID := avasCallID(upstreamLocation)
-			if err := s.startAVASSideband(context.Background(), media, callID, token, explicitProxy); err != nil {
+			var err error
+			func() {
+				var sidebandCtx context.Context
+				sidebandCtx, avasCancel = context.WithCancel(context.Background())
+				avasSideband, err = s.startAVASSideband(sidebandCtx, media, callID, token, explicitProxy)
+				if err != nil {
+					avasCancel()
+					avasCancel = nil
+				}
+			}()
+			if err != nil {
 				closeMediaOnFailure("sideband_failed")
 				return nil, &ServiceError{Message: "codex realtime sideband failed", StatusCode: 502, Detail: truncate(err.Error(), 300)}
 			}
@@ -1841,6 +1967,21 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 			}
 		}
 		voiceSessionID := s.bindVoiceSessionMedia(owner, targetSessionID, token, account, upstreamForWM, media, mediaID, call)
+		if avasSideband != nil {
+			s.mu.Lock()
+			if b := s.bindings[voiceSessionID]; b != nil && b.media == media {
+				b.avasSideband = avasSideband
+				b.avasCancel = avasCancel
+				avasSideband.setOnClose(func() {
+					s.mu.Lock()
+					if current := s.bindings[voiceSessionID]; current != nil && current.media == media && current.avasSideband == avasSideband {
+						current.openDelegation = ""
+					}
+					s.mu.Unlock()
+				})
+			}
+			s.mu.Unlock()
+		}
 		if media != nil {
 			media.SetEventShapeMetadata(voiceSessionID, s.cfg.VoiceUpstreamRoute)
 			boundMedia, boundCall := media, call
@@ -1853,7 +1994,8 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 				if injector, ok := media.(relay.EventInjector); ok {
 					finalTurn = newAVASFinalTurnMapper(voiceSessionID, s.logger, injector, func(id string) {
 						s.mu.Lock()
-						if b := s.bindings[voiceSessionID]; b != nil {
+						b := s.bindings[voiceSessionID]
+						if b != nil && b.media == boundMedia {
 							b.openDelegation = id
 						}
 						s.mu.Unlock()

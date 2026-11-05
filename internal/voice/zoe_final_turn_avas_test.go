@@ -14,6 +14,12 @@ type avasFakeInjector struct {
 	err    error
 }
 
+func (f *avasFakeInjector) setError(err error) {
+	f.mu.Lock()
+	f.err = err
+	f.mu.Unlock()
+}
+
 func (f *avasFakeInjector) InjectEvent(b []byte) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -90,5 +96,19 @@ func TestAVASFinalTurnClearsOnNewUserTurnAndReplacesOnNewDelegation(t *testing.T
 	m.Observe(delegation("d2", "client", "two"))
 	if *open != "d2" {
 		t.Fatalf("open=%q", *open)
+	}
+}
+
+func TestAVASFinalTurnRetriesAfterInjectionFailure(t *testing.T) {
+	m, in, open := avasMapper()
+	in.setError(fmt.Errorf("temporary"))
+	m.Observe(delegation("retry", "client", "one"))
+	if *open != "" || len(in.events) != 0 {
+		t.Fatalf("failed injection changed state: open=%q events=%d", *open, len(in.events))
+	}
+	in.setError(nil)
+	m.Observe(delegation("retry", "client", "one"))
+	if *open != "retry" || len(in.events) != 1 {
+		t.Fatalf("retry not emitted: open=%q events=%d", *open, len(in.events))
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/relay"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 type contextSender struct {
@@ -68,6 +69,27 @@ func TestAVASContextChunksMultibyteAndPropagatesFailure(t *testing.T) {
 	failed := &contextSender{err: errors.New("write")}
 	if err := sendAVASContext(failed, "d", "x"); err == nil || len(failed.events) != 0 {
 		t.Fatal("failure not propagated")
+	}
+}
+
+func TestAVASContextChunkBoundaries(t *testing.T) {
+	for _, text := range []string{strings.Repeat("a", 499), strings.Repeat("a", 500), strings.Repeat("a", 501), strings.Repeat("a", 499) + "界"} {
+		s := &contextSender{}
+		if err := sendAVASContext(s, "d", text); err != nil {
+			t.Fatal(err)
+		}
+		var got strings.Builder
+		for _, raw := range s.events {
+			v := contextPayload(t, raw)
+			part := v["content"].([]any)[0].(map[string]any)["text"].(string)
+			if len([]byte(part)) > 500 || !utf8.ValidString(part) {
+				t.Fatalf("invalid part: %q", part)
+			}
+			got.WriteString(part)
+		}
+		if got.String() != text {
+			t.Fatalf("got %q, want %q", got.String(), text)
+		}
 	}
 }
 func TestAVASContextSenderDoesNotNeedServiceMutex(t *testing.T) {

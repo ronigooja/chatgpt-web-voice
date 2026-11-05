@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/auth"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/logging"
@@ -138,6 +139,14 @@ func (s *Server) downstreamSessionContext(w http.ResponseWriter, r *http.Request
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&body); err != nil {
 		writeDownstreamError(w, http.StatusBadRequest, "invalid_request", "invalid JSON body")
+		return
+	}
+	if !utf8.ValidString(body.Text) {
+		writeDownstreamError(w, http.StatusBadRequest, "invalid_request", "text must be valid UTF-8")
+		return
+	}
+	if len([]byte(body.Text)) > 8000 {
+		writeDownstreamError(w, http.StatusRequestEntityTooLarge, "invalid_request", "text is too large")
 		return
 	}
 	updated, err := s.voice.UpdateSessionContext(owner, sessionID, voice.UpstreamContext{

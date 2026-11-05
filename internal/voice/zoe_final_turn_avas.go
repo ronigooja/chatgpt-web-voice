@@ -70,20 +70,26 @@ func (m *avasFinalTurnMapper) Observe(data []byte) {
 		return
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if utf8.RuneCountInString(text) > zoeFinalTurnMax {
+		m.mu.Unlock()
 		m.logger.Info("zoe_final_turn_dropped", "voice_session_id", m.session, "reason", "oversized")
 		return
 	}
 	if len(e.Item.ID) < 1 || len(e.Item.ID) > 256 {
+		m.mu.Unlock()
 		return
 	}
 	if _, ok := m.done[e.Item.ID]; ok {
+		m.mu.Unlock()
 		m.logger.Info("zoe_final_turn_dropped", "voice_session_id", m.session, "reason", "duplicate")
 		return
 	}
-	if m.open != nil {
-		m.open(e.Item.ID)
+	event, _ := json.Marshal(map[string]any{"type": "user_audio_turn.final", "turn_id": e.Item.ID, "revision": 1, "transcript": text})
+	// Keep the mapper lock through injection so a duplicate cannot race ahead
+	// before the ID is recorded. The open callback remains outside this lock.
+	if err := m.injector.InjectEvent(event); err != nil {
+		m.mu.Unlock()
+		return
 	}
 	if m.count < len(m.ring) {
 		m.ring[m.count] = e.Item.ID
@@ -94,8 +100,9 @@ func (m *avasFinalTurnMapper) Observe(data []byte) {
 		m.next = (m.next + 1) % len(m.ring)
 	}
 	m.done[e.Item.ID] = struct{}{}
-	event, _ := json.Marshal(map[string]any{"type": "user_audio_turn.final", "turn_id": e.Item.ID, "revision": 1, "transcript": text})
-	if m.injector.InjectEvent(event) == nil {
-		m.logger.Info("zoe_final_turn_emitted", "voice_session_id", m.session, "transcript_runes", utf8.RuneCountInString(text), "commit_reason", "delegation_created")
+	m.mu.Unlock()
+	if m.open != nil {
+		m.open(e.Item.ID)
 	}
+	m.logger.Info("zoe_final_turn_emitted", "voice_session_id", m.session, "transcript_runes", utf8.RuneCountInString(text), "commit_reason", "delegation_created")
 }

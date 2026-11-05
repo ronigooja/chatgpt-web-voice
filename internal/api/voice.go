@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/auth"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/voice"
@@ -37,6 +38,7 @@ type sessionContextRequest struct {
 	UpstreamConversationID  string `json:"upstream_conversation_id"`
 	UpstreamParentMessageID string `json:"upstream_parent_message_id"`
 	UpstreamVoiceSessionID  string `json:"upstream_voice_session_id"`
+	Text                    string `json:"text"`
 }
 
 func (s *Server) session(w http.ResponseWriter, r *http.Request) {
@@ -92,10 +94,19 @@ func (s *Server) sessionContext(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if !utf8.ValidString(body.Text) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": map[string]any{"error": "text must be valid UTF-8"}})
+		return
+	}
+	if len([]byte(body.Text)) > 8000 {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"detail": map[string]any{"error": "text is too large"}})
+		return
+	}
 	updated, err := s.voice.UpdateSessionContext(adminVoiceOwner(r), body.VoiceSessionID, voice.UpstreamContext{
 		ConversationID:         body.UpstreamConversationID,
 		ParentMessageID:        body.UpstreamParentMessageID,
 		UpstreamVoiceSessionID: body.UpstreamVoiceSessionID,
+		Text:                   body.Text,
 	})
 	if err != nil {
 		writeServiceError(w, err)
