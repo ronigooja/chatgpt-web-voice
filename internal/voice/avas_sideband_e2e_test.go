@@ -67,6 +67,23 @@ type avasRig struct {
 	id       string
 }
 
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
+
 type avasRigOptions struct {
 	probeSpeakable   string
 	probeInstruction string
@@ -473,7 +490,7 @@ func TestProbeInstructionSendsSessionContextOnceAfterSidebandUp(t *testing.T) {
 }
 
 func TestProbeInstructionSendFailureLogsAndDoesNotFailCall(t *testing.T) {
-	var logs bytes.Buffer
+	var logs lockedBuffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
 	r := newAVASRigWithOptions(t, avasRigOptions{probeInstruction: "send this", closeSideband: true, logger: logger})
 	if r.id == "" {
@@ -486,7 +503,7 @@ func TestProbeInstructionSendFailureLogsAndDoesNotFailCall(t *testing.T) {
 
 func TestProbeInstructionLogsHiddenWhenDebugTextOff(t *testing.T) {
 	for _, debug := range []bool{false, true} {
-		var logs bytes.Buffer
+		var logs lockedBuffer
 		r := newAVASRigWithOptions(t, avasRigOptions{probeInstruction: "instruction", debugText: debug, logger: slog.New(slog.NewTextHandler(&logs, nil))})
 		r.upstream.push(t, map[string]any{"type": "turn.done", "turn": map[string]any{"role": "assistant", "transcript": "assistant secret"}})
 		r.upstream.push(t, map[string]any{"type": "delegation.created", "item": map[string]any{"id": "d", "target": "server", "content": []map[string]string{{"type": "input_text", "text": "delegation secret"}}}})
