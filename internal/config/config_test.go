@@ -78,6 +78,13 @@ func TestProbeConfigRejectsOversizedText(t *testing.T) {
 	}
 }
 
+func TestProbeInstructionConfigRejectsOversizedText(t *testing.T) {
+	t.Setenv("VOICE_PROBE_INSTRUCTION_TEXT", strings.Repeat("x", 1501))
+	if err := Load().Validate(); err == nil || !strings.Contains(err.Error(), "VOICE_PROBE_INSTRUCTION_TEXT") {
+		t.Fatalf("oversized instruction error=%v", err)
+	}
+}
+
 func TestLoadEventShapeSamplingDefaultsOffAndCaps(t *testing.T) {
 	t.Setenv("VOICE_EVENT_SHAPE_SAMPLING", "")
 	t.Setenv("VOICE_EVENT_SHAPE_SAMPLING_MAX_FRAMES", "")

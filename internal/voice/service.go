@@ -1949,6 +1949,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 		outcomeFinal = "unknown"
 		var avasSideband *avasSidebandWriter
 		var avasCancel context.CancelFunc
+		instructionSent := false
 		if s.cfg.VoiceUpstreamRoute == "avas" && media != nil {
 			callID := avasCallID(upstreamLocation)
 			var err error
@@ -1964,6 +1965,15 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 			if err != nil {
 				closeMediaOnFailure("sideband_failed")
 				return nil, &ServiceError{Message: "codex realtime sideband failed", StatusCode: 502, Detail: truncate(err.Error(), 300)}
+			}
+			if s.cfg.ProbeInstructionText != "" {
+				err := sendAVASContext(avasSideband, "", s.cfg.ProbeInstructionText)
+				if err != nil {
+					s.logger.Info("probe_instruction_failed", "error", err)
+				} else {
+					instructionSent = true
+				}
+				s.logger.Info("probe_instruction_sent", "text_runes", utf8.RuneCountInString(s.cfg.ProbeInstructionText), "send_succeeded", err == nil)
 			}
 		}
 
@@ -2043,7 +2053,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 				if injector, ok := media.(relay.EventInjector); ok {
 					finalTurn = newWMFinalTurnMapper(voiceSessionID, s.logger, injector, s.cfg.ZoeFinalTurnDebugText)
 				}
-			} else if (s.cfg.ZoeFinalTurn || s.cfg.ProbeSpeakableText != "") && s.cfg.VoiceUpstreamRoute == "avas" {
+			} else if (s.cfg.ZoeFinalTurn || s.cfg.ProbeSpeakableText != "" || s.cfg.ProbeInstructionText != "") && s.cfg.VoiceUpstreamRoute == "avas" {
 				if injector, ok := media.(relay.EventInjector); ok {
 					finalTurn = newAVASFinalTurnMapper(voiceSessionID, s.logger, injector, func(id string) {
 						s.mu.Lock()
@@ -2065,6 +2075,9 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 							s.mu.Unlock()
 							return sendAVASContext(writer, id, text)
 						})
+					}
+					if s.cfg.ProbeInstructionText != "" {
+						finalTurn.(*avasFinalTurnMapper).configureInstruction(instructionSent)
 					}
 				}
 			}

@@ -11,20 +11,24 @@ import (
 )
 
 type avasFinalTurnMapper struct {
-	mu          sync.Mutex
-	done        map[string]struct{}
-	ring        [256]string
-	count, next int
-	session     string
-	logger      interface{ Info(string, ...any) }
-	injector    relay.EventInjector
-	open        func(string)
-	debugText   bool
-	probeText   string
-	probeSend   func(string, string) error
-	probeSeen   map[string]struct{}
-	probeAt     map[string]time.Time
-	probeReact  map[string]int
+	mu                     sync.Mutex
+	done                   map[string]struct{}
+	ring                   [256]string
+	count, next            int
+	session                string
+	logger                 interface{ Info(string, ...any) }
+	injector               relay.EventInjector
+	open                   func(string)
+	debugText              bool
+	probeText              string
+	probeSend              func(string, string) error
+	probeSeen              map[string]struct{}
+	probeAt                map[string]time.Time
+	probeReact             map[string]int
+	instructionSent        bool
+	instructionEnabled     bool
+	instructionTurns       int
+	instructionDelegations int
 }
 
 func newAVASFinalTurnMapper(session string, logger interface{ Info(string, ...any) }, injector relay.EventInjector, open func(string), debugText ...bool) *avasFinalTurnMapper {
@@ -34,6 +38,15 @@ func newAVASFinalTurnMapper(session string, logger interface{ Info(string, ...an
 func (m *avasFinalTurnMapper) configureProbe(text string, send func(string, string) error) {
 	m.probeText = strings.TrimSpace(text)
 	m.probeSend = send
+}
+
+func (m *avasFinalTurnMapper) configureInstruction(sent bool) {
+	m.instructionSent = sent
+	m.instructionEnabled = true
+}
+
+func (m *avasFinalTurnMapper) probeEnabled() bool {
+	return m.probeSend != nil && m.probeText != ""
 }
 
 func (m *avasFinalTurnMapper) Observe(data []byte) {
@@ -78,6 +91,32 @@ func (m *avasFinalTurnMapper) Observe(data []byte) {
 			preview = string([]rune(preview)[:200])
 		}
 		m.logger.Info("zoe_debug_message", "event", e.Type, "role", e.Turn.Role, "target", e.Item.Target, "text", preview)
+	}
+	if m.instructionEnabled && m.instructionSent {
+		m.mu.Lock()
+		if e.Type == "turn.done" && e.Turn.Role == "assistant" && m.instructionTurns < 6 {
+			args := []any{"event", e.Type}
+			if m.debugText {
+				args = append(args, "text", e.Turn.Transcript)
+			}
+			m.logger.Info("probe_instruction_reaction", args...)
+			m.instructionTurns++
+		}
+		if e.Type == "delegation.created" && m.instructionDelegations < 6 {
+			args := []any{"event", e.Type, "target", e.Item.Target}
+			if m.debugText {
+				var b strings.Builder
+				for _, part := range e.Item.Content {
+					if part.Type == "input_text" {
+						b.WriteString(part.Text)
+					}
+				}
+				args = append(args, "text", b.String())
+			}
+			m.logger.Info("probe_instruction_delegation", args...)
+			m.instructionDelegations++
+		}
+		m.mu.Unlock()
 	}
 	if m.probeSend != nil && (e.Type == "output_audio.delta" || (e.Type == "turn.done" && e.Turn.Role == "assistant")) {
 		m.mu.Lock()
