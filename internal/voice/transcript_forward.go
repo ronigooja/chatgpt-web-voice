@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/config"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/httpclient"
@@ -268,11 +269,15 @@ func (f *transcriptForward) Observe(data []byte) {
 	}
 }
 
-// Oversized turns are marked, never truncated and delivered as authoritative
-// text. Keeping one byte over the contract limit bounds an unfinished turn.
+// When a turn exceeds Zoe's byte limit, retain only its complete UTF-8 prefix.
+// No suffix is appended: even an ellipsis could exceed the wire contract.
 func boundedTurnText(s string) string {
 	if len(s) > 64<<10 {
-		return s[:(64<<10)+1]
+		end := 64 << 10
+		for end > 0 && !utf8.RuneStart(s[end]) {
+			end--
+		}
+		return s[:end]
 	}
 	return s
 }
@@ -460,7 +465,9 @@ func (f *transcriptForward) run() {
 				authLogged = time.Now()
 			}
 		} else if drop && status != 200 {
-			f.logger.Warn("zoe_transcript_dropped", "status", status, "first_seq", batch.Turns[0].Seq, "count", len(batch.Turns))
+			for _, turn := range batch.Turns {
+				f.logger.Warn("zoe_transcript_dropped", "seq", turn.Seq, "status", status)
+			}
 		}
 		if drop {
 			last := batch.Turns[len(batch.Turns)-1].Seq

@@ -49,14 +49,17 @@ existing handoff tail or relies on final-turn/debug/probe switches.
 One worker per call sends ordered sequences from zero to
 `POST /runner/v1/voice/turns`, batches at most 20 turns/512 KiB, and waits at most
 500 ms to accumulate a small batch. Each individual turn is limited to 64 KiB;
-oversized turns are dropped and logged, never delivered as truncated text.
+oversized turns are cut to a complete UTF-8 prefix at or below 65,536 bytes
+and delivered without an added suffix.
 The 1,000-turn queue drops oldest unsent turns on overflow, retaining sequence
 gaps and reporting counts. An already in-flight batch may still arrive after
 its queue entry has been evicted. IDs/sequence/text remain stable across retry.
 
 Network/5xx retry exponentially from 1 s to 30 s. Unknown sessions (404) retry
 for two minutes; 409 is terminal. 400/413 batches are isolated to single turns
-so only rejected turns are dropped. 401/403 retry, logging at most once per
+so only rejected turns are dropped, with one terminal log containing only seq
+and status (plus standard logger metadata). Sequence gaps do not block later
+turns. 401/403 retry, logging at most once per
 minute per call. HTTPS certificate verification is always enabled, independent
 of upstream `SkipSSLVerify`. Redirects are not followed. Destination response
 bodies and network error strings are never logged. No turn text or bearer is

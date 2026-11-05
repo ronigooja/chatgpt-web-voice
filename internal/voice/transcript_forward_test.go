@@ -304,11 +304,11 @@ func TestForwardOversizedTurnDoesNotDropNeighbors(t *testing.T) {
 	f.Close()
 	<-f.done
 	turns := flattenForward(s.snapshot())
-	if len(turns) != 2 || turns[0].Seq != 0 || turns[1].Seq != 2 {
+	if len(turns) != 3 || turns[0].Seq != 0 || turns[1].Seq != 1 || turns[2].Seq != 2 || turns[1].Text != strings.Repeat("x", 64<<10) {
 		t.Fatalf("oversize affected neighbors: %+v", turns)
 	}
-	if strings.Count(l.String(), "zoe_transcript_dropped") != 1 {
-		t.Fatal("oversized turn not logged once")
+	if strings.Contains(l.String(), "zoe_transcript_dropped") {
+		t.Fatal("locally truncated turn must be delivered, not dropped")
 	}
 }
 
