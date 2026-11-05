@@ -1,8 +1,12 @@
 package voice
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
+	"net"
 	"net/url"
 	"strings"
 	"sync"
@@ -63,7 +67,23 @@ type avasRig struct {
 	id       string
 }
 
+type avasRigOptions struct {
+	probeSpeakable   string
+	probeInstruction string
+	debugText        bool
+	closeSideband    bool
+	logger           *slog.Logger
+}
+
 func newAVASRig(t *testing.T, probe ...string) *avasRig {
+	opts := avasRigOptions{}
+	if len(probe) > 0 {
+		opts.probeSpeakable = probe[0]
+	}
+	return newAVASRigWithOptions(t, opts)
+}
+
+func newAVASRigWithOptions(t *testing.T, opts avasRigOptions) *avasRig {
 	t.Helper()
 	up := &avasUpstream{ready: make(chan struct{}), release: make(chan struct{})}
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
@@ -83,6 +103,13 @@ func newAVASRig(t *testing.T, probe ...string) *avasRig {
 		up.conn = conn
 		up.mu.Unlock()
 		once.Do(func() { close(up.ready) })
+		if opts.closeSideband {
+			if tcp, ok := conn.UnderlyingConn().(*net.TCPConn); ok {
+				_ = tcp.SetLinger(0)
+			}
+			_ = conn.Close()
+			return
+		}
 		for {
 			_, data, err := conn.ReadMessage()
 			if err != nil {
@@ -103,23 +130,26 @@ func newAVASRig(t *testing.T, probe ...string) *avasRig {
 	if _, err := pool.Create(accounts.Account{AccessToken: jwt, Status: "正常"}); err != nil {
 		t.Fatal(err)
 	}
-	probeText := ""
-	if len(probe) > 0 {
-		probeText = probe[0]
+	probeText := opts.probeSpeakable
+	logger := opts.logger
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	svc := New(config.Config{
-		Environment:        config.EnvironmentDevelopment,
-		SkipSSLVerify:      true,
-		UpstreamTransport:  config.TransportGo,
-		MaxAccountAttempts: 1,
-		DeviceID:           "d",
-		SessionID:          "s",
-		DefaultUA:          "ua",
-		SessionTTLSeconds:  180,
-		VoiceUpstreamRoute: "avas",
-		ZoeFinalTurn:       true,
-		ProbeSpeakableText: probeText,
-	}, pool, nil)
+		Environment:           config.EnvironmentDevelopment,
+		SkipSSLVerify:         true,
+		UpstreamTransport:     config.TransportGo,
+		MaxAccountAttempts:    1,
+		DeviceID:              "d",
+		SessionID:             "s",
+		DefaultUA:             "ua",
+		SessionTTLSeconds:     180,
+		VoiceUpstreamRoute:    "avas",
+		ZoeFinalTurn:          true,
+		ProbeSpeakableText:    probeText,
+		ProbeInstructionText:  opts.probeInstruction,
+		ZoeFinalTurnDebugText: opts.debugText,
+	}, pool, logger)
 	svc.avasURL = server.URL + "/calls"
 	u, _ := url.Parse(sideband.URL)
 	svc.avasSidebandURL = "ws://" + u.Host + "/live/"
@@ -418,6 +448,54 @@ func TestProbeSpeakableOffByDefaultKeepsZoeFinalTurnAndSendsNoContext(t *testing
 	}
 	if finalTurnCount(r.media) != 1 {
 		t.Fatal("Zoe final turn was not emitted")
+	}
+}
+
+func TestProbeInstructionOffByDefaultSendsNoSidebandFrame(t *testing.T) {
+	r := newAVASRig(t)
+	time.Sleep(100 * time.Millisecond)
+	if got := r.upstream.received(); len(got) != 0 {
+		t.Fatalf("default call sent instruction frames: %v", got)
+	}
+}
+
+func TestProbeInstructionSendsSessionContextOnceAfterSidebandUp(t *testing.T) {
+	const want = "Answer briefly and clearly"
+	r := newAVASRigWithOptions(t, avasRigOptions{probeInstruction: want})
+	frames := r.upstream.waitFrames(t, 1)
+	if len(frames) != 1 || frames[0]["type"] != "session.context.append" || frames[0]["channel"] != "speakable" || frames[0]["delegation_item_id"] != nil || contentText(t, frames[0]) != want {
+		t.Fatalf("instruction frames=%v", frames)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := r.upstream.received(); len(got) != 1 {
+		t.Fatalf("instruction sent %d times: %v", len(got), got)
+	}
+}
+
+func TestProbeInstructionSendFailureLogsAndDoesNotFailCall(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	r := newAVASRigWithOptions(t, avasRigOptions{probeInstruction: "send this", closeSideband: true, logger: logger})
+	if r.id == "" {
+		t.Fatal("call was not created after instruction send failure")
+	}
+	if !strings.Contains(logs.String(), "probe_instruction_failed") {
+		t.Fatalf("logs=%s", logs.String())
+	}
+}
+
+func TestProbeInstructionLogsHiddenWhenDebugTextOff(t *testing.T) {
+	for _, debug := range []bool{false, true} {
+		var logs bytes.Buffer
+		r := newAVASRigWithOptions(t, avasRigOptions{probeInstruction: "instruction", debugText: debug, logger: slog.New(slog.NewTextHandler(&logs, nil))})
+		r.upstream.push(t, map[string]any{"type": "turn.done", "turn": map[string]any{"role": "assistant", "transcript": "assistant secret"}})
+		r.upstream.push(t, map[string]any{"type": "delegation.created", "item": map[string]any{"id": "d", "target": "server", "content": []map[string]string{{"type": "input_text", "text": "delegation secret"}}}})
+		time.Sleep(100 * time.Millisecond)
+		got := logs.String()
+		if debug != strings.Contains(got, "assistant secret") || debug != strings.Contains(got, "delegation secret") {
+			t.Fatalf("debug=%v logs=%s", debug, got)
+		}
+		_ = r
 	}
 }
 

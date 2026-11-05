@@ -153,7 +153,7 @@ func (w *avasSidebandWriter) setOnClose(fn func()) {
 	w.mu.Lock()
 	if w.closed {
 		w.mu.Unlock()
-		fn()
+		go fn()
 		return
 	}
 	w.onClose = fn
