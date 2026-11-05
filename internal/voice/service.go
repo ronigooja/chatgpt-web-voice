@@ -96,6 +96,7 @@ func (e *ServiceError) Error() string { return e.Message }
 // UpstreamContext is the chatgpt.com conversation continuity state learned from
 // DataChannel events or supplied by a reconnecting client.
 type UpstreamContext struct {
+	Text                   string `json:"text,omitempty"`
 	ConversationID         string `json:"upstream_conversation_id,omitempty"`
 	ParentMessageID        string `json:"upstream_parent_message_id,omitempty"`
 	UpstreamVoiceSessionID string `json:"upstream_voice_session_id,omitempty"`
@@ -126,8 +127,9 @@ type sessionBinding struct {
 	// mediaID is the evidence identity of media; zero when evidence is not tracked.
 	mediaID mediaevidence.Identity
 	// call holds in-memory per-call data for rebuilds; nil for client-direct media.
-	call       *callState
-	avasCancel context.CancelFunc
+	call           *callState
+	avasCancel     context.CancelFunc
+	openDelegation string
 }
 
 // Service is the ChatGPT web voice gateway.
@@ -592,6 +594,12 @@ func (s *Service) UpdateSessionContext(owner, voiceSessionID string, patch Upstr
 		return UpstreamContext{}, &ServiceError{Message: "voice session does not belong to caller", StatusCode: 403}
 	}
 	if item != nil {
+		if s.cfg.VoiceUpstreamRoute == "avas" && strings.TrimSpace(patch.Text) != "" {
+			if err := s.sendAVASContext(item, patch.Text); err != nil {
+				s.mu.Unlock()
+				return UpstreamContext{}, &ServiceError{Message: "context delivery failed", StatusCode: 502}
+			}
+		}
 		merged := mergeUpstreamContext(item.upstreamContext(), patch)
 		item.ConversationID = merged.ConversationID
 		item.ParentMessageID = merged.ParentMessageID
@@ -643,9 +651,7 @@ func (s *Service) UpdateSessionContext(owner, voiceSessionID string, patch Upstr
 	}, nil
 }
 
-// ApplyOpeningContext delivers opening context once and persists metadata only.
-// AVAS live sideband writes are not yet wired; creation-time AVAS initial_items
-// is the only proven silent AVAS form.
+// ApplyOpeningContext delivers opening context once and persists metadata.
 func (s *Service) ApplyOpeningContext(owner, voiceSessionID string, c OpeningContext) (*OpeningContextResult, error) {
 	chars, err := validateOpeningContext(c)
 	if err != nil {
@@ -676,7 +682,14 @@ func (s *Service) ApplyOpeningContext(owner, voiceSessionID string, c OpeningCon
 		return &OpeningContextResult{Applied: true, AlreadyApplied: true, Version: c.Version, ItemCount: row.OpeningContextItems, CharCount: row.OpeningContextChars}, nil
 	}
 	if s.cfg.VoiceUpstreamRoute == "avas" {
-		return nil, &ServiceError{Message: "opening context live injection is not supported on avas", StatusCode: 501}
+		if err := s.sendAVASContext(binding, openingContextText(c)); err != nil {
+			return nil, &ServiceError{Message: "opening context delivery failed", StatusCode: 502}
+		}
+		_, applied, err := s.records.UpdateOpeningContext(owner, voiceSessionID, c.Kind, c.Version, len(c.Items), chars, time.Now().UTC().Format(time.RFC3339Nano))
+		if err != nil {
+			return nil, &ServiceError{Message: "opening context persistence failed", StatusCode: 503}
+		}
+		return &OpeningContextResult{Applied: applied, AlreadyApplied: !applied, Version: c.Version, ItemCount: len(c.Items), CharCount: chars, Silent: "unverified"}, nil
 	}
 	injector, ok := binding.media.(relay.UpstreamEventInjector)
 	if !ok {
@@ -1250,6 +1263,39 @@ func (s *Service) startAVASSideband(ctx context.Context, media relay.Session, ca
 	return nil
 }
 
+func (s *Service) sendAVASContext(b *sessionBinding, text string) error {
+	injector, ok := b.media.(relay.UpstreamEventInjector)
+	if !ok {
+		return errors.New("sideband sender unavailable")
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+	for len(text) > 0 {
+		part := text
+		if len(part) > 500 {
+			part = text[:500]
+			for len(part) > 0 && (part[len(part)-1]&0xc0) == 0x80 {
+				part = part[:len(part)-1]
+			}
+		}
+		text = text[len(part):]
+		kind := "session.context.append"
+		payload := map[string]any{"type": kind, "channel": "speakable", "content": []map[string]string{{"type": "input_text", "text": part}}}
+		if b.openDelegation != "" {
+			kind = "delegation.context.append"
+			payload["type"] = kind
+			payload["delegation_item_id"] = b.openDelegation
+		}
+		raw, _ := json.Marshal(payload)
+		if err := injector.SendUpstreamEvent(raw); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ProbeResult is the outcome of a lightweight account liveness check.
 type ProbeResult struct {
 	AccountID        int64  `json:"account_id"`
@@ -1805,6 +1851,16 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 			if s.cfg.ZoeFinalTurn && s.cfg.VoiceUpstreamRoute == "wm" {
 				if injector, ok := media.(relay.EventInjector); ok {
 					finalTurn = newWMFinalTurnMapper(voiceSessionID, s.logger, injector)
+				}
+			} else if s.cfg.ZoeFinalTurn && s.cfg.VoiceUpstreamRoute == "avas" {
+				if injector, ok := media.(relay.EventInjector); ok {
+					finalTurn = newAVASFinalTurnMapper(voiceSessionID, s.logger, injector, func(id string) {
+						s.mu.Lock()
+						if b := s.bindings[voiceSessionID]; b != nil {
+							b.openDelegation = id
+						}
+						s.mu.Unlock()
+					})
 				}
 			}
 			media.SetEventObserver(func(data []byte) {

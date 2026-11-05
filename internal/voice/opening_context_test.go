@@ -102,13 +102,15 @@ func TestOpeningContextDeltaAcceptedForNewAndConfirmedResumed(t *testing.T) {
 	}
 }
 
-func TestOpeningContextAVASUnsupportedReturns501(t *testing.T) {
+func TestOpeningContextAVASInjectsSideband(t *testing.T) {
 	f, fr, _, id := openingContextFixture(t)
 	f.svc.cfg.VoiceUpstreamRoute = "avas"
 	_, err := f.svc.ApplyOpeningContext("api_key:1", id, OpeningContext{Kind: "delta", Version: 1, Items: []OpeningContextItem{{Role: "user", Text: "not injected"}}})
-	openingContextErr(t, err, 501)
-	if len(fr.session(0).upstreamEvents) != 0 {
-		t.Fatal("AVAS route injected live event")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fr.session(0).upstreamEvents) != 1 {
+		t.Fatalf("got %d upstream events, want 1", len(fr.session(0).upstreamEvents))
 	}
 }
 
