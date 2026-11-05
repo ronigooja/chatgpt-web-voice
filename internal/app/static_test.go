@@ -32,10 +32,10 @@ func TestRegisterStaticRoutesUsesCleanURLs(t *testing.T) {
 	registerStaticRoutes(mux, staticDir)
 
 	for path, wantBody := range map[string]string{
-		"/voice":        "voice page",
-		"/accounts":     "accounts page",
-		"/keys":         "keys page",
-		"/sessions":     "sessions page",
+		"/voice":          "voice page",
+		"/accounts":       "accounts page",
+		"/keys":           "keys page",
+		"/sessions":       "sessions page",
 		"/static/app.css": "/* design system */",
 	} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -47,11 +47,11 @@ func TestRegisterStaticRoutesUsesCleanURLs(t *testing.T) {
 	}
 
 	for path, location := range map[string]string{
-		"/":               "/voice",
-		"/voice.html":     "/voice",
-		"/accounts.html":  "/accounts",
-		"/keys.html":      "/keys",
-		"/sessions.html":  "/sessions",
+		"/":              "/voice",
+		"/voice.html":    "/voice",
+		"/accounts.html": "/accounts",
+		"/keys.html":     "/keys",
+		"/sessions.html": "/sessions",
 	} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		resp := httptest.NewRecorder()

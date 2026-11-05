@@ -24,13 +24,13 @@ const conversationSelectColumns = `id, owner, title,
 // Conversation is one persisted voice/chat workspace owned by an authenticated
 // gateway user.
 type Conversation struct {
-	ID                      string    `json:"id"`
-	Owner                   string    `json:"-"`
-	Title                   string    `json:"title"`
+	ID    string `json:"id"`
+	Owner string `json:"-"`
+	Title string `json:"title"`
 	// TitleLocked is true after the user renames the conversation. Hangup must
 	// not replace a locked title with the upstream chatgpt.com title.
-	TitleLocked             bool      `json:"title_locked"`
-	Preview                 string    `json:"preview"`
+	TitleLocked bool   `json:"title_locked"`
+	Preview     string `json:"preview"`
 	// AccountID is the sticky pool account used for this conversation's upstream
 	// chatgpt.com thread. 0 means no account has been bound yet.
 	AccountID               int64     `json:"account_id,omitempty"`

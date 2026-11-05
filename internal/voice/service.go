@@ -1317,7 +1317,7 @@ func avasCallID(location string) string {
 }
 
 func (s *Service) startAVASSideband(ctx context.Context, media relay.Session, callID, token, proxy string) (*avasSidebandWriter, error) {
-	injector, ok := media.(relay.EventInjector)
+	injector, ok := media.(relay.SidebandEventInjector)
 	if !ok {
 		return nil, errors.New("avas sideband requires gateway media relay")
 	}
@@ -1355,7 +1355,7 @@ func (s *Service) startAVASSideband(ctx context.Context, media relay.Session, ca
 			if err != nil {
 				return
 			}
-			_ = injector.InjectEvent(normalizeAVASEvent(data))
+			_ = injector.InjectSidebandEvent(normalizeAVASEvent(data))
 		}
 	}()
 	return writer, nil

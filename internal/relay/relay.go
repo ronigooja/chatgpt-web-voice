@@ -76,6 +76,12 @@ type EventInjector interface {
 	InjectEvent(data []byte) error
 }
 
+// SidebandEventInjector delivers an upstream sideband event downstream and to
+// the event observer.
+type SidebandEventInjector interface {
+	InjectSidebandEvent(data []byte) error
+}
+
 // UpstreamEventInjector sends an event to the active upstream oai-events
 // channel. It is separate from EventInjector, which sends downstream.
 type UpstreamEventInjector interface {

@@ -184,6 +184,19 @@ func (s *pionSession) InjectEvent(data []byte) error {
 	return s.bridge.sendDownstream(data)
 }
 
+func (s *pionSession) InjectSidebandEvent(data []byte) error {
+	if s == nil || s.bridge == nil {
+		return errors.New("relay event bridge unavailable")
+	}
+	if s.shapeSampler != nil {
+		s.shapeSampler.observe(data, "sideband", "b-to-a")
+	}
+	err := s.bridge.sendDownstream(data)
+	// Observe even when downstream delivery fails, but return that delivery error.
+	s.observeEvent(data)
+	return err
+}
+
 func (s *pionSession) SendUpstreamEvent(data []byte) error {
 	if s == nil || s.bridge == nil {
 		return errors.New("relay event bridge unavailable")

@@ -179,6 +179,46 @@ func connect(t *testing.T, r *PionRelay) *rig {
 	return g
 }
 
+func TestInjectSidebandEventObservesAndDeliversButInjectEventOnlyDelivers(t *testing.T) {
+	g := connect(t, newRelay(t, 1))
+	var observed [][]byte
+	g.session.SetEventObserver(func(data []byte) { observed = append(observed, append([]byte(nil), data...)) })
+	sideband, ok := g.session.(SidebandEventInjector)
+	if !ok {
+		t.Fatal("session does not implement SidebandEventInjector")
+	}
+	first := []byte(`{"type":"sideband"}`)
+	if err := sideband.InjectSidebandEvent(first); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-g.clientEv:
+		if got != string(first) {
+			t.Fatalf("downstream sideband=%q want %q", got, first)
+		}
+	case <-time.After(testWait):
+		t.Fatal("sideband event was not delivered downstream")
+	}
+	if len(observed) != 1 || string(observed[0]) != string(first) {
+		t.Fatalf("observed=%q want one %q", observed, first)
+	}
+	second := []byte(`{"type":"gateway"}`)
+	if err := g.session.(EventInjector).InjectEvent(second); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-g.clientEv:
+		if got != string(second) {
+			t.Fatalf("downstream injected=%q want %q", got, second)
+		}
+	case <-time.After(testWait):
+		t.Fatal("injected event was not delivered downstream")
+	}
+	if len(observed) != 1 {
+		t.Fatalf("InjectEvent re-entered observer: %q", observed)
+	}
+}
+
 func sendRTP(t *testing.T, track *webrtc.TrackLocalStaticRTP, stop <-chan struct{}) {
 	go func() {
 		var seq uint16

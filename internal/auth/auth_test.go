@@ -195,7 +195,6 @@ func TestBasicAuthIsRejected(t *testing.T) {
 	}
 }
 
-
 func TestLoginRejectsInvalidCredentials(t *testing.T) {
 	manager := testManager()
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewBufferString(`{"username":"admin","password":"wrong"}`))
@@ -209,7 +208,6 @@ func TestLoginRejectsInvalidCredentials(t *testing.T) {
 		t.Fatal("invalid login must not set a session cookie")
 	}
 }
-
 
 func TestLoginLockoutAfterFailures(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -264,7 +262,6 @@ func TestLoginLockoutAfterFailures(t *testing.T) {
 		t.Fatalf("expected other IP to login, got %d %s", otherResp.Code, otherResp.Body.String())
 	}
 }
-
 
 func TestCSRFRequiredForCookieSessionWrites(t *testing.T) {
 	manager := testManager()

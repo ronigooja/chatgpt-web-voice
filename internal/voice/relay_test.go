@@ -122,22 +122,24 @@ type fakeMedia struct {
 	termination *relay.Termination
 
 	// swap simulation
-	observer       func([]byte)
-	swapRoutes     []relay.Route
-	swapPending    bool
-	swapReady      chan struct{}
-	swapAnswers    []string
-	pendingTexts   []string
-	upstreamEvents []string
-	injected       []string
-	committed      int
-	aborted        []string
-	beginErr       error
-	acceptErr      error
-	textErr        error
-	upstreamErr    error
-	commitErr      error
-	legClose       relay.LegTermination
+	observer         func([]byte)
+	swapRoutes       []relay.Route
+	swapPending      bool
+	swapReady        chan struct{}
+	swapAnswers      []string
+	pendingTexts     []string
+	upstreamEvents   []string
+	injected         []string
+	sidebandInjected []string
+	observed         []string
+	committed        int
+	aborted          []string
+	beginErr         error
+	acceptErr        error
+	textErr          error
+	upstreamErr      error
+	commitErr        error
+	legClose         relay.LegTermination
 }
 
 func (m *fakeMedia) ID() string { return m.id }
@@ -549,12 +551,20 @@ func (m *fakeMedia) SetEventObserver(f func([]byte)) {
 
 func (m *fakeMedia) SetEventShapeMetadata(string, string) {}
 
-// InjectEvent mirrors the real session: sideband events reach the observer.
-// Events the gateway itself injects downstream are recorded separately.
+// InjectEvent mirrors the real session: gateway-injected events only reach downstream.
 func (m *fakeMedia) InjectEvent(data []byte) error {
 	m.mu.Lock()
-	f := m.observer
 	m.injected = append(m.injected, string(data))
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *fakeMedia) InjectSidebandEvent(data []byte) error {
+	m.mu.Lock()
+	f := m.observer
+	m.sidebandInjected = append(m.sidebandInjected, string(data))
+	m.injected = append(m.injected, string(data))
+	m.observed = append(m.observed, string(data))
 	m.mu.Unlock()
 	if f != nil {
 		f(append([]byte(nil), data...))

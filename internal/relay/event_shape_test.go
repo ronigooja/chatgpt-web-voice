@@ -50,6 +50,28 @@ func TestEventShapeSamplerHandlesMalformedOversizedAndCap(t *testing.T) {
 	}
 }
 
+func TestEventShapeSamplerSkipsAudioFramesBeforeCap(t *testing.T) {
+	var logs bytes.Buffer
+	s := newEventShapeSampler(slog.New(slog.NewTextHandler(&logs, nil)), "media-audio", "avas", 5)
+	for i := 0; i < 5; i++ {
+		s.observe([]byte(`{"type":"data_message","data":"{\"type\":\"session.input_audio.append\"}"}`), "sideband", "b-to-a")
+		s.observe([]byte(`{"type":"data_message","data":{"type":"session.output_audio.delta"}}`), "sideband", "b-to-a")
+	}
+	for _, typ := range []string{"delegation.created", "turn.created", "response.done"} {
+		s.observe([]byte(`{"type":"data_message","data":{"type":"`+typ+`"}}`), "sideband", "b-to-a")
+	}
+	s.close()
+	got := logs.String()
+	if strings.Count(got, "oai_event_shape ") != 3 {
+		t.Fatalf("audio frames consumed sampler cap: %s", got)
+	}
+	for _, typ := range []string{"delegation.created", "turn.created", "response.done"} {
+		if !strings.Contains(got, "inner_type="+typ) {
+			t.Fatalf("missing non-audio frame %q: %s", typ, got)
+		}
+	}
+}
+
 func TestEventShapeSamplerUsesBoundedPathsAndPatchNormalization(t *testing.T) {
 	paths, finalish := collectShapePaths(map[string]any{"o": "append", "p": "/message/content/parts/12/text", "final": true, "text": "secret"})
 	if !finalish || len(paths) == 0 || !strings.Contains(strings.Join(paths, " "), "p=string=/message/content/parts/##/text") {

@@ -88,6 +88,10 @@ func (s *eventShapeSampler) observe(data []byte, source, direction string) {
 	if s == nil {
 		return
 	}
+	_, inner, _, _ := shapeFrame(data)
+	if inner == "session.input_audio.append" || inner == "session.output_audio.delta" {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed || s.count >= s.maxFrames {
