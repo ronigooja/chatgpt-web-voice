@@ -24,6 +24,7 @@ type downstreamVoiceStub struct {
 	createError   error
 	generation    int64
 	releaseCount  int
+	lastContext   voice.UpstreamContext
 }
 
 func (s *downstreamVoiceStub) CreateSession(req voice.CreateSessionRequest) (*voice.SessionResult, error) {
@@ -68,6 +69,7 @@ func (s *downstreamVoiceStub) UpdateSessionContext(owner, id string, patch voice
 	if owner != "api_key:1" || id != "vs_test" {
 		return voice.UpstreamContext{}, &voice.ServiceError{Message: "voice session not found", StatusCode: http.StatusNotFound}
 	}
+	s.lastContext = patch
 	return patch, nil
 }
 
@@ -240,6 +242,14 @@ func TestDownstreamConfigAndSessionIsolation(t *testing.T) {
 	if contextResp.Code != http.StatusOK || !strings.Contains(contextResp.Body.String(), "conv-1") {
 		t.Fatalf("context status=%d body=%s", contextResp.Code, contextResp.Body.String())
 	}
+	textResp := performDownstreamRequest(t, handler, http.MethodPost, "/v1/voice/sessions/vs_test/context", secret, map[string]any{"text": "hello AVAS"})
+	if textResp.Code != http.StatusOK || voiceStub.lastContext.Text != "hello AVAS" {
+		t.Fatalf("text context status=%d body=%s", textResp.Code, textResp.Body.String())
+	}
+	unknownResp := performDownstreamRequest(t, handler, http.MethodPost, "/v1/voice/sessions/vs_test/context", secret, map[string]any{"text": "x", "unknown": true})
+	if unknownResp.Code != http.StatusBadRequest {
+		t.Fatalf("unknown field status=%d body=%s", unknownResp.Code, unknownResp.Body.String())
+	}
 
 	titleResp := performDownstreamRequest(t, handler, http.MethodGet, "/v1/voice/sessions/vs_test/title?upstream_conversation_id=conv-1", secret, nil)
 	if titleResp.Code != http.StatusOK || !strings.Contains(titleResp.Body.String(), "Title for conv-1") {
@@ -289,9 +299,9 @@ func TestDownstreamConfigAndSessionIsolation(t *testing.T) {
 	if repeatResp.Code != http.StatusOK || repeatResp.Body.String() != "{\"ok\":true,\"state\":\"already_released\"}\n" {
 		t.Fatalf("repeat release status=%d body=%s", repeatResp.Code, repeatResp.Body.String())
 	}
-	unknownResp := performDownstreamRequest(t, handler, http.MethodDelete, "/v1/voice/sessions/vs_unknown", secret, nil)
-	if unknownResp.Code != http.StatusNotFound {
-		t.Fatalf("unknown release status=%d body=%s", unknownResp.Code, unknownResp.Body.String())
+	unknownReleaseResp := performDownstreamRequest(t, handler, http.MethodDelete, "/v1/voice/sessions/vs_unknown", secret, nil)
+	if unknownReleaseResp.Code != http.StatusNotFound {
+		t.Fatalf("unknown release status=%d body=%s", unknownReleaseResp.Code, unknownReleaseResp.Body.String())
 	}
 	otherResp := performDownstreamRequest(t, handler, http.MethodDelete, "/v1/voice/sessions/vs_test", otherSecret, nil)
 	if otherResp.Code != http.StatusNotFound {

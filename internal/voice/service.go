@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	fhttp "github.com/bogdanfinn/fhttp"
 	"github.com/bogdanfinn/websocket"
@@ -594,11 +595,11 @@ func (s *Service) UpdateSessionContext(owner, voiceSessionID string, patch Upstr
 		return UpstreamContext{}, &ServiceError{Message: "voice session does not belong to caller", StatusCode: 403}
 	}
 	if item != nil {
+		var avasMedia relay.UpstreamEventInjector
+		var avasDelegation string
 		if s.cfg.VoiceUpstreamRoute == "avas" && strings.TrimSpace(patch.Text) != "" {
-			if err := s.sendAVASContext(item, patch.Text); err != nil {
-				s.mu.Unlock()
-				return UpstreamContext{}, &ServiceError{Message: "context delivery failed", StatusCode: 502}
-			}
+			avasMedia, _ = item.media.(relay.UpstreamEventInjector)
+			avasDelegation = item.openDelegation
 		}
 		merged := mergeUpstreamContext(item.upstreamContext(), patch)
 		item.ConversationID = merged.ConversationID
@@ -610,6 +611,13 @@ func (s *Service) UpdateSessionContext(owner, voiceSessionID string, patch Upstr
 		out := item.upstreamContext()
 		accountID := item.AccountID
 		s.mu.Unlock()
+		if avasMedia != nil {
+			if err := sendAVASContext(avasMedia, avasDelegation, patch.Text); err != nil {
+				return UpstreamContext{}, &ServiceError{Message: "context delivery failed", StatusCode: 502}
+			}
+		} else if strings.TrimSpace(patch.Text) != "" && s.cfg.VoiceUpstreamRoute == "avas" {
+			return UpstreamContext{}, &ServiceError{Message: "context delivery failed", StatusCode: 502}
+		}
 		if s.records != nil {
 			if _, err := s.records.UpdateUpstream(owner, sessionID, accountID, out.ConversationID, out.ParentMessageID, out.UpstreamVoiceSessionID); err != nil {
 				s.logger.Warn("call_session_upstream_persist_failed", "voice_session_id", sessionID, "error", err)
@@ -682,14 +690,7 @@ func (s *Service) ApplyOpeningContext(owner, voiceSessionID string, c OpeningCon
 		return &OpeningContextResult{Applied: true, AlreadyApplied: true, Version: c.Version, ItemCount: row.OpeningContextItems, CharCount: row.OpeningContextChars}, nil
 	}
 	if s.cfg.VoiceUpstreamRoute == "avas" {
-		if err := s.sendAVASContext(binding, openingContextText(c)); err != nil {
-			return nil, &ServiceError{Message: "opening context delivery failed", StatusCode: 502}
-		}
-		_, applied, err := s.records.UpdateOpeningContext(owner, voiceSessionID, c.Kind, c.Version, len(c.Items), chars, time.Now().UTC().Format(time.RFC3339Nano))
-		if err != nil {
-			return nil, &ServiceError{Message: "opening context persistence failed", StatusCode: 503}
-		}
-		return &OpeningContextResult{Applied: applied, AlreadyApplied: !applied, Version: c.Version, ItemCount: len(c.Items), CharCount: chars, Silent: "unverified"}, nil
+		return nil, &ServiceError{Message: "opening context live injection is not supported on avas", StatusCode: 501}
 	}
 	injector, ok := binding.media.(relay.UpstreamEventInjector)
 	if !ok {
@@ -1263,11 +1264,7 @@ func (s *Service) startAVASSideband(ctx context.Context, media relay.Session, ca
 	return nil
 }
 
-func (s *Service) sendAVASContext(b *sessionBinding, text string) error {
-	injector, ok := b.media.(relay.UpstreamEventInjector)
-	if !ok {
-		return errors.New("sideband sender unavailable")
-	}
+func sendAVASContext(injector relay.UpstreamEventInjector, delegation, text string) error {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return nil
@@ -1276,17 +1273,17 @@ func (s *Service) sendAVASContext(b *sessionBinding, text string) error {
 		part := text
 		if len(part) > 500 {
 			part = text[:500]
-			for len(part) > 0 && (part[len(part)-1]&0xc0) == 0x80 {
+			for len(part) > 0 && !utf8.ValidString(part) {
 				part = part[:len(part)-1]
 			}
 		}
 		text = text[len(part):]
 		kind := "session.context.append"
 		payload := map[string]any{"type": kind, "channel": "speakable", "content": []map[string]string{{"type": "input_text", "text": part}}}
-		if b.openDelegation != "" {
+		if delegation != "" {
 			kind = "delegation.context.append"
 			payload["type"] = kind
-			payload["delegation_item_id"] = b.openDelegation
+			payload["delegation_item_id"] = delegation
 		}
 		raw, _ := json.Marshal(payload)
 		if err := injector.SendUpstreamEvent(raw); err != nil {

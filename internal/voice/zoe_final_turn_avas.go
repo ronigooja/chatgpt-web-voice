@@ -39,12 +39,24 @@ func (m *avasFinalTurnMapper) Observe(data []byte) {
 	}
 	var e struct {
 		Type string `json:"type"`
+		Turn struct {
+			Role string `json:"role"`
+		} `json:"turn"`
 		Item struct {
 			ID, Target string
 			Content    []struct{ Type, Text string } `json:"content"`
 		} `json:"item"`
 	}
-	if json.Unmarshal(in, &e) != nil || e.Type != "delegation.created" || e.Item.Target != "client" {
+	if json.Unmarshal(in, &e) != nil {
+		return
+	}
+	if e.Type == "turn.created" && e.Turn.Role == "user" {
+		if m.open != nil {
+			m.open("")
+		}
+		return
+	}
+	if e.Type != "delegation.created" || e.Item.Target != "client" {
 		return
 	}
 	var b strings.Builder
@@ -56,9 +68,6 @@ func (m *avasFinalTurnMapper) Observe(data []byte) {
 	text := strings.TrimSpace(b.String())
 	if text == "" {
 		return
-	}
-	if m.open != nil {
-		m.open(e.Item.ID)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -72,6 +81,9 @@ func (m *avasFinalTurnMapper) Observe(data []byte) {
 	if _, ok := m.done[e.Item.ID]; ok {
 		m.logger.Info("zoe_final_turn_dropped", "voice_session_id", m.session, "reason", "duplicate")
 		return
+	}
+	if m.open != nil {
+		m.open(e.Item.ID)
 	}
 	if m.count < len(m.ring) {
 		m.ring[m.count] = e.Item.ID
