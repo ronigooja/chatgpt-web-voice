@@ -15,6 +15,7 @@ import (
 )
 
 type contextKey struct{}
+type requestIDKey struct{}
 
 // New creates the process logger used by both application and access logs.
 func New(format, level string) *slog.Logger {
@@ -84,7 +85,9 @@ func HTTPMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 			"method", r.Method,
 			"path", truncate(r.URL.Path, 2048),
 		)
-		r = r.WithContext(context.WithValue(r.Context(), contextKey{}, requestLogger))
+		ctx := context.WithValue(r.Context(), contextKey{}, requestLogger)
+		ctx = context.WithValue(ctx, requestIDKey{}, requestID)
+		r = r.WithContext(ctx)
 		recorder := &responseRecorder{ResponseWriter: w}
 
 		defer func() {
@@ -121,6 +124,12 @@ func HTTPMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 
 		next.ServeHTTP(recorder, r)
 	})
+}
+
+// RequestID returns the middleware request ID, including a client-supplied X-Request-ID.
+func RequestID(ctx context.Context) string {
+	value, _ := ctx.Value(requestIDKey{}).(string)
+	return value
 }
 
 func requestID(r *http.Request) string {

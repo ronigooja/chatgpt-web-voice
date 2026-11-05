@@ -28,6 +28,7 @@ import (
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/httpclient"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/mediaevidence"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/relay"
+	"github.com/dyhhhhhh/chatgpt-web-voice/internal/store"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/tokenutil"
 )
 
@@ -87,9 +88,11 @@ const relayAcceptTimeout = 20 * time.Second
 
 // ServiceError is a typed gateway error with HTTP status.
 type ServiceError struct {
-	Message    string
-	StatusCode int
-	Detail     any
+	Message          string
+	StatusCode       int
+	Detail           any
+	CreationRejected bool
+	UpstreamStatus   int
 }
 
 func (e *ServiceError) Error() string { return e.Message }
@@ -212,7 +215,8 @@ type Service struct {
 	// relay, when set, terminates media in the gateway (peers A and B).
 	relay relay.Relay
 	// evidence, when set, records media sessions and termination evidence.
-	evidence MediaEvidenceStore
+	evidence         MediaEvidenceStore
+	creationOutcomes CreationOutcomeStore
 
 	mu       sync.Mutex
 	bindings map[string]*sessionBinding
@@ -270,6 +274,21 @@ func (s *Service) WithCallSessions(records CallSessionStore) *Service {
 	}
 	return s
 }
+
+// WithCreationOutcomes attaches durable request creation outcomes.
+func (s *Service) WithCreationOutcomes(records CreationOutcomeStore) *Service {
+	if s != nil {
+		s.creationOutcomes = records
+	}
+	return s
+}
+
+// CreationOutcome returns the derived owner-scoped outcome for a request.
+func (s *Service) CreationOutcome(owner, requestID string) (string, bool) {
+	return s.creationOutcome(owner, requestID)
+}
+
+var _ CreationOutcomeStore = (*store.DB)(nil)
 
 // SessionResult is returned by CreateSession.
 type SessionResult struct {
@@ -1599,6 +1618,7 @@ type CreateSessionRequest struct {
 	UpstreamParentMessageID string
 	UpstreamVoiceSessionID  string
 	OpeningContext          OpeningContext
+	RequestID               string
 }
 
 func openingContextText(c OpeningContext) string {
@@ -1734,15 +1754,36 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 	if targetSessionID == "" {
 		targetSessionID = newVoiceSessionID()
 	}
+	if s.creationOutcomes != nil && strings.TrimSpace(req.RequestID) != "" {
+		if err := s.creationOutcomes.CreateVoiceCreationOutcome(owner, req.RequestID); err != nil {
+			s.logger.Error("voice_creation_outcome_pending_failed", "error", err)
+		}
+	}
+	markOutcome := func(outcome, sessionID string, generation int64) {
+		if s.creationOutcomes != nil && strings.TrimSpace(req.RequestID) != "" {
+			if err := s.creationOutcomes.UpdateVoiceCreationOutcome(owner, req.RequestID, outcome, sessionID, generation); err != nil {
+				s.logger.Error("voice_creation_outcome_update_failed", "outcome", outcome, "error", err)
+			}
+		}
+	}
 	excluded := map[string]struct{}{}
 	var lastError string
 	var lastDetail any
 	lastStatus := 0
 	resumeRefusedRetried := false
+	outcomeDone := false
+	outcomeFinal := "unknown"
+	defer func() {
+		if outcomeDone || s.creationOutcomes == nil || strings.TrimSpace(req.RequestID) == "" {
+			return
+		}
+		_ = s.creationOutcomes.UpdateVoiceCreationOutcome(owner, req.RequestID, outcomeFinal, "", 0)
+	}()
 
 	for attempt := 1; attempt <= s.cfg.MaxAccountAttempts; attempt++ {
 		token, account, err := s.pickAccountForSession(preferredToken, preferredAccountID, excluded)
 		if err != nil {
+			outcomeFinal = "unknown"
 			if preferredToken != "" || preferredAccountID > 0 {
 				s.ReleaseSession(owner, req.VoiceSessionID)
 				// Sticky account gone: cannot honestly resume this upstream thread.
@@ -1864,7 +1905,11 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 					continue
 				}
 				closeMediaOnFailure("upstream_rejected")
-				return nil, &ServiceError{Message: fmt.Sprintf("codex realtime failed status=%d", status), StatusCode: 502, Detail: truncate(text, 500)}
+				if s.cfg.ZoeFinalTurnDebugText {
+					s.logger.Info("voice_create_rejected", "upstream_status", status, "upstream_body", truncateRunes(text, 200), "account_id", account.ID, "attempt", attempt)
+				}
+				lastStatus, lastDetail = status, truncate(text, 500)
+				continue
 			}
 		} else if (status != 200 && status != 201) || !strings.HasPrefix(strings.TrimLeft(text, " \t\r\n"), "v=0") {
 			if upstreamForWM.ConversationState == "resumed" && !resumeRefusedRetried {
@@ -1883,12 +1928,12 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 			if kind == "html" {
 				msg = "upstream blocked by Cloudflare or challenge page"
 			}
-			return nil, &ServiceError{
-				Message:    msg,
-				StatusCode: 502,
-				Detail:     truncate(text, 500),
+			if s.cfg.ZoeFinalTurnDebugText {
+				s.logger.Info("voice_create_rejected", "upstream_status", status, "upstream_body", truncateRunes(text, 200), "account_id", account.ID, "attempt", attempt)
 			}
+			return nil, &ServiceError{Message: msg, StatusCode: http.StatusBadGateway, Detail: truncate(text, 500)}
 		}
+		outcomeFinal = "unknown"
 		var avasSideband *avasSidebandWriter
 		var avasCancel context.CancelFunc
 		if s.cfg.VoiceUpstreamRoute == "avas" && media != nil {
@@ -1960,6 +2005,8 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 			}
 		}
 		voiceSessionID := s.bindVoiceSessionMedia(owner, targetSessionID, token, account, upstreamForWM, media, mediaID, call)
+		markOutcome("established", voiceSessionID, mediaID.MediaGeneration)
+		outcomeDone = true
 		if avasSideband != nil {
 			s.mu.Lock()
 			if b := s.bindings[voiceSessionID]; b != nil && b.media == media {
@@ -2080,6 +2127,14 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 		}, nil
 	}
 
+	if s.cfg.VoiceUpstreamRoute == "avas" && lastStatus != 0 && lastStatus != 401 {
+		outcomeFinal = "never_established"
+		msg := fmt.Sprintf("realtime/wm failed status=%d", lastStatus)
+		if classifyProbeBody("", fmt.Sprint(lastDetail)) == "html" {
+			msg = "upstream blocked by Cloudflare or challenge page"
+		}
+		return nil, &ServiceError{Message: msg, StatusCode: http.StatusBadGateway, Detail: lastDetail, CreationRejected: true, UpstreamStatus: lastStatus}
+	}
 	code := 503
 	if lastStatus == 401 {
 		code = 401
@@ -2206,6 +2261,14 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n]
+}
+
+func truncateRunes(s string, n int) string {
+	runes := []rune(s)
+	if len(runes) > n {
+		runes = runes[:n]
+	}
+	return string(runes)
 }
 
 func orDefault(s, def string) string {

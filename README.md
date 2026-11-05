@@ -32,6 +32,10 @@ not identify a build containing this fork's changes.
 
 未验证：累计文本是否完全等于用户实际说出的内容；补丁归属消息依赖上游帧的顺序；AVAS 映射尚未实现。
 
+### Voice creation outcomes
+
+When AVAS rejects session creation before returning an accepted SDP, `POST /v1/voice/sessions` returns HTTP 422 with `{"error":"upstream_rejected","established":false,"upstream_status":<status>}`. Clients may query the owner-scoped result with `GET /v1/voice/requests/{request_id}/outcome`; it returns `never_established`, `open`, `released`, or `unknown`.
+
 ## 网页效果
 
 ![image-20260724144852569](./README.assets/image-20260724144852569.png)

@@ -48,6 +48,7 @@ func (s *Server) downstreamSession(w http.ResponseWriter, r *http.Request) {
 		LanguageCode:   body.LanguageCode,
 		VoiceSessionID: body.VoiceSessionID,
 		OpeningContext: body.OpeningContext,
+		RequestID:      requestIDFromRequest(r),
 	})
 	if err != nil {
 		writeDownstreamServiceError(w, err)
@@ -80,6 +81,39 @@ func (s *Server) downstreamSession(w http.ResponseWriter, r *http.Request) {
 		response["voice_session_generation"] = result.VoiceSessionGeneration
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func requestIDFromRequest(r *http.Request) string {
+	if id := logging.RequestID(r.Context()); id != "" {
+		return id
+	}
+	return strings.TrimSpace(r.Header.Get("X-Request-ID"))
+}
+
+func (s *Server) downstreamOutcome(w http.ResponseWriter, r *http.Request) {
+	if s.voice == nil {
+		writeDownstreamError(w, http.StatusServiceUnavailable, "voice_unavailable", "voice service unavailable")
+		return
+	}
+	owner := auth.APIKeyOwner(r.Context())
+	if owner == "" {
+		writeDownstreamError(w, http.StatusUnauthorized, "invalid_api_key", "valid Bearer API key required")
+		return
+	}
+	requestID := strings.TrimSpace(r.PathValue("request_id"))
+	provider, ok := s.voice.(interface {
+		CreationOutcome(string, string) (string, bool)
+	})
+	if requestID == "" || !ok {
+		writeDownstreamError(w, http.StatusNotFound, "not_found", "request outcome not found")
+		return
+	}
+	row, exists := provider.CreationOutcome(owner, requestID)
+	if !exists {
+		writeDownstreamError(w, http.StatusNotFound, "not_found", "request outcome not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"request_id": requestID, "outcome": row})
 }
 
 func (s *Server) downstreamOpeningContext(w http.ResponseWriter, r *http.Request) {
@@ -358,6 +392,12 @@ func writeDownstreamServiceError(w http.ResponseWriter, err error) {
 		return
 	}
 	switch se.StatusCode {
+	case http.StatusBadGateway:
+		if se.CreationRejected {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": "upstream_rejected", "established": false, "upstream_status": se.UpstreamStatus})
+			return
+		}
+		writeDownstreamError(w, http.StatusBadGateway, "upstream_unavailable", "upstream voice service unavailable")
 	case http.StatusBadRequest:
 		writeDownstreamError(w, http.StatusBadRequest, "invalid_request", se.Message)
 	case http.StatusUnauthorized:
@@ -377,8 +417,6 @@ func writeDownstreamServiceError(w http.ResponseWriter, err error) {
 		writeDownstreamError(w, http.StatusNotFound, "voice_session_not_found", "voice session not found")
 	case http.StatusTooManyRequests:
 		writeDownstreamError(w, http.StatusTooManyRequests, "upstream_rate_limited", "upstream conversation rate limited")
-	case http.StatusBadGateway:
-		writeDownstreamError(w, http.StatusBadGateway, "upstream_unavailable", "upstream voice service unavailable")
 	default:
 		writeDownstreamError(w, http.StatusServiceUnavailable, "voice_unavailable", "voice service unavailable")
 	}

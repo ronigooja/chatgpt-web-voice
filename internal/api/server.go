@@ -119,6 +119,7 @@ func (s *Server) RegisterDownstream(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/health", s.downstreamHealth)
 	mux.HandleFunc("GET /v1/voice/config", s.voiceConfig)
 	mux.HandleFunc("POST /v1/voice/sessions", s.downstreamSession)
+	mux.HandleFunc("GET /v1/voice/requests/{request_id}/outcome", s.downstreamOutcome)
 	mux.HandleFunc("POST /v1/voice/sessions/{id}/context", s.downstreamSessionContext)
 	mux.HandleFunc("POST /v1/voice/sessions/{id}/opening-context", s.downstreamOpeningContext)
 	mux.HandleFunc("GET /v1/voice/sessions/{id}/title", s.downstreamSessionTitle)

@@ -102,6 +102,17 @@ func (db *DB) migrate() error {
 			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 		"CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at)",
+		`CREATE TABLE IF NOT EXISTS voice_creation_outcomes (
+			request_id TEXT NOT NULL,
+			owner TEXT NOT NULL,
+			outcome TEXT NOT NULL,
+			voice_session_id TEXT,
+			media_generation INTEGER,
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (owner, request_id)
+		)`,
+		"CREATE INDEX IF NOT EXISTS idx_voice_creation_outcomes_updated ON voice_creation_outcomes(updated_at)",
 	} {
 		if _, err := db.conn.Exec(statement); err != nil {
 			return fmt.Errorf("initialize sqlite database: %w", err)
@@ -142,6 +153,9 @@ func (db *DB) migrate() error {
 	if err := db.ensureMediaEvidenceTables(); err != nil {
 		return err
 	}
+	if err := db.cleanupVoiceCreationOutcomes(); err != nil {
+		return err
+	}
 	// Created after legacy account-table rebuilds.
 	if _, err := db.conn.Exec(`CREATE TABLE IF NOT EXISTS bridge_accounts (
 		remote_id TEXT PRIMARY KEY,
@@ -156,6 +170,16 @@ func (db *DB) migrate() error {
 		key TEXT PRIMARY KEY, remote_id TEXT NOT NULL, payload_digest TEXT NOT NULL
 	)`); err != nil {
 		return fmt.Errorf("create bridge idempotency: %w", err)
+	}
+	return nil
+}
+
+func (db *DB) cleanupVoiceCreationOutcomes() error {
+	if _, err := db.conn.Exec(`UPDATE voice_creation_outcomes SET outcome = 'unknown', updated_at = CURRENT_TIMESTAMP WHERE outcome = 'pending'`); err != nil {
+		return fmt.Errorf("mark pending voice creation outcomes unknown: %w", err)
+	}
+	if _, err := db.conn.Exec(`DELETE FROM voice_creation_outcomes WHERE updated_at < datetime('now', '-7 days')`); err != nil {
+		return fmt.Errorf("cleanup voice creation outcomes: %w", err)
 	}
 	return nil
 }
