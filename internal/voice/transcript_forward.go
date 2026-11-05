@@ -35,6 +35,9 @@ type transcriptForward struct {
 	mu                                             sync.Mutex
 	queue                                          []forwardedTurn
 	cur                                            transcriptTurn
+	userCompleted                                  bool
+	userText                                       string
+	userID                                         string
 	seq                                            int64
 	seen                                           map[string]bool
 	seenIDs                                        []string
@@ -107,6 +110,7 @@ func (f *transcriptForward) emitLocked(role, id, text string) {
 			f.seenIDs = f.seenIDs[1:]
 		}
 	}
+	text = boundedTurnText(text)
 	t := forwardedTurn{Seq: f.seq, Role: role, Text: text, At: time.Now().UTC().Format(time.RFC3339Nano)}
 	f.seq++
 	if len(f.queue) >= f.capacity {
@@ -196,7 +200,17 @@ func (f *transcriptForward) Observe(data []byte) {
 	switch e.Type {
 	case "turn.created":
 		f.flushLocked()
-		f.cur = transcriptTurn{ID: e.Turn.ID, Role: e.Turn.Role, Text: turnText(e.Turn.Transcript)}
+		if e.Turn.Role == "user" {
+			f.userCompleted, f.userText, f.userID = false, "", ""
+		}
+		text := turnText(e.Turn.Transcript)
+		if text == "" {
+			text = turnText(e.Turn.Content)
+		}
+		if text == "" {
+			text = turnText(e.Turn.Text)
+		}
+		f.cur = transcriptTurn{ID: e.Turn.ID, Role: e.Turn.Role, Text: boundedTurnText(text)}
 	case "turn.done":
 		text := turnText(e.Turn.Transcript)
 		if text == "" {
@@ -219,17 +233,31 @@ func (f *transcriptForward) Observe(data []byte) {
 			f.flushLocked()
 		}
 		f.cur = transcriptTurn{}
+		if role == "user" {
+			if f.userCompleted && f.userText == text && (id == "" || f.userID == "" || id == f.userID) {
+				return
+			}
+			f.userCompleted, f.userText, f.userID = true, boundedTurnText(text), id
+		}
 		f.emitLocked(role, id, text)
 	case "delegation.created":
 		if e.Item.Target == "client" {
 			// A delegation contains the final user transcription, not an
 			// assistant response. It must not duplicate turn.done for that user.
+			text := turnText(e.Item.Content)
+			if f.userCompleted && f.userText == text {
+				return
+			}
+			if f.cur.Role == "assistant" {
+				f.flushLocked()
+			}
 			id := f.cur.ID
 			if id == "" {
 				id = e.Item.ID
 			}
 			f.cur = transcriptTurn{}
-			f.emitLocked("user", id, turnText(e.Item.Content))
+			f.userCompleted, f.userText, f.userID = true, boundedTurnText(text), id
+			f.emitLocked("user", id, text)
 		}
 	case "turn.text.delta", "output_text.delta", "output_audio_transcript.delta":
 		if f.cur.Role != "" {
@@ -266,10 +294,6 @@ func (f *transcriptForward) observeLegacyLocked(raw json.RawMessage) {
 		role := m.Author.Role
 		var parts []string
 		for _, p := range m.Content.Parts {
-			var part struct {
-				ContentType, Direction    string
-				Text, Content, Transcript json.RawMessage
-			}
 			// Direction inference matches transcriptTail's audio transcriptions.
 			var meta struct {
 				ContentType string `json:"content_type"`
@@ -285,9 +309,6 @@ func (f *transcriptForward) observeLegacyLocked(raw json.RawMessage) {
 				}
 			}
 			text := turnText(p)
-			if text == "" && json.Unmarshal(p, &part) == nil {
-				text = turnText(part.Content)
-			}
 			parts = append(parts, text)
 		}
 		if role != "user" && role != "assistant" {
@@ -322,6 +343,12 @@ func (f *transcriptForward) run() {
 		}
 		f.mu.Unlock()
 		f.client.CloseIdleConnections()
+		f.mu.Lock()
+		pending := len(f.queue)
+		f.mu.Unlock()
+		if pending > 0 {
+			f.logger.Warn("zoe_transcript_flush_expired", "pending", pending)
+		}
 	}()
 	ticker := time.NewTicker(f.interval)
 	defer ticker.Stop()
@@ -329,6 +356,7 @@ func (f *transcriptForward) run() {
 	var first404 time.Time
 	var authLogged time.Time
 	backoff := f.retryBase
+	single := false
 	for {
 		select {
 		case <-f.ctx.Done():
@@ -363,9 +391,21 @@ func (f *transcriptForward) run() {
 		}
 		f.mu.Lock()
 		batch := f.batch
+		limit := 20
+		if single {
+			limit = 1
+		}
+		if len(f.queue) < limit {
+			limit = len(f.queue)
+		}
+		candidates := append([]forwardedTurn(nil), f.queue[:limit]...)
+		f.mu.Unlock()
 		batch.Turns = nil
-		for _, turn := range f.queue {
-			if len(batch.Turns) == 20 {
+		for _, turn := range candidates {
+			if len(turn.Text) > 64<<10 {
+				if len(batch.Turns) == 0 {
+					batch.Turns = append(batch.Turns, turn)
+				}
 				break
 			}
 			batch.Turns = append(batch.Turns, turn)
@@ -374,12 +414,7 @@ func (f *transcriptForward) run() {
 				batch.Turns = batch.Turns[:len(batch.Turns)-1]
 				break
 			}
-			if len(turn.Text) > 64<<10 {
-				batch.Turns = batch.Turns[:1]
-				break
-			}
 		}
-		f.mu.Unlock()
 		if len(batch.Turns) == 0 {
 			continue
 		}
@@ -405,6 +440,12 @@ func (f *transcriptForward) run() {
 				_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 				resp.Body.Close()
 			}
+		}
+		// Isolate bad turns instead of dropping innocent members of a rejected batch.
+		if (status == 400 || status == 413) && len(batch.Turns) > 1 {
+			single = true
+			f.signal()
+			continue
 		}
 		drop := status == 200 || status == 400 || status == 413 || status == 409 || (status >= 300 && status < 400)
 		if status == 404 {

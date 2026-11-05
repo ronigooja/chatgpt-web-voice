@@ -63,7 +63,7 @@ type avasRig struct {
 	id       string
 }
 
-func newAVASRig(t *testing.T) *avasRig {
+func newAVASRig(t *testing.T, configure ...func(*Service)) *avasRig {
 	t.Helper()
 	up := &avasUpstream{ready: make(chan struct{}), release: make(chan struct{})}
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
@@ -121,6 +121,9 @@ func newAVASRig(t *testing.T) *avasRig {
 	fr := &fakeRelay{}
 	svc.WithRelay(fr)
 	svc.WithCallSessions(&testCallSessionStore{rows: make(map[string]callsessions.Session)})
+	for _, apply := range configure {
+		apply(svc)
+	}
 	res, err := svc.CreateSession(CreateSessionRequest{Owner: "api_key:1", OfferSDP: readTestdata(t, "wm_offer.sdp")})
 	if err != nil {
 		t.Fatal(err)
