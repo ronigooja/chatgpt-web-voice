@@ -2,6 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"unicode/utf8"
@@ -31,6 +33,27 @@ type sessionRequest struct {
 	UpstreamParentMessageID string               `json:"upstream_parent_message_id"`
 	UpstreamVoiceSessionID  string               `json:"upstream_voice_session_id"`
 	OpeningContext          voice.OpeningContext `json:"opening_context"`
+	Instructions            string               `json:"instructions"`
+}
+
+// decodeSessionRequest checks wire UTF-8 before encoding/json can replace it.
+func decodeSessionRequest(r *http.Request, body *sessionRequest) error {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		return fmt.Errorf("invalid JSON body")
+	}
+	if !utf8.Valid(raw) {
+		return fmt.Errorf("instructions and JSON body must be valid UTF-8")
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(body); err != nil {
+		return fmt.Errorf("invalid JSON body")
+	}
+	if len(body.Instructions) > 6000 {
+		return fmt.Errorf("instructions must be at most 6000 bytes")
+	}
+	return nil
 }
 
 type sessionContextRequest struct {
@@ -50,11 +73,9 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 	var body sessionRequest
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&body); err != nil {
+	if err := decodeSessionRequest(r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"detail": map[string]any{"error": "invalid json body"},
+			"detail": map[string]any{"error": err.Error()},
 		})
 		return
 	}
@@ -69,6 +90,7 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) {
 		UpstreamConversationID:  body.UpstreamConversationID,
 		UpstreamParentMessageID: body.UpstreamParentMessageID,
 		UpstreamVoiceSessionID:  body.UpstreamVoiceSessionID,
+		Instructions:            body.Instructions,
 	})
 	if err != nil {
 		writeServiceError(w, err)

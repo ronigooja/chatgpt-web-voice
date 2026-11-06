@@ -31,10 +31,8 @@ func (s *Server) downstreamSession(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 	var body sessionRequest
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&body); err != nil {
-		writeDownstreamError(w, http.StatusBadRequest, "invalid_request", "invalid JSON body")
+	if err := decodeSessionRequest(r, &body); err != nil {
+		writeDownstreamError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
 	// Downstream resume model: the caller only keeps voice_session_id.
@@ -48,6 +46,7 @@ func (s *Server) downstreamSession(w http.ResponseWriter, r *http.Request) {
 		LanguageCode:   body.LanguageCode,
 		VoiceSessionID: body.VoiceSessionID,
 		OpeningContext: body.OpeningContext,
+		Instructions:   body.Instructions,
 		RequestID:      requestIDFromRequest(r),
 	})
 	if err != nil {

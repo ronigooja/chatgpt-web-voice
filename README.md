@@ -291,6 +291,18 @@ them after the investigation.
 Authorization: Bearer vgw_live_<密钥>
 ```
 
+For create-session requests (`POST /v1/voice/sessions` and the admin
+`POST /api/voice/session`), optional top-level `instructions` is a valid UTF-8
+string capped at 6000 bytes; invalid UTF-8 or a larger value returns HTTP 400
+before any upstream call. On AVAS only, the gateway forwards it verbatim as
+`session.instructions` alongside `delegation:{"type":"client"}` and any
+`opening_context` mapped to `session.initial_items` in the same create request.
+Omitted or empty instructions produce an empty upstream string. Other routes
+ignore the value. The gateway does not choose, rewrite, persist, or log its text.
+AVAS creation acknowledges opening context with `opening_context.applied:true`
+and `silent:true` after metadata persistence; this is separate from instructions.
+The `/v1/voice/sessions/{id}/context` endpoint is unchanged.
+
 ### 接口列表
 
 | 方法 | 路径 | 说明 |

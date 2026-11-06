@@ -1632,6 +1632,7 @@ type CreateSessionRequest struct {
 	UpstreamParentMessageID string
 	UpstreamVoiceSessionID  string
 	OpeningContext          OpeningContext
+	Instructions            string
 	RequestID               string
 }
 
@@ -1658,6 +1659,12 @@ func (s *Service) pickAccountForSession(preferredToken string, preferredAccountI
 
 // CreateSession POSTs offer SDP to /realtime/wm and returns answer SDP.
 func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error) {
+	if !utf8.ValidString(req.Instructions) {
+		return nil, &ServiceError{Message: "instructions must be valid UTF-8", StatusCode: 400}
+	}
+	if len(req.Instructions) > 6000 {
+		return nil, &ServiceError{Message: "instructions must be at most 6000 bytes", StatusCode: 400}
+	}
 	offerSDP, err := normalizeSDP(req.OfferSDP)
 	if err != nil {
 		return nil, err
@@ -1862,6 +1869,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 		var contentType, text, retryAfter, upstreamLocation string
 		if s.cfg.VoiceUpstreamRoute == "avas" {
 			avasPayload := buildAVASSession(voice, upstreamForWM)
+			avasPayload.Instructions = req.Instructions
 			if len(req.OpeningContext.Items) > 0 {
 				if _, err := validateOpeningContext(req.OpeningContext); err != nil {
 					return nil, err
@@ -2129,6 +2137,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 			"voice_session_id", voiceSessionID,
 			"account_id", account.ID,
 			"voice", voice,
+			"instructions_bytes", len(req.Instructions),
 			"proxy_source", proxySource,
 			"attempt", attempt,
 			"resume_conversation", upstreamOut.ConversationID != "",
