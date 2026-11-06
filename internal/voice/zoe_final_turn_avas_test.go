@@ -138,9 +138,10 @@ func TestAVASDebugTextLogsOnlyWhenEnabled(t *testing.T) {
 		m.Observe(turn)
 		m.Observe(delegation("d", "client", "DELEGATED-REQUEST"))
 		got := logger.text()
-		has := strings.Contains(got, "ASSISTANT-SAID-THIS") && strings.Contains(got, "DELEGATED-REQUEST")
-		if has != enabled {
-			t.Fatalf("debug=%v but text logged=%v: %s", enabled, has, got)
+		for _, text := range []string{"ASSISTANT-SAID-THIS", "DELEGATED-REQUEST"} {
+			if strings.Contains(got, text) != enabled {
+				t.Fatalf("debug=%v but text %q visibility is incorrect: %s", enabled, text, got)
+			}
 		}
 		if !enabled && strings.Contains(got, "zoe_debug_message") {
 			t.Fatalf("debug line logged with the switch off: %s", got)
