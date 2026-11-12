@@ -1,6 +1,7 @@
 package voice
 
 import (
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -12,10 +13,144 @@ import (
 	"time"
 
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/accounts"
+	"github.com/dyhhhhhh/chatgpt-web-voice/internal/callsessions"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/config"
+	"github.com/dyhhhhhh/chatgpt-web-voice/internal/relay"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/secretbox"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/store"
 )
+
+func assertCreationOutcome(t *testing.T, svc *Service, db *store.DB, want string) {
+	t.Helper()
+	row, err := db.GetVoiceCreationOutcome("api_key:1", "no-account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.Outcome != want {
+		t.Fatalf("stored outcome=%q want %q", row.Outcome, want)
+	}
+	if outcome, exists := svc.CreationOutcome("api_key:1", "no-account"); !exists || outcome != want {
+		t.Fatalf("outcome=%q exists=%v want %q", outcome, exists, want)
+	}
+}
+
+func TestCreateNoUsableAccountBeforeResourcesNeverEstablished(t *testing.T) {
+	for _, route := range []string{"avas", "wm"} {
+		for _, state := range []string{"empty", "expired", "cooling", "disabled"} {
+			t.Run(route+"/"+state, func(t *testing.T) {
+				svc, db, upstream := newCreationService(t, nil, 3)
+				svc.cfg.VoiceUpstreamRoute = route
+				r := &fakeRelay{}
+				svc.WithRelay(r)
+				if state != "empty" {
+					for i := 0; i < 2; i++ {
+						expiry := time.Now().Add(time.Hour)
+						if state == "expired" {
+							expiry = time.Now().Add(-time.Hour)
+						}
+						account, err := svc.pool.(*accounts.Pool).Create(accounts.Account{AccessToken: testJWT(map[string]any{"exp": expiry.Unix(), "jti": string(rune('a' + i))}), Disabled: state == "disabled"})
+						if err != nil {
+							t.Fatal(err)
+						}
+						if state == "cooling" {
+							if _, err := db.Conn().Exec("UPDATE accounts SET cooldown_until = ? WHERE id = ?", time.Now().Add(time.Hour).UnixMilli(), account.ID); err != nil {
+								t.Fatal(err)
+							}
+						}
+					}
+				}
+				_, err := svc.CreateSession(CreateSessionRequest{Owner: "api_key:1", RequestID: "no-account", OfferSDP: readTestdata(t, "wm_offer.sdp")})
+				if se := serviceError(t, err); se.StatusCode != http.StatusServiceUnavailable || se.CreationRejected {
+					t.Fatalf("error=%+v", se)
+				}
+				assertCreationOutcome(t, svc, db, "never_established")
+				if r.count() != 0 || len(upstream.bodies) != 0 {
+					t.Fatal("resources started without a usable account")
+				}
+			})
+		}
+	}
+}
+
+func TestCreateLaterSelectionFailureAfterResourcesStaysUnknown(t *testing.T) {
+	for _, relayed := range []bool{false, true} {
+		name := "direct"
+		if relayed {
+			name = "relay"
+		}
+		t.Run(name, func(t *testing.T) {
+			svc, db, upstream := newCreationService(t, []int{http.StatusBadGateway}, 2)
+			if relayed {
+				svc.WithRelay(&fakeRelay{})
+			}
+			_, err := svc.CreateSession(CreateSessionRequest{Owner: "api_key:1", RequestID: "no-account", OfferSDP: readTestdata(t, "wm_offer.sdp")})
+			if se := serviceError(t, err); se.StatusCode != http.StatusServiceUnavailable || se.CreationRejected {
+				t.Fatalf("error=%+v", se)
+			}
+			assertCreationOutcome(t, svc, db, "unknown")
+			if len(upstream.bodies) != 1 {
+				t.Fatalf("attempts=%d", len(upstream.bodies))
+			}
+		})
+	}
+}
+
+func TestCreateResourceStartFailuresStayUnknown(t *testing.T) {
+	for _, mode := range []string{"relay", "capacity", "avas", "wm"} {
+		t.Run(mode, func(t *testing.T) {
+			svc, db, _ := newCreationService(t, []int{http.StatusCreated}, 2)
+			wantStatus := http.StatusBadGateway
+			switch mode {
+			case "relay":
+				svc.WithRelay(&fakeRelay{newErr: errors.New("synthetic start failure")})
+			case "capacity":
+				svc.WithRelay(&fakeRelay{newErr: relay.ErrCapacity})
+				wantStatus = http.StatusServiceUnavailable
+			default:
+				// A closed local TLS server makes the real upstream POST fail.
+				closed := httptest.NewTLSServer(http.NotFoundHandler())
+				closed.Close()
+				svc.cfg.VoiceUpstreamRoute = mode
+				svc.avasURL = closed.URL
+				svc.realtimeURL = closed.URL
+			}
+			_, err := svc.CreateSession(CreateSessionRequest{Owner: "api_key:1", RequestID: "no-account", OfferSDP: readTestdata(t, "wm_offer.sdp")})
+			if se := serviceError(t, err); se.StatusCode != wantStatus || se.CreationRejected {
+				t.Fatalf("error=%+v", se)
+			}
+			assertCreationOutcome(t, svc, db, "unknown")
+		})
+	}
+}
+
+func TestCreateResumedIdentitySelectionFailureStaysUnknown(t *testing.T) {
+	for _, identity := range []string{"binding", "durable", "upstream_voice", "conversation", "parent"} {
+		t.Run(identity, func(t *testing.T) {
+			svc, db, _ := newCreationService(t, nil, 2)
+			req := CreateSessionRequest{Owner: "api_key:1", RequestID: "no-account", OfferSDP: readTestdata(t, "wm_offer.sdp")}
+			switch identity {
+			case "binding":
+				req.VoiceSessionID = svc.bindVoiceSession(req.Owner, "", "old-token", accounts.Account{ID: 99}, UpstreamContext{})
+			case "durable":
+				req.VoiceSessionID = "vs_durable"
+				svc.WithCallSessions(&testCallSessionStore{rows: map[string]callsessions.Session{
+					req.VoiceSessionID: {VoiceSessionID: req.VoiceSessionID, AccountID: 99},
+				}})
+			case "upstream_voice":
+				req.UpstreamVoiceSessionID = "existing-upstream"
+			case "conversation":
+				req.UpstreamConversationID = "existing-conversation"
+			case "parent":
+				req.UpstreamParentMessageID = "existing-parent"
+			}
+			_, err := svc.CreateSession(req)
+			if se := serviceError(t, err); se.StatusCode != http.StatusServiceUnavailable || se.CreationRejected {
+				t.Fatalf("error=%+v", se)
+			}
+			assertCreationOutcome(t, svc, db, "unknown")
+		})
+	}
+}
 
 type creationUpstream struct {
 	mu       sync.Mutex

@@ -1795,6 +1795,10 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 	allAttemptsCleanRejection := true
 	outcomeDone := false
 	outcomeFinal := "unknown"
+	// Only fresh identities can prove that no prior session resources exist.
+	freshCreate := bound == nil && durable == nil && strings.TrimSpace(req.VoiceSessionID) == "" &&
+		requestUpstream.ConversationID == "" && requestUpstream.ParentMessageID == "" && requestUpstream.UpstreamVoiceSessionID == ""
+	resourcesStarted := false // Monotonic across account retries.
 	defer func() {
 		if outcomeDone || s.creationOutcomes == nil || strings.TrimSpace(req.RequestID) == "" {
 			return
@@ -1807,6 +1811,10 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 		if err != nil {
 			allAttemptsCleanRejection = false
 			outcomeFinal = "unknown"
+			if _, unavailable := err.(*accounts.Error); unavailable && freshCreate && !resourcesStarted {
+				outcomeFinal = "never_established"
+				s.logger.Info("voice_create_outcome", "outcome", outcomeFinal, "reason", "no_usable_account")
+			}
 			if preferredToken != "" || preferredAccountID > 0 {
 				s.ReleaseSession(owner, req.VoiceSessionID)
 				// Sticky account gone: cannot honestly resume this upstream thread.
@@ -1848,6 +1856,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 		var media relay.Session
 		if s.relay != nil {
 			var relayErr error
+			resourcesStarted = true
 			media, wmOffer, relayErr = s.relay.NewSession(context.Background(), offerSDP, s.relayRoute(account))
 			if relayErr != nil {
 				s.logger.Error("relay_session_create_failed", "account_id", account.ID, "attempt", attempt, "error", relayErr)
@@ -1876,8 +1885,10 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 				}
 				avasPayload.addOpeningContext(req.OpeningContext)
 			}
+			resourcesStarted = true
 			status, contentType, text, upstreamLocation, err = s.postAVASResponse(token, wmOffer, avasPayload, explicitProxy, account.DeviceID)
 		} else {
+			resourcesStarted = true
 			status, contentType, text, retryAfter, err = s.postWMResponse(token, wmOffer, sessionJSON, explicitProxy, account.DeviceID)
 		}
 		health := s.reportOutcome(token, wmStarted, status, contentType, text, retryAfter, err)

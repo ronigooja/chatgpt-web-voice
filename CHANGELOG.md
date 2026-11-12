@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Fresh voice creates with no usable account now persist `never_established`
+  before any relay or upstream resource starts; resumed identities and later
+  account-selection failures remain conservative (`unknown`).
+
 - Added API-key-authenticated `POST /v1/voice/sessions/{id}/opening-context` and
   additive session-creation `opening_context`. Bounds, control-character
   rejection, owner checks, monotonic idempotent versions, and metadata-only

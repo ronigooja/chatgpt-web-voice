@@ -2,7 +2,9 @@ package api
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -10,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/accounts"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/apikeys"
@@ -20,6 +23,65 @@ import (
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/store"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/voice"
 )
+
+func TestRealHTTPMuxNoUsablePoolPersistsNeverEstablished(t *testing.T) {
+	for _, state := range []string{"empty", "expired", "cooling", "disabled"} {
+		t.Run(state, func(t *testing.T) {
+			db, err := store.Open(filepath.Join(t.TempDir(), "voice.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			pool := accounts.NewPoolFromDB(db)
+			box, err := secretbox.New(make([]byte, 32))
+			if err != nil {
+				t.Fatal(err)
+			}
+			pool.WithBox(box)
+			if state != "empty" {
+				for i := 0; i < 2; i++ {
+					expiry := time.Now().Add(time.Hour)
+					if state == "expired" {
+						expiry = time.Now().Add(-time.Hour)
+					}
+					claims := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"exp":%d,"jti":%d}`, expiry.Unix(), i)))
+					account, err := pool.Create(accounts.Account{AccessToken: "e30." + claims + ".synthetic", Disabled: state == "disabled"})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if state == "cooling" {
+						if _, err := db.Conn().Exec("UPDATE accounts SET cooldown_until = ? WHERE id = ?", time.Now().Add(time.Hour).UnixMilli(), account.ID); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+			}
+			service := voice.New(config.Config{MaxAccountAttempts: 3, VoiceUpstreamRoute: "avas"}, pool, slog.New(slog.NewTextHandler(io.Discard, nil))).WithCreationOutcomes(db)
+			handler, secret, _ := newDownstreamTestHandler(t, service)
+			handler = logging.HTTPMiddleware(slog.New(slog.NewTextHandler(io.Discard, nil)), handler)
+			request := httptest.NewRequest(http.MethodPost, "/v1/voice/sessions", strings.NewReader(`{"offer_sdp":"v=0\r\noffer\r\n"}`))
+			request.Header.Set("Authorization", "Bearer "+secret)
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("X-Request-ID", "no-usable-pool")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"voice_unavailable"`) {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+			row, err := db.GetVoiceCreationOutcome("api_key:1", "no-usable-pool")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if row.Outcome != "never_established" {
+				t.Fatalf("stored outcome=%q", row.Outcome)
+			}
+			outcome := performDownstreamRequest(t, handler, http.MethodGet, "/v1/voice/requests/no-usable-pool/outcome", secret, nil)
+			if outcome.Code != http.StatusOK || !strings.Contains(outcome.Body.String(), `"outcome":"never_established"`) {
+				t.Fatalf("outcome status=%d body=%s", outcome.Code, outcome.Body.String())
+			}
+		})
+	}
+}
 
 type downstreamVoiceStub struct {
 	createRequest voice.CreateSessionRequest

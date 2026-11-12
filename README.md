@@ -35,6 +35,7 @@ not identify a build containing this fork's changes.
 ### Voice creation outcomes
 
 When AVAS rejects session creation before returning an accepted SDP, `POST /v1/voice/sessions` returns HTTP 422 with `{"error":"upstream_rejected","established":false,"upstream_status":<status>}`. Clients may query the owner-scoped result with `GET /v1/voice/requests/{request_id}/outcome`; it returns `never_established`, `open`, `released`, or `unknown`.
+For fresh creates, no-usable-account failures before any account selection succeeds or any resource starts report `never_established`.
 
 ### WM final-turn text diagnosis
 
