@@ -1944,7 +1944,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 				}
 				closeMediaOnFailure("upstream_rejected")
 				if s.cfg.ZoeFinalTurnDebugText {
-					s.logger.Info("voice_create_rejected", "upstream_status", status, "upstream_body", truncateRunes(text, 200), "account_id", account.ID, "attempt", attempt)
+					s.logger.Debug("voice_create_rejected", "upstream_status", status, "upstream_body", strings.ToValidUTF8(text, "�"), "account_id", account.ID, "attempt", attempt)
 				}
 				lastStatus, lastDetail = status, truncate(text, 500)
 				continue
@@ -1967,7 +1967,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (*SessionResult, error
 				msg = "upstream blocked by Cloudflare or challenge page"
 			}
 			if s.cfg.ZoeFinalTurnDebugText {
-				s.logger.Info("voice_create_rejected", "upstream_status", status, "upstream_body", truncateRunes(text, 200), "account_id", account.ID, "attempt", attempt)
+				s.logger.Debug("voice_create_rejected", "upstream_status", status, "upstream_body", strings.ToValidUTF8(text, "�"), "account_id", account.ID, "attempt", attempt)
 			}
 			return nil, &ServiceError{Message: msg, StatusCode: http.StatusBadGateway, Detail: truncate(text, 500)}
 		}

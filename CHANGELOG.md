@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Final-turn debug text now defaults on and is emitted only at DEBUG, without
+  200-rune truncation, including gated upstream rejection bodies. Log level
+  defaults to `debug` in code, the image, and the example environment; explicit
+  debug-text `false` still disables content logs. INFO retains metadata only;
+  sampler, transcript-forwarder, and relay-handoff no-text contracts are unchanged.
+
 - Fresh voice creates with no usable account now persist `never_established`
   before any relay or upstream resource starts; resumed identities and later
   account-selection failures remain conservative (`unknown`).

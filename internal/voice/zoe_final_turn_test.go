@@ -16,7 +16,8 @@ func (f *zoeFakeInjector) InjectEvent(b []byte) error {
 
 type zoeFakeLogger struct{ logs []string }
 
-func (f *zoeFakeLogger) Info(msg string, args ...any) { f.logs = append(f.logs, fmt.Sprint(msg, args)) }
+func (f *zoeFakeLogger) Info(msg string, args ...any)  { f.logs = append(f.logs, fmt.Sprint(msg, args)) }
+func (f *zoeFakeLogger) Debug(msg string, args ...any) { f.Info(msg, args...) }
 func zframe(v string) []byte {
 	return []byte(`{"type":"data_message","data":` + mustJSON(`{"type":"chat_message_delta","payload":{"delta":`+v+`}}`) + `}`)
 }

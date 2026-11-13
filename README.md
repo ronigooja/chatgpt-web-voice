@@ -39,7 +39,7 @@ For fresh creates, no-usable-account failures before any account selection succe
 
 ### WM final-turn text diagnosis
 
-Set `VOICE_ZOE_FINAL_TURN_DEBUG_TEXT=true` together with `VOICE_ZOE_FINAL_TURN=true` only while diagnosing final-turn text accumulation. It logs spoken and assistant text to the container log, including diagnostic message and patch details. Keep it off during normal operation and purge the logs after use.
+When final-turn mapping is enabled with `VOICE_ZOE_FINAL_TURN=true`, `VOICE_ZOE_FINAL_TURN_DEBUG_TEXT` is on by default. Its spoken/assistant text, message and patch details, and gated upstream rejection bodies are logged only at DEBUG, without truncation. `VOICE_LOG_LEVEL` defaults to `debug` so these records appear by default; explicitly set the switch to `false` to disable them, or select `info` to retain metadata-only logs. Secrets (tokens, API keys, credentials, and Authorization headers) must never be logged at any level. See [logging guidance](docs/LOGGING.md).
 
 ## 网页效果
 
@@ -193,7 +193,8 @@ the loaded image.
 | `VOICE_TLS_CERT` / `VOICE_TLS_KEY` | 空 | 启用进程 TLS 时指定证书 |
 | `VOICE_TLS_CERT_DIR` | `./data/certs` | 自签证书目录 |
 | `VOICE_SKIP_SSL_VERIFY` | `false` | 仅 development 可临时用于上游证书排障 |
-| `VOICE_LOG_LEVEL` | `info` | 需要更详细日志时改为 `debug` |
+| `VOICE_LOG_LEVEL` | `debug` | DEBUG may include gated full content text; `info` retains metadata only |
+| `VOICE_ZOE_FINAL_TURN_DEBUG_TEXT` | `true` | Explicit `false` disables gated debug text; no truncation |
 | `VOICE_LOG_FORMAT` | `json` | 想看文本日志时改为 `text` |
 | `VOICE_DATA_DIR` | `./data` | 数据目录（证书、运行数据等） |
 | `VOICE_DATABASE_FILE` | `./data/voice.db` | SQLite 文件路径 |
@@ -262,7 +263,7 @@ them after the investigation.
 
 | 变量 | 何时改 |
 |---|---|
-| `VOICE_LOG_LEVEL` | 生产排障时临时 `debug` |
+| `VOICE_LOG_LEVEL` | Defaults to `debug`; set `info` for metadata-only logs |
 | `VOICE_LOG_FORMAT` | 需要文本日志时改为 `text` |
 | `VOICE_LISTEN_ADDR` | 极少需要；host 网络下默认 `:8090` |
 | `VOICE_AUTH_SESSION_TTL_SECONDS` | 调整管理端登录保持时长 |

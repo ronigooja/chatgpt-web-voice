@@ -15,13 +15,13 @@ type avasFinalTurnMapper struct {
 	ring        [256]string
 	count, next int
 	session     string
-	logger      interface{ Info(string, ...any) }
+	logger      finalTurnLogger
 	injector    relay.EventInjector
 	open        func(string)
 	debugText   bool
 }
 
-func newAVASFinalTurnMapper(session string, logger interface{ Info(string, ...any) }, injector relay.EventInjector, open func(string), debugText ...bool) *avasFinalTurnMapper {
+func newAVASFinalTurnMapper(session string, logger finalTurnLogger, injector relay.EventInjector, open func(string), debugText ...bool) *avasFinalTurnMapper {
 	return &avasFinalTurnMapper{session: session, logger: logger, injector: injector, done: map[string]struct{}{}, open: open, debugText: len(debugText) > 0 && debugText[0]}
 }
 
@@ -63,10 +63,7 @@ func (m *avasFinalTurnMapper) Observe(data []byte) {
 			}
 			preview = b.String()
 		}
-		if utf8.RuneCountInString(preview) > 200 {
-			preview = string([]rune(preview)[:200])
-		}
-		m.logger.Info("zoe_debug_message", "event", e.Type, "role", e.Turn.Role, "target", e.Item.Target, "text", preview)
+		m.logger.Debug("zoe_debug_message", "event", e.Type, "role", e.Turn.Role, "target", e.Item.Target, "text", preview)
 	}
 	if e.Type == "turn.created" && e.Turn.Role == "user" {
 		if m.open != nil {

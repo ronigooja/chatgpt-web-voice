@@ -296,49 +296,57 @@ func TestAVASCreateAcceptedSDPThenSidebandFailurePersistsUnknownNotNeverEstablis
 }
 
 func TestAVASCreateDebugRejectionLogsBodyOnlyWhenSwitchEnabled(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		enabled bool
-		want    bool
-	}{{"on", true, true}, {"off", false, false}} {
-		t.Run(tc.name, func(t *testing.T) {
-			var logs strings.Builder
-			logger := slog.New(slog.NewTextHandler(&logs, nil))
-			db, err := store.Open(filepath.Join(t.TempDir(), "voice.db"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer db.Close()
-			pool := accounts.NewPoolFromDB(db)
-			key := make([]byte, 32)
-			for i := range key {
-				key[i] = byte(i + 1)
-			}
-			box, err := secretbox.New(key)
-			if err != nil {
-				t.Fatal(err)
-			}
-			pool.WithBox(box)
-			if _, err := pool.Create(accounts.Account{AccessToken: testJWT(map[string]any{"exp": time.Now().Add(time.Hour).Unix()}), Status: "正常"}); err != nil {
-				t.Fatal(err)
-			}
-			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.WriteHeader(http.StatusBadGateway)
-				_, err := io.WriteString(w, "debug-body-prefix")
+	for _, route := range []string{"avas", "wm"} {
+		for _, tc := range []struct {
+			name    string
+			enabled bool
+			want    bool
+			level   slog.Level
+		}{{"on", true, true, slog.LevelDebug}, {"off", false, false, slog.LevelDebug}, {"info", true, false, slog.LevelInfo}} {
+			t.Run(route+"/"+tc.name, func(t *testing.T) {
+				var logs strings.Builder
+				logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: tc.level}))
+				body := "debug-body-prefix" + strings.Repeat("界", 5000) + "END"
+				db, err := store.Open(filepath.Join(t.TempDir(), "voice.db"))
 				if err != nil {
 					t.Fatal(err)
 				}
-			}))
-			defer server.Close()
-			svc := New(config.Config{SkipSSLVerify: true, UpstreamTransport: config.TransportGo, MaxAccountAttempts: 1, VoiceUpstreamRoute: "avas", ZoeFinalTurnDebugText: tc.enabled}, pool, logger)
-			svc.avasURL = server.URL + "/calls"
-			if _, err := svc.CreateSession(CreateSessionRequest{Owner: "api_key:1", OfferSDP: readTestdata(t, "wm_offer.sdp")}); err == nil {
-				t.Fatal("expected upstream rejection")
-			}
-			if strings.Contains(logs.String(), "debug-body-prefix") != tc.want {
-				t.Fatalf("logs=%q", logs.String())
-			}
-		})
+				defer db.Close()
+				pool := accounts.NewPoolFromDB(db)
+				key := make([]byte, 32)
+				for i := range key {
+					key[i] = byte(i + 1)
+				}
+				box, err := secretbox.New(key)
+				if err != nil {
+					t.Fatal(err)
+				}
+				pool.WithBox(box)
+				if _, err := pool.Create(accounts.Account{AccessToken: testJWT(map[string]any{"exp": time.Now().Add(time.Hour).Unix()}), Status: "正常"}); err != nil {
+					t.Fatal(err)
+				}
+				server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusBadGateway)
+					_, err := io.WriteString(w, body)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}))
+				defer server.Close()
+				svc := New(config.Config{SkipSSLVerify: true, UpstreamTransport: config.TransportGo, MaxAccountAttempts: 1, VoiceUpstreamRoute: route, ZoeFinalTurnDebugText: tc.enabled}, pool, logger)
+				svc.avasURL = server.URL + "/calls"
+				svc.realtimeURL = server.URL + "/realtime/wm"
+				if _, err := svc.CreateSession(CreateSessionRequest{Owner: "api_key:1", OfferSDP: readTestdata(t, "wm_offer.sdp")}); err == nil {
+					t.Fatal("expected upstream rejection")
+				}
+				if strings.Contains(logs.String(), "debug-body-prefix") != tc.want {
+					t.Fatalf("logs=%q", logs.String())
+				}
+				if tc.want && !strings.Contains(logs.String(), body) {
+					t.Fatal("upstream body was truncated")
+				}
+			})
+		}
 	}
 }
 

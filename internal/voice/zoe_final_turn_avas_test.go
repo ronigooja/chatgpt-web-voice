@@ -32,7 +32,8 @@ func (f *avasFakeInjector) InjectEvent(b []byte) error {
 
 type avasFakeLogger struct{}
 
-func (avasFakeLogger) Info(string, ...any) {}
+func (avasFakeLogger) Info(string, ...any)  {}
+func (avasFakeLogger) Debug(string, ...any) {}
 
 func avasData(v any) []byte {
 	b, _ := json.Marshal(v)
@@ -129,6 +130,8 @@ func (l *avasCaptureLogger) text() string {
 	defer l.mu.Unlock()
 	return strings.Join(l.lines, "\n")
 }
+
+func (l *avasCaptureLogger) Debug(msg string, args ...any) { l.Info(msg, args...) }
 
 func TestAVASDebugTextLogsOnlyWhenEnabled(t *testing.T) {
 	turn := avasData(map[string]any{"type": "turn.done", "turn": map[string]any{"role": "assistant", "transcript": "ASSISTANT-SAID-THIS"}})

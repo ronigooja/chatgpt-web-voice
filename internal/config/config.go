@@ -248,7 +248,7 @@ func Load() Config {
 		TLSKeyFile:  env("VOICE_TLS_KEY", ""),
 		TLSCertDir:  env("VOICE_TLS_CERT_DIR", filepath.Join(dataDir, "certs")),
 		LogFormat:   env("VOICE_LOG_FORMAT", "json"),
-		LogLevel:    env("VOICE_LOG_LEVEL", "info"),
+		LogLevel:    env("VOICE_LOG_LEVEL", "debug"),
 
 		AccountExpiryGuardSeconds:          envInt("VOICE_ACCOUNT_EXPIRY_GUARD_SECONDS", 300),
 		AccountBackoffBaseSeconds:          envInt("VOICE_ACCOUNT_BACKOFF_BASE_SECONDS", 30),
@@ -271,7 +271,7 @@ func Load() Config {
 		ZoeFinalTurn:                     envBool("VOICE_ZOE_FINAL_TURN", false),
 		ZoeURL:                           env("VOICE_ZOE_URL", ""),
 		ZoeTokenFile:                     env("VOICE_ZOE_TOKEN_FILE", ""),
-		ZoeFinalTurnDebugText:            envBool("VOICE_ZOE_FINAL_TURN_DEBUG_TEXT", false),
+		ZoeFinalTurnDebugText:            envBool("VOICE_ZOE_FINAL_TURN_DEBUG_TEXT", true),
 	}
 }
 

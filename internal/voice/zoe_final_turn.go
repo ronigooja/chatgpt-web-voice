@@ -17,6 +17,10 @@ import (
 const zoeFinalTurnMax = 20000
 
 type zoeTurnMapper interface{ Observe([]byte) }
+type finalTurnLogger interface {
+	Info(string, ...any)
+	Debug(string, ...any)
+}
 type wmFinalTurnMapper struct {
 	mu                         sync.Mutex
 	active, oversized          bool
@@ -26,7 +30,7 @@ type wmFinalTurnMapper struct {
 	doneRing                   [256]string
 	doneCount, doneNext        int
 	session                    string
-	logger                     interface{ Info(string, ...any) }
+	logger                     finalTurnLogger
 	injector                   relay.EventInjector
 	debug                      bool
 	appends, replaces          int
@@ -35,7 +39,7 @@ type wmFinalTurnMapper struct {
 	ops                        []map[string]any
 }
 
-func newWMFinalTurnMapper(session string, logger interface{ Info(string, ...any) }, injector relay.EventInjector, debug ...bool) *wmFinalTurnMapper {
+func newWMFinalTurnMapper(session string, logger finalTurnLogger, injector relay.EventInjector, debug ...bool) *wmFinalTurnMapper {
 	d := len(debug) > 0 && debug[0]
 	return &wmFinalTurnMapper{session: session, logger: logger, injector: injector, done: map[string]struct{}{}, debug: d, parts: map[int]struct{}{}}
 }
@@ -139,10 +143,7 @@ func (m *wmFinalTurnMapper) add(raw json.RawMessage, a *[]finalTurnAction) {
 			parts = append(parts, fmt.Sprintf("%T", p))
 			preview += s
 		}
-		if utf8.RuneCountInString(preview) > 200 {
-			preview = string([]rune(preview)[:200])
-		}
-		m.logger.Info("zoe_debug_message", "role", v.Message.Author.Role, "status", v.Message.Status, "content_types", parts, "part_count", len(v.Message.Content.Parts), "text", preview)
+		m.logger.Debug("zoe_debug_message", "role", v.Message.Author.Role, "status", v.Message.Status, "content_types", parts, "part_count", len(v.Message.Content.Parts), "text", preview)
 	}
 	if v.Message.Author.Role != "user" || v.Message.Status != "in_progress" {
 		return
@@ -182,15 +183,11 @@ func (m *wmFinalTurnMapper) apply(o, p string, v json.RawMessage, a *[]finalTurn
 		}
 		part := textPart(p)
 		if m.debug {
-			msg := t
-			if utf8.RuneCountInString(msg) > 200 {
-				msg = string([]rune(msg)[:200])
-			}
 			state := "not_active"
 			if m.active {
 				state = "active"
 			}
-			m.logger.Info("zoe_debug_text_patch", "message_state", state, "part", part, "op", o, "text", msg)
+			m.logger.Debug("zoe_debug_text_patch", "message_state", state, "part", part, "op", o, "text", t)
 		}
 		if !m.active {
 			return
@@ -303,10 +300,13 @@ func (m *wmFinalTurnMapper) deliver(as []finalTurnAction) {
 	for _, a := range as {
 		if a.drop != "" {
 			args := []any{"voice_session_id", m.session, "reason", a.drop}
+			m.logger.Info("zoe_final_turn_dropped", args...)
 			for k, v := range a.debug {
 				args = append(args, k, v)
 			}
-			m.logger.Info("zoe_final_turn_dropped", args...)
+			if a.debug != nil {
+				m.logger.Debug("zoe_final_turn_dropped", args...)
+			}
 			continue
 		}
 		if m.injector.InjectEvent(a.event) != nil {
@@ -314,9 +314,12 @@ func (m *wmFinalTurnMapper) deliver(as []finalTurnAction) {
 		}
 		h := sha256.Sum256([]byte(a.id))
 		args := []any{"voice_session_id", m.session, "transcript_runes", utf8.RuneCountInString(a.text), "sha256_prefix", hex.EncodeToString(h[:])[:8], "commit_reason", a.commitReason}
+		m.logger.Info("zoe_final_turn_emitted", args...)
 		for k, v := range a.debug {
 			args = append(args, k, v)
 		}
-		m.logger.Info("zoe_final_turn_emitted", args...)
+		if a.debug != nil {
+			m.logger.Debug("zoe_final_turn_emitted", args...)
+		}
 	}
 }
