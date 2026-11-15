@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,20 @@ import (
 	"strings"
 	"sync"
 )
+
+// CurlRequestError preserves transport facts even when no complete headers exist.
+type CurlRequestError struct {
+	Err           error
+	ExitCode      int
+	ResponseBegan bool
+}
+
+func (e *CurlRequestError) Error() string { return e.Err.Error() }
+func (e *CurlRequestError) Unwrap() error { return e.Err }
+
+type responseBeganError struct{ error }
+
+func (e responseBeganError) Unwrap() error { return e.error }
 
 // curlRoundTripper executes each request via a curl-impersonate binary so the
 // TLS/HTTP2 fingerprint matches a real browser (Chrome/Edge profiles).
@@ -105,12 +120,19 @@ func (t *curlRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	reader := bufio.NewReader(stdout)
 	statusCode, statusText, header, err := readCurlResponseHeader(reader)
 	if err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		if stderr.Len() > 0 {
-			return nil, fmt.Errorf("curl-impersonate failed: %w: %s", err, strings.TrimSpace(stderr.String()))
+		// EOF means stdout closed: let Wait retain curl's real exit code.
+		// Other parse failures can leave a live writer and must stop it.
+		if !errors.Is(err, io.EOF) {
+			_ = cmd.Process.Kill()
 		}
-		return nil, fmt.Errorf("curl-impersonate failed: %w", err)
+		waitErr := cmd.Wait()
+		exitCode := -1
+		var exit *exec.ExitError
+		if errors.As(waitErr, &exit) {
+			exitCode = exit.ExitCode()
+		}
+		var began responseBeganError
+		return nil, &CurlRequestError{Err: fmt.Errorf("curl-impersonate failed: %w: %s", err, strings.TrimSpace(stderr.String())), ExitCode: exitCode, ResponseBegan: errors.As(err, &began)}
 	}
 	body := &curlResponseBody{reader: reader, cmd: cmd, stderr: stderr}
 	return &http.Response{
@@ -325,9 +347,16 @@ func readRequestBody(req *http.Request) ([]byte, error) {
 	return data, nil
 }
 
-func readCurlResponseHeader(reader *bufio.Reader) (int, string, http.Header, error) {
+func readCurlResponseHeader(reader *bufio.Reader) (status int, text string, headers http.Header, failure error) {
+	began := false
+	defer func() {
+		if failure != nil && began {
+			failure = responseBeganError{failure}
+		}
+	}()
 	for {
 		line, err := reader.ReadString('\n')
+		began = began || len(line) > 0
 		if err != nil {
 			return 0, "", nil, err
 		}
@@ -386,6 +415,9 @@ func (b *curlResponseBody) Read(p []byte) (int, error) {
 			return n, waitErr
 		}
 	}
+	if err != nil && err != io.EOF {
+		return n, &CurlRequestError{Err: err, ExitCode: -1, ResponseBegan: true}
+	}
 	return n, err
 }
 
@@ -402,11 +434,16 @@ func (b *curlResponseBody) wait() error {
 			return
 		}
 		if err := b.cmd.Wait(); err != nil {
-			if b.stderr != nil && b.stderr.Len() > 0 {
-				b.err = fmt.Errorf("curl-impersonate failed: %w: %s", err, strings.TrimSpace(b.stderr.String()))
-			} else {
-				b.err = err
+			exitCode := -1
+			var exit *exec.ExitError
+			if errors.As(err, &exit) {
+				exitCode = exit.ExitCode()
 			}
+			detail := ""
+			if b.stderr != nil {
+				detail = strings.TrimSpace(b.stderr.String())
+			}
+			b.err = &CurlRequestError{Err: fmt.Errorf("curl-impersonate failed: %w: %s", err, detail), ExitCode: exitCode, ResponseBegan: true}
 		}
 	})
 	return b.err

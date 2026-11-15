@@ -107,12 +107,27 @@ func (s *Server) downstreamOutcome(w http.ResponseWriter, r *http.Request) {
 		writeDownstreamError(w, http.StatusNotFound, "not_found", "request outcome not found")
 		return
 	}
-	row, exists := provider.CreationOutcome(owner, requestID)
+	var row, evidenceID string
+	var exists bool
+	if snapshot, ok := s.voice.(interface {
+		CreationOutcomeSnapshot(string, string) (string, string, bool)
+	}); ok {
+		row, evidenceID, exists = snapshot.CreationOutcomeSnapshot(owner, requestID)
+	} else {
+		row, exists = provider.CreationOutcome(owner, requestID)
+	}
 	if !exists {
 		writeDownstreamError(w, http.StatusNotFound, "not_found", "request outcome not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"request_id": requestID, "outcome": row})
+	if row == "released" && evidenceID == "" {
+		row = "unknown"
+	}
+	response := map[string]string{"request_id": requestID, "outcome": row}
+	if row == "released" {
+		response["evidence_id"] = evidenceID
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) downstreamOpeningContext(w http.ResponseWriter, r *http.Request) {

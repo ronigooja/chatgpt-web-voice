@@ -1,9 +1,134 @@
 package store
 
 import (
+	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 )
+
+func TestVoiceCreationOutcomeOldSchemaMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = legacy.Exec(`CREATE TABLE voice_creation_outcomes (
+		request_id TEXT NOT NULL, owner TEXT NOT NULL, outcome TEXT NOT NULL,
+		voice_session_id TEXT, media_generation INTEGER,
+		created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY(owner,request_id)); INSERT INTO voice_creation_outcomes(request_id,owner,outcome) VALUES('duplicate','owner','never_established')`)
+	if err != nil {
+		legacy.Close()
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if has, err := db.hasColumn("voice_creation_outcomes", "attempt_id"); err != nil || !has {
+		t.Fatalf("attempt_id exists=%v err=%v", has, err)
+	}
+	first, err := db.BeginVoiceCreationOutcome("owner", "duplicate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := db.BeginVoiceCreationOutcome("owner", "duplicate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == "" || second == "" || first == second {
+		t.Fatal("UPSERT did not allocate distinct attempts")
+	}
+	if err := db.UpdateVoiceCreationOutcome("owner", "duplicate", "never_established", "", 0, second); err != nil {
+		t.Fatal(err)
+	}
+	row, err := db.GetVoiceCreationOutcome("owner", "duplicate")
+	if err != nil || row.AttemptID != second || row.Outcome != "never_established" {
+		t.Fatalf("row=%+v err=%v", row, err)
+	}
+}
+
+func TestCreationAttemptDuplicateResetRace(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "voice.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	old, err := db.BeginVoiceCreationOutcome("owner", "duplicate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reset := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		<-reset
+		result <- db.UpdateVoiceCreationOutcome("owner", "duplicate", "established", "old-media", 1, old)
+	}()
+	current, err := db.BeginVoiceCreationOutcome("owner", "duplicate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(reset)
+	if err := <-result; !errors.Is(err, ErrVoiceCreationAttemptStale) {
+		t.Fatalf("stale update=%v", err)
+	}
+	row, err := db.GetVoiceCreationOutcome("owner", "duplicate")
+	if err != nil || row.Outcome != "pending" || row.AttemptID != current || row.VoiceSessionID.Valid {
+		t.Fatalf("row=%+v err=%v", row, err)
+	}
+}
+
+func TestCreationOutcomeAtomicSnapshotRace(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "voice.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Conn().Exec(`INSERT INTO voice_media_sessions (voice_session_id, media_generation, owner, account_id, lease_id, lease_generation, relay_session_id, state, evidence_id, peer_a_closed, peer_b_closed, data_channels_closed, tunnels_closed, created_at, updated_at) VALUES ('vs',1,'owner',1,'lease',1,'relay','terminated','ev',1,1,1,1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Conn().Exec(`INSERT INTO voice_termination_evidence (evidence_id,voice_session_id,media_generation,account_id,lease_id,lease_generation,observed_at,reason) VALUES ('ev','vs',1,1,'lease',1,CURRENT_TIMESTAMP,'test')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateVoiceCreationOutcome("owner", "duplicate"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		for i := 0; i < 100; i++ {
+			attempt, err := db.BeginVoiceCreationOutcome("owner", "duplicate")
+			if err != nil {
+				done <- err
+				return
+			}
+			if err := db.UpdateVoiceCreationOutcome("owner", "duplicate", "established", "vs", 1, attempt); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+	for i := 0; i < 100; i++ {
+		outcome, evidence, err := db.VoiceCreationOutcomeSnapshot("owner", "duplicate")
+		if err != nil || (outcome == "released" && evidence != "ev") || (outcome != "released" && (outcome != "unknown" || evidence != "")) {
+			t.Errorf("snapshot=%q,%q err=%v", outcome, evidence, err)
+		}
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Conn().Exec(`UPDATE voice_media_sessions SET evidence_id='missing-evidence'`); err != nil {
+		t.Fatal(err)
+	}
+	if outcome, evidence, err := db.VoiceCreationOutcomeSnapshot("owner", "duplicate"); err != nil || outcome != "unknown" || evidence != "" {
+		t.Fatalf("missing evidence snapshot=%q,%q err=%v", outcome, evidence, err)
+	}
+}
 
 func TestVoiceCreationOutcomesStartupCleanupRemovesOldRowsAndKeepsFreshRows(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "voice.db")

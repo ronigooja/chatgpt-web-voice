@@ -19,6 +19,7 @@ import (
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/auth"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/config"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/logging"
+	"github.com/dyhhhhhh/chatgpt-web-voice/internal/mediaevidence"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/secretbox"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/store"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/voice"
@@ -424,6 +425,47 @@ func TestDownstreamCreateUsesClientRequestIDThroughRealHTTPMux(t *testing.T) {
 	}
 }
 
+func updateCreationOutcome(db *store.DB, owner, request, outcome, session string, generation int64) error {
+	row, err := db.GetVoiceCreationOutcome(owner, request)
+	if err != nil {
+		return err
+	}
+	return db.UpdateVoiceCreationOutcome(owner, request, outcome, session, generation, row.AttemptID)
+}
+
+type atomicOutcomeStub struct {
+	downstreamVoiceStub
+	evidence string
+}
+
+func (s *atomicOutcomeStub) CreationOutcomeSnapshot(owner, request string) (string, string, bool) {
+	return "released", s.evidence, true
+}
+func (s *atomicOutcomeStub) CreationOutcome(owner, request string) (string, bool) {
+	panic("endpoint must not perform a separate outcome read")
+}
+
+func TestDownstreamOutcomeAtomicSnapshotRequiresEvidence(t *testing.T) {
+	for _, evidence := range []string{"", "ev-snapshot"} {
+		t.Run(evidence, func(t *testing.T) {
+			stub := &atomicOutcomeStub{evidence: evidence}
+			handler, secret, _ := newDownstreamTestHandler(t, stub)
+			resp := performDownstreamRequest(t, handler, http.MethodGet, "/v1/voice/requests/atomic/outcome", secret, nil)
+			var body map[string]string
+			if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			want := "released"
+			if evidence == "" {
+				want = "unknown"
+			}
+			if resp.Code != http.StatusOK || body["outcome"] != want || body["evidence_id"] != evidence {
+				t.Fatalf("response=%s", resp.Body.String())
+			}
+		})
+	}
+}
+
 func TestDownstreamOutcomeEndpointDerivesOpenReleasedAndUnknownFromPersistentMedia(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "voice.db"))
 	if err != nil {
@@ -438,19 +480,19 @@ func TestDownstreamOutcomeEndpointDerivesOpenReleasedAndUnknownFromPersistentMed
 	if err := db.CreateVoiceCreationOutcome("api_key:1", "open-req"); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.UpdateVoiceCreationOutcome("api_key:1", "open-req", "established", "vs-open", 1); err != nil {
+	if err := updateCreationOutcome(db, "api_key:1", "open-req", "established", "vs-open", 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.CreateVoiceCreationOutcome("api_key:1", "released-req"); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.UpdateVoiceCreationOutcome("api_key:1", "released-req", "established", "vs-released", 1); err != nil {
+	if err := updateCreationOutcome(db, "api_key:1", "released-req", "established", "vs-released", 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.CreateVoiceCreationOutcome("api_key:1", "unknown-req"); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.UpdateVoiceCreationOutcome("api_key:1", "unknown-req", "established", "vs-unknown", 1); err != nil {
+	if err := updateCreationOutcome(db, "api_key:1", "unknown-req", "established", "vs-unknown", 1); err != nil {
 		t.Fatal(err)
 	}
 	for _, row := range []struct{ id, state, evidence string }{{"vs-open", "active", ""}, {"vs-released", "terminated", "ev-1"}, {"vs-unknown", "unknown", ""}} {
@@ -458,7 +500,17 @@ func TestDownstreamOutcomeEndpointDerivesOpenReleasedAndUnknownFromPersistentMed
 			t.Fatal(err)
 		}
 	}
-	service := voice.New(config.Config{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil))).WithCreationOutcomes(db)
+	// Use genuine release evidence for the released row, not only a state label.
+	if _, err := db.Conn().Exec(`UPDATE voice_media_sessions SET state='active', evidence_id='' WHERE voice_session_id='vs-released'`); err != nil {
+		t.Fatal(err)
+	}
+	ev := mediaevidence.NewStore(db)
+	id := mediaevidence.Identity{VoiceSessionID: "vs-released", MediaGeneration: 1, AccountID: 1, LeaseID: "lease-vs-released", LeaseGeneration: 1}
+	closed, err := ev.Close(id, mediaevidence.Components{PeerAClosed: true, PeerBClosed: true, DataChannelsClosed: true, TunnelsClosed: true}, "upstream_request_failed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := voice.New(config.Config{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil))).WithCreationOutcomes(db).WithMediaEvidence(ev)
 	server := New(Dependencies{Voice: service, APIKeys: keys})
 	mux := http.NewServeMux()
 	server.RegisterDownstream(mux)
@@ -471,6 +523,29 @@ func TestDownstreamOutcomeEndpointDerivesOpenReleasedAndUnknownFromPersistentMed
 		if resp.Code != http.StatusOK || !strings.Contains(resp.Body.String(), `"outcome":"`+tc.want+`"`) {
 			t.Fatalf("%s status=%d body=%s", tc.request, resp.Code, resp.Body.String())
 		}
+		var body map[string]string
+		if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if tc.want == "released" && (closed.EvidenceID == "" || body["evidence_id"] != closed.EvidenceID) {
+			t.Fatalf("missing exact durable evidence: %s", resp.Body.String())
+		}
+		if tc.want != "released" && body["evidence_id"] != "" {
+			t.Fatalf("unexpected evidence: %s", resp.Body.String())
+		}
+	}
+	// A failed create after acknowledged success remains unknown even when
+	// local relay cleanup produced genuine, durable termination evidence.
+	if err := updateCreationOutcome(db, "api_key:1", "unknown-req", "unknown", "vs-released", 1); err != nil {
+		t.Fatal(err)
+	}
+	response := performDownstreamRequest(t, handler, http.MethodGet, "/v1/voice/requests/unknown-req/outcome", created.Secret, nil)
+	var body map[string]string
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusOK || body["outcome"] != "unknown" || body["evidence_id"] != "" {
+		t.Fatalf("acknowledged failure exposed evidence: %s", response.Body.String())
 	}
 }
 
@@ -491,6 +566,15 @@ func TestDownstreamAVASRejectionMapsTo422WithEstablishedFalse(t *testing.T) {
 	}
 	if body["error"] != "upstream_rejected" || body["established"] != false || body["upstream_status"] != float64(429) {
 		t.Fatalf("body=%s", response.Body.String())
+	}
+}
+
+func TestDownstreamUnknownRejectionDoesNotAssertEstablishedFalse(t *testing.T) {
+	voiceStub := &downstreamVoiceStub{createError: &voice.ServiceError{StatusCode: http.StatusBadGateway, UpstreamStatus: 429, CreationRejected: false}}
+	handler, secret, _ := newDownstreamTestHandler(t, voiceStub)
+	resp := performDownstreamRequest(t, handler, http.MethodPost, "/v1/voice/sessions", secret, map[string]any{"offer_sdp": "v=0\r\noffer\r\n"})
+	if resp.Code != http.StatusBadGateway || !strings.Contains(resp.Body.String(), `"upstream_unavailable"`) || strings.Contains(resp.Body.String(), `"established"`) {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 	}
 }
 
@@ -571,16 +655,22 @@ func TestOutcomeEndpointSurvivesStoreAndServiceRestartForNeverEstablishedAndRele
 	if err := db.CreateVoiceCreationOutcome("api_key:1", "restart-never"); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.UpdateVoiceCreationOutcome("api_key:1", "restart-never", "never_established", "", 0); err != nil {
+	if err := updateCreationOutcome(db, "api_key:1", "restart-never", "never_established", "", 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.CreateVoiceCreationOutcome("api_key:1", "restart-released"); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.UpdateVoiceCreationOutcome("api_key:1", "restart-released", "established", "vs-restart", 1); err != nil {
+	if err := updateCreationOutcome(db, "api_key:1", "restart-released", "established", "vs-restart", 1); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Conn().Exec(`INSERT INTO voice_media_sessions (voice_session_id, media_generation, owner, account_id, lease_id, lease_generation, relay_session_id, state, evidence_id, created_at, updated_at) VALUES ('vs-restart', 1, 'api_key:1', 1, 'lease-restart', 1, 'relay-restart', 'terminated', 'ev-restart', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Conn().Exec(`UPDATE voice_media_sessions SET state='active', evidence_id='' WHERE voice_session_id='vs-restart'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mediaevidence.NewStore(db).Close(mediaevidence.Identity{VoiceSessionID: "vs-restart", MediaGeneration: 1, AccountID: 1, LeaseID: "lease-restart", LeaseGeneration: 1}, mediaevidence.Components{PeerAClosed: true, PeerBClosed: true, DataChannelsClosed: true, TunnelsClosed: true}, "test"); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {

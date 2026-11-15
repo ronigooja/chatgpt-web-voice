@@ -2,6 +2,7 @@ package voice
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -16,7 +17,102 @@ import (
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/accounts"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/callsessions"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/config"
+	"github.com/dyhhhhhh/chatgpt-web-voice/internal/mediaevidence"
 )
+
+type countingCreationEvidence struct {
+	MediaEvidenceStore
+	closes int
+}
+
+func (s *countingCreationEvidence) Close(id mediaevidence.Identity, c mediaevidence.Components, reason string) (mediaevidence.MediaSession, error) {
+	s.closes++
+	return s.MediaEvidenceStore.Close(id, c, reason)
+}
+
+func TestCreateSidebandCleanupAfterAcknowledgedSuccessStaysUnknown(t *testing.T) {
+	for _, mode := range []string{"answer", "register", "post_handoff", "panic_after_handoff"} {
+		t.Run(mode, func(t *testing.T) {
+			svc, db, _ := newCreationService(t, []int{http.StatusCreated}, 1)
+			closed := make(chan struct{})
+			upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+			sideband := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := upgrader.Upgrade(w, r, nil)
+				if err != nil {
+					return
+				}
+				defer conn.Close()
+				defer close(closed)
+				for {
+					if _, _, err := conn.ReadMessage(); err != nil {
+						return
+					}
+				}
+			}))
+			defer sideband.Close()
+			upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Location", "https://example.invalid/live/call-test")
+				w.WriteHeader(http.StatusCreated)
+				_, _ = w.Write([]byte("v=0\r\n"))
+			}))
+			defer upstream.Close()
+			svc.avasURL = upstream.URL
+			svc.avasSidebandURL = "ws" + strings.TrimPrefix(sideband.URL, "http") + "/"
+			r := &fakeRelay{}
+			if mode == "answer" {
+				r.acceptFn = func(*fakeMedia) error { return errors.New("synthetic answer failure") }
+			} else if mode == "register" {
+				if _, err := db.Conn().Exec(`CREATE TRIGGER fail_ack_register BEFORE INSERT ON voice_media_sessions BEGIN SELECT RAISE(FAIL,'test'); END`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ev := &countingCreationEvidence{MediaEvidenceStore: mediaevidence.NewStore(db)}
+			svc.WithRelay(r).WithMediaEvidence(ev)
+			req := CreateSessionRequest{Owner: "api_key:1", RequestID: "sideband-cleanup", OfferSDP: readTestdata(t, "wm_offer.sdp")}
+			if mode == "post_handoff" || mode == "panic_after_handoff" {
+				req.OpeningContext = OpeningContext{Kind: "full", Version: 1, Items: []OpeningContextItem{{Role: "user", Text: "valid"}}}
+				handoff := &creationHandoffRelay{onHandoff: func() { req.OpeningContext.Items[0].Role = "invalid" }}
+				if mode == "panic_after_handoff" {
+					handoff.onHandoff = func() { panic("synthetic handoff panic") }
+				}
+				svc.WithRelay(handoff)
+				r = &handoff.fakeRelay
+			}
+			var err error
+			var recovered any
+			func() { defer func() { recovered = recover() }(); _, err = svc.CreateSession(req) }()
+			wantStatus := http.StatusBadGateway
+			if mode == "register" {
+				wantStatus = http.StatusServiceUnavailable
+			}
+			if mode == "post_handoff" {
+				wantStatus = http.StatusBadRequest
+			}
+			if mode == "panic_after_handoff" {
+				if recovered == nil {
+					t.Fatal("panic swallowed")
+				}
+			} else if se := serviceError(t, err); se.StatusCode != wantStatus {
+				t.Fatalf("error=%+v", se)
+			}
+			select {
+			case <-closed:
+			case <-time.After(time.Second):
+				t.Fatal("failed create leaked sideband socket")
+			}
+			outcome, evidence, exists := svc.CreationOutcomeSnapshot("api_key:1", "sideband-cleanup")
+			if !exists || outcome != "unknown" || evidence != "" {
+				t.Fatalf("snapshot=%s,%s,%v", outcome, evidence, exists)
+			}
+			if len(svc.bindings) != 0 || len(r.session(0).closedReasons()) != 1 {
+				t.Fatal("leaked binding or duplicate media close")
+			}
+			if mode != "register" && ev.closes != 1 {
+				t.Fatalf("evidence finalized %d times", ev.closes)
+			}
+		})
+	}
+}
 
 type avasUpstream struct {
 	mu      sync.Mutex

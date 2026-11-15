@@ -106,6 +106,7 @@ func (db *DB) migrate() error {
 			request_id TEXT NOT NULL,
 			owner TEXT NOT NULL,
 			outcome TEXT NOT NULL,
+			attempt_id TEXT NOT NULL DEFAULT '',
 			voice_session_id TEXT,
 			media_generation INTEGER,
 			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -152,6 +153,13 @@ func (db *DB) migrate() error {
 	}
 	if err := db.ensureMediaEvidenceTables(); err != nil {
 		return err
+	}
+	if has, err := db.hasColumn("voice_creation_outcomes", "attempt_id"); err != nil {
+		return err
+	} else if !has {
+		if _, err := db.conn.Exec(`ALTER TABLE voice_creation_outcomes ADD COLUMN attempt_id TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add voice_creation_outcomes.attempt_id: %w", err)
+		}
 	}
 	if err := db.cleanupVoiceCreationOutcomes(); err != nil {
 		return err

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -9,11 +10,13 @@ import (
 )
 
 var ErrVoiceCreationOutcomeNotFound = errors.New("voice creation outcome not found")
+var ErrVoiceCreationAttemptStale = errors.New("voice creation attempt is stale or missing")
 
 type VoiceCreationOutcome struct {
 	RequestID       string
 	Owner           string
 	Outcome         string
+	AttemptID       string
 	VoiceSessionID  sql.NullString
 	MediaGeneration sql.NullInt64
 	CreatedAt       string
@@ -21,15 +24,30 @@ type VoiceCreationOutcome struct {
 }
 
 func (db *DB) CreateVoiceCreationOutcome(owner, requestID string) error {
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err := db.conn.Exec(`INSERT INTO voice_creation_outcomes (request_id, owner, outcome, created_at, updated_at) VALUES (?, ?, 'pending', ?, ?) ON CONFLICT(owner, request_id) DO UPDATE SET outcome='pending', voice_session_id=NULL, media_generation=NULL, updated_at=excluded.updated_at`, requestID, owner, now, now)
-	if err != nil {
-		return fmt.Errorf("create voice outcome: %w", err)
-	}
-	return nil
+	_, err := db.BeginVoiceCreationOutcome(owner, requestID)
+	return err
 }
 
-func (db *DB) UpdateVoiceCreationOutcome(owner, requestID, outcome, sessionID string, generation int64) error {
+// BeginVoiceCreationOutcome resets a duplicate request to a new, non-idempotent
+// attempt. Only the returned attempt identity may finalize this row.
+func (db *DB) BeginVoiceCreationOutcome(owner, requestID string) (string, error) {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", fmt.Errorf("generate creation attempt: %w", err)
+	}
+	attemptID := fmt.Sprintf("%x", random[:])
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := db.conn.Exec(`INSERT INTO voice_creation_outcomes (request_id, owner, outcome, attempt_id, created_at, updated_at) VALUES (?, ?, 'pending', ?, ?, ?) ON CONFLICT(owner, request_id) DO UPDATE SET outcome='pending', attempt_id=excluded.attempt_id, voice_session_id=NULL, media_generation=NULL, updated_at=excluded.updated_at`, requestID, owner, attemptID, now, now)
+	if err != nil {
+		return "", fmt.Errorf("create voice outcome: %w", err)
+	}
+	return attemptID, nil
+}
+
+func (db *DB) UpdateVoiceCreationOutcome(owner, requestID, outcome, sessionID string, generation int64, attemptID string) error {
+	if attemptID == "" {
+		return ErrVoiceCreationAttemptStale
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	var sid any
 	if strings.TrimSpace(sessionID) != "" {
@@ -39,19 +57,19 @@ func (db *DB) UpdateVoiceCreationOutcome(owner, requestID, outcome, sessionID st
 	if generation > 0 {
 		gen = generation
 	}
-	result, err := db.conn.Exec(`UPDATE voice_creation_outcomes SET outcome=?, voice_session_id=?, media_generation=?, updated_at=? WHERE owner=? AND request_id=?`, outcome, sid, gen, now, owner, requestID)
+	result, err := db.conn.Exec(`UPDATE voice_creation_outcomes SET outcome=?, voice_session_id=?, media_generation=?, updated_at=? WHERE owner=? AND request_id=? AND attempt_id=?`, outcome, sid, gen, now, owner, requestID, attemptID)
 	if err != nil {
 		return fmt.Errorf("update voice outcome: %w", err)
 	}
 	if n, _ := result.RowsAffected(); n != 1 {
-		return ErrVoiceCreationOutcomeNotFound
+		return ErrVoiceCreationAttemptStale
 	}
 	return nil
 }
 
 func (db *DB) GetVoiceCreationOutcome(owner, requestID string) (VoiceCreationOutcome, error) {
 	var row VoiceCreationOutcome
-	err := db.conn.QueryRow(`SELECT request_id, owner, outcome, voice_session_id, media_generation, created_at, updated_at FROM voice_creation_outcomes WHERE owner=? AND request_id=?`, owner, requestID).Scan(&row.RequestID, &row.Owner, &row.Outcome, &row.VoiceSessionID, &row.MediaGeneration, &row.CreatedAt, &row.UpdatedAt)
+	err := db.conn.QueryRow(`SELECT request_id, owner, outcome, voice_session_id, media_generation, created_at, updated_at, attempt_id FROM voice_creation_outcomes WHERE owner=? AND request_id=?`, owner, requestID).Scan(&row.RequestID, &row.Owner, &row.Outcome, &row.VoiceSessionID, &row.MediaGeneration, &row.CreatedAt, &row.UpdatedAt, &row.AttemptID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return row, ErrVoiceCreationOutcomeNotFound
 	}
@@ -77,6 +95,37 @@ func (db *DB) MediaOutcome(voiceSessionID string, generation int64) (string, err
 		return "released", nil
 	default:
 		return "unknown", nil
+	}
+}
+
+// VoiceCreationOutcomeSnapshot derives both public fields from one SQLite read
+// snapshot, joining evidence by the complete owner/session/lease identity.
+func (db *DB) VoiceCreationOutcomeSnapshot(owner, requestID string) (outcome, evidenceID string, err error) {
+	var stored string
+	var state, evidence sql.NullString
+	err = db.conn.QueryRow(`SELECT c.outcome, m.state, e.evidence_id
+		FROM voice_creation_outcomes c
+		LEFT JOIN voice_media_sessions m ON c.voice_session_id=m.voice_session_id AND c.media_generation=m.media_generation AND c.owner=m.owner
+		LEFT JOIN voice_termination_evidence e ON e.evidence_id=m.evidence_id
+		 AND e.voice_session_id=m.voice_session_id AND e.media_generation=m.media_generation
+		 AND e.account_id=m.account_id AND e.lease_id=m.lease_id AND e.lease_generation=m.lease_generation
+		 AND m.peer_a_closed=1 AND m.peer_b_closed=1 AND m.data_channels_closed=1 AND m.tunnels_closed=1 AND m.retired_legs_unclean=0
+		WHERE c.owner=? AND c.request_id=?`, owner, requestID).Scan(&stored, &state, &evidence)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "unknown", "", ErrVoiceCreationOutcomeNotFound
+	}
+	if err != nil {
+		return "unknown", "", fmt.Errorf("read creation outcome snapshot: %w", err)
+	}
+	switch {
+	case stored == "never_established":
+		return stored, "", nil
+	case stored == "established" && (state.String == "active" || state.String == "closing"):
+		return "open", "", nil
+	case stored == "established" && state.String == "terminated" && strings.TrimSpace(evidence.String) != "":
+		return "released", evidence.String, nil
+	default:
+		return "unknown", "", nil
 	}
 }
 

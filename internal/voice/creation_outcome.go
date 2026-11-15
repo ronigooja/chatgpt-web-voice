@@ -1,42 +1,37 @@
 package voice
 
-import (
-	"errors"
-
-	"github.com/dyhhhhhh/chatgpt-web-voice/internal/store"
-)
+import "github.com/dyhhhhhh/chatgpt-web-voice/internal/store"
 
 type CreationOutcomeStore interface {
-	CreateVoiceCreationOutcome(owner, requestID string) error
-	UpdateVoiceCreationOutcome(owner, requestID, outcome, sessionID string, generation int64) error
-	GetVoiceCreationOutcome(owner, requestID string) (store.VoiceCreationOutcome, error)
-	MediaOutcome(voiceSessionID string, generation int64) (string, error)
+	BeginVoiceCreationOutcome(owner, requestID string) (string, error)
+	UpdateVoiceCreationOutcome(owner, requestID, outcome, sessionID string, generation int64, attemptID string) error
+	VoiceCreationOutcomeSnapshot(owner, requestID string) (string, string, error)
+}
+
+// CreationOutcomeSnapshot returns owner-scoped outcome and evidence atomically.
+// A released outcome always carries matching durable local termination evidence.
+func (s *Service) CreationOutcomeSnapshot(owner, requestID string) (string, string, bool) {
+	if s.creationOutcomes == nil {
+		return "unknown", "", false
+	}
+	outcome, evidence, err := s.creationOutcomes.VoiceCreationOutcomeSnapshot(owner, requestID)
+	if err != nil {
+		return "unknown", "", false
+	}
+	if outcome == "released" && evidence == "" {
+		return "unknown", "", true
+	}
+	return outcome, evidence, true
+}
+
+func (s *Service) CreationOutcomeEvidence(owner, requestID string) string {
+	_, evidence, _ := s.CreationOutcomeSnapshot(owner, requestID)
+	return evidence
 }
 
 func (s *Service) creationOutcome(owner, requestID string) (string, bool) {
-	if s.creationOutcomes == nil {
-		return "unknown", false
-	}
-	row, err := s.creationOutcomes.GetVoiceCreationOutcome(owner, requestID)
-	if errors.Is(err, store.ErrVoiceCreationOutcomeNotFound) {
-		return "unknown", false
-	}
-	if err != nil {
-		return "unknown", false
-	}
-	if row.Outcome == "pending" {
-		// A pending create may still be in flight or may have crashed; neither is provable.
-		return "unknown", true
-	}
-	if row.Outcome != "established" {
-		return row.Outcome, true
-	}
-	if !row.VoiceSessionID.Valid || !row.MediaGeneration.Valid {
-		return "unknown", true
-	}
-	outcome, err := s.creationOutcomes.MediaOutcome(row.VoiceSessionID.String, row.MediaGeneration.Int64)
-	if err != nil {
-		return "unknown", true
-	}
-	return outcome, true
+	outcome, _, exists := s.CreationOutcomeSnapshot(owner, requestID)
+	return outcome, exists
 }
+
+var _ CreationOutcomeStore = (*store.DB)(nil)
