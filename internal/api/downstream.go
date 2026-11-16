@@ -11,8 +11,14 @@ import (
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/voice"
 )
 
-func (s *Server) downstreamHealth(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "version": "v1"})
+func (s *Server) downstreamHealth(w http.ResponseWriter, r *http.Request) {
+	response := map[string]any{"ok": true, "version": "v1"}
+	if auth.APIKeyOwner(r.Context()) != "" {
+		if service, ok := s.voice.(interface{ ResultDeliveryCapability() bool }); ok && service.ResultDeliveryCapability() {
+			response["result_deliveries"] = map[string]any{"version": "v1", "max_text_bytes": 8000, "applied_evidence": "local_transport_writes_and_durable_receipt"}
+		}
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) voiceConfig(w http.ResponseWriter, _ *http.Request) {

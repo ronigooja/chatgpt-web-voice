@@ -165,18 +165,24 @@ func (w *avasSidebandWriter) setOnClose(fn func()) {
 }
 
 func (w *avasSidebandWriter) send(data []byte) error {
+	_, err := w.sendAttempt(data)
+	return err
+}
+
+// sendAttempt distinguishes a definite pre-write failure from an ambiguous write.
+func (w *avasSidebandWriter) sendAttempt(data []byte) (bool, error) {
 	if w == nil {
-		return errors.New("avas sideband writer unavailable")
+		return false, errors.New("avas sideband writer unavailable")
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.closed {
-		return errors.New("avas sideband closed")
+		return false, errors.New("avas sideband closed")
 	}
 	if err := w.conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
-		return err
+		return false, err
 	}
-	return w.conn.WriteMessage(websocket.TextMessage, data)
+	return true, w.conn.WriteMessage(websocket.TextMessage, data)
 }
 
 func (w *avasSidebandWriter) close() {
@@ -239,9 +245,11 @@ type Service struct {
 	// evidence, when set, records media sessions and termination evidence.
 	evidence         MediaEvidenceStore
 	creationOutcomes CreationOutcomeStore
+	resultReceipts   ResultReceiptStore
 
-	mu       sync.Mutex
-	bindings map[string]*sessionBinding
+	mu        sync.Mutex
+	bindings  map[string]*sessionBinding
+	openingMu sync.Mutex
 }
 
 // New creates a voice service.
@@ -359,6 +367,7 @@ type OpeningContext struct {
 	Items   []OpeningContextItem `json:"items"`
 }
 type OpeningContextResult struct {
+	ContentHash    string `json:"content_hash,omitempty"`
 	Applied        bool   `json:"applied"`
 	AlreadyApplied bool   `json:"already_applied,omitempty"`
 	Reason         string `json:"reason,omitempty"`
@@ -482,7 +491,6 @@ func (s *Service) bindVoiceSessionMedia(owner, sessionID, token string, account 
 	}
 	now := time.Now()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.cleanupBindingsLocked(now)
 
 	// Preserve continuity fields across SDP re-exchanges unless the caller
@@ -534,6 +542,10 @@ func (s *Service) bindVoiceSessionMedia(owner, sessionID, token string, account 
 		}
 		go s.closeTracked(replaced, replacedID, "superseded")
 	}
+	// SetCloseHandler can synchronously replay an already-observed close.
+	// Publish under the binding lock, then register outside it: relay registration
+	// replays closure, and onMediaClosed fences removal by the exact media.
+	s.mu.Unlock()
 	if media != nil {
 		media.SetCloseHandler(func(reason string) { s.onMediaClosed(owner, sessionID, media, mediaID, reason) })
 	}
@@ -807,6 +819,8 @@ func (s *Service) UpdateSessionContext(owner, voiceSessionID string, patch Upstr
 
 // ApplyOpeningContext delivers opening context once and persists metadata.
 func (s *Service) ApplyOpeningContext(owner, voiceSessionID string, c OpeningContext) (*OpeningContextResult, error) {
+	s.openingMu.Lock()
+	defer s.openingMu.Unlock()
 	chars, err := validateOpeningContext(c)
 	if err != nil {
 		return nil, err
@@ -832,8 +846,13 @@ func (s *Service) ApplyOpeningContext(owner, voiceSessionID string, c OpeningCon
 	if c.Version < row.OpeningContextVersion {
 		return nil, &ServiceError{Message: "opening context version must increase", StatusCode: 409}
 	}
+	if s.cfg.VoiceUpstreamRoute == "avas" && c.Version == row.OpeningContextVersion {
+		if err := s.checkOpeningHash(owner, voiceSessionID, c); err != nil {
+			return nil, err
+		}
+	}
 	if c.Version == row.OpeningContextVersion && row.OpeningContextVersion > 0 {
-		return &OpeningContextResult{Applied: true, AlreadyApplied: true, Version: c.Version, ItemCount: row.OpeningContextItems, CharCount: row.OpeningContextChars}, nil
+		return &OpeningContextResult{Applied: true, AlreadyApplied: true, Version: c.Version, ItemCount: row.OpeningContextItems, CharCount: row.OpeningContextChars, Silent: "unverified"}, nil
 	}
 	if s.cfg.VoiceUpstreamRoute == "avas" {
 		return nil, &ServiceError{Message: "opening context live injection is not supported on avas", StatusCode: 501}
@@ -1740,6 +1759,12 @@ func (s *Service) pickAccountForSession(preferredToken string, preferredAccountI
 
 // CreateSession POSTs offer SDP to /realtime/wm and returns answer SDP.
 func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult, createErr error) {
+	// Serialize AVAS opening preflight through finalization, without a DB
+	// transaction across network IO. Creation remains non-idempotent.
+	if s.cfg.VoiceUpstreamRoute == "avas" && len(req.OpeningContext.Items) > 0 {
+		s.openingMu.Lock()
+		defer s.openingMu.Unlock()
+	}
 	if !utf8.ValidString(req.Instructions) {
 		return nil, &ServiceError{Message: "instructions must be valid UTF-8", StatusCode: 400}
 	}
@@ -1764,6 +1789,11 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 	bound, ownedByOther := s.boundVoiceSession(owner, req.VoiceSessionID)
 	if ownedByOther {
 		return nil, &ServiceError{Message: "voice session does not belong to caller", StatusCode: 403}
+	}
+	if s.cfg.VoiceUpstreamRoute == "avas" && len(req.OpeningContext.Items) > 0 && strings.TrimSpace(req.VoiceSessionID) != "" {
+		if err := s.checkOpeningHash(owner, req.VoiceSessionID, req.OpeningContext); err != nil {
+			return nil, err
+		}
 	}
 
 	// After a gateway restart the memory map is empty. Rebuild sticky preference
@@ -2208,6 +2238,12 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 			}
 		}
 		voiceSessionID := s.bindVoiceSessionMedia(owner, targetSessionID, token, account, upstreamForWM, media, mediaID, call)
+		s.mu.Lock()
+		createdBinding := s.bindings[voiceSessionID]
+		if createdBinding != nil && (createdBinding.media != media || createdBinding.mediaID != mediaID) {
+			createdBinding = nil
+		}
+		s.mu.Unlock()
 		if call != nil {
 			call.forward = newTranscriptForward(s.cfg, s.zoeToken, voiceSessionID, mediaID.MediaGeneration, s.logger)
 			if call.forward != nil {
@@ -2282,14 +2318,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 			if chars, validationErr := validateOpeningContext(req.OpeningContext); validationErr != nil {
 				return nil, validationErr
 			} else if s.cfg.VoiceUpstreamRoute == "avas" {
-				_, _, appliedErr := s.records.UpdateOpeningContext(owner, voiceSessionID, req.OpeningContext.Kind, req.OpeningContext.Version, len(req.OpeningContext.Items), chars, time.Now().UTC().Format(time.RFC3339Nano))
-				if appliedErr == nil {
-					openingResult.Applied = true
-					openingResult.CharCount = chars
-					openingResult.Silent = true
-				} else {
-					openingResult.Reason = "metadata_persist_failed"
-				}
+				openingResult = s.finalizeCreatedOpening(owner, voiceSessionID, createdBinding, req.OpeningContext, chars)
 			} else if applied, applyErr := s.ApplyOpeningContext(owner, voiceSessionID, req.OpeningContext); applyErr == nil {
 				openingResult = applied
 			} else {

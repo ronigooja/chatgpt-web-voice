@@ -118,7 +118,10 @@ func Run() error {
 	if unknownMedia > 0 {
 		logger.Warn("media_sessions_unknown_after_restart", "count", unknownMedia)
 	}
-	voiceService := voice.New(cfg, accountPool, logger).WithCallSessions(callSessionStore).WithMediaEvidence(mediaEvidenceStore).WithCreationOutcomes(db)
+	if err := db.RecoverResultReceipts(); err != nil {
+		return fmt.Errorf("recover result receipts: %w", err)
+	}
+	voiceService := voice.New(cfg, accountPool, logger).WithCallSessions(callSessionStore).WithMediaEvidence(mediaEvidenceStore).WithCreationOutcomes(db).WithResultReceipts(db)
 	if cfg.RelayEnabled {
 		mediaRelay, err := relay.New(relay.Config{
 			MaxSessions:                 cfg.RelayMaxSessions,

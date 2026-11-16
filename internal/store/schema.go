@@ -10,6 +10,12 @@ func (db *DB) migrate() error {
 		"PRAGMA busy_timeout = 5000",
 		"PRAGMA foreign_keys = ON",
 		"PRAGMA journal_mode = WAL",
+		`CREATE TABLE IF NOT EXISTS voice_result_receipts (
+		 owner TEXT NOT NULL, voice_session_id TEXT NOT NULL, media_generation INTEGER NOT NULL CHECK(media_generation>0),
+		 delivery_id TEXT NOT NULL, content_hash TEXT NOT NULL, text TEXT NOT NULL,
+		 state TEXT NOT NULL CHECK(state IN ('pending','inflight','applied','unknown','rejected')),
+		 attempt_id TEXT NOT NULL DEFAULT '', PRIMARY KEY(owner,voice_session_id,media_generation,delivery_id)
+		)`,
 		`CREATE TABLE IF NOT EXISTS accounts (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			email TEXT NOT NULL DEFAULT '',
@@ -75,6 +81,8 @@ func (db *DB) migrate() error {
 			voice_mode TEXT NOT NULL DEFAULT '',
 			language_code TEXT NOT NULL DEFAULT '',
 			status TEXT NOT NULL DEFAULT 'active',
+			opening_context_hash TEXT NOT NULL DEFAULT '',
+			opening_context_generation INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,

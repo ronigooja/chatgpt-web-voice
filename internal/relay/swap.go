@@ -94,6 +94,27 @@ func (s *pionSession) SwapReady() <-chan struct{} {
 }
 
 // SendPendingText implements Session.
+// SendResultText applies to receipt-backed writes: it synchronously writes to
+// the exact active leg, excludes swaps, and never queues or retries the frame.
+func (s *pionSession) SendResultText(text string) (bool, error) {
+	payload, err := userTextEvent(text)
+	if err != nil {
+		return false, err
+	}
+	s.legMu.Lock()
+	defer s.legMu.Unlock()
+	l := s.active
+	if l == nil || l.channel == nil {
+		return false, errors.New("active text channel unavailable")
+	}
+	select {
+	case <-l.ready:
+	default:
+		return false, errSwapNotReady
+	}
+	return true, l.channel.SendText(payload)
+}
+
 func (s *pionSession) SendPendingText(text string) error {
 	l := s.pendingLeg()
 	if l == nil {
