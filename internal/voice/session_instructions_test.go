@@ -9,14 +9,33 @@ import (
 	"strings"
 	"testing"
 
+	fhttp "github.com/bogdanfinn/fhttp"
+	fhttptest "github.com/bogdanfinn/fhttp/httptest"
+	"github.com/bogdanfinn/websocket"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/callsessions"
+	"github.com/dyhhhhhh/chatgpt-web-voice/internal/mediaevidence"
 )
 
 func TestAVASSessionInstructionsCreateBody(t *testing.T) {
 	for _, instructions := range []string{"", "  常驻规则：保持\"原文\"。\nSecond line\n", strings.Repeat("界", 2000)} {
 		t.Run(fmt.Sprintf("bytes_%d", len(instructions)), func(t *testing.T) {
-			svc, _, _ := newCreationService(t, []int{http.StatusCreated}, 1)
-			svc.WithCallSessions(&testCallSessionStore{rows: make(map[string]callsessions.Session)})
+			svc, db, _ := newCreationService(t, []int{http.StatusCreated}, 1)
+			svc.WithCallSessions(callsessions.NewStore(db)).WithRelay(&fakeRelay{}).WithMediaEvidence(mediaevidence.NewStore(db))
+			upgrader := websocket.Upgrader{CheckOrigin: func(*fhttp.Request) bool { return true }}
+			sideband := fhttptest.NewServer(fhttp.HandlerFunc(func(w fhttp.ResponseWriter, r *fhttp.Request) {
+				conn, err := upgrader.Upgrade(w, r, nil)
+				if err != nil {
+					return
+				}
+				defer conn.Close()
+				for {
+					if _, _, err := conn.ReadMessage(); err != nil {
+						return
+					}
+				}
+			}))
+			t.Cleanup(sideband.Close)
+			svc.avasSidebandURL = "ws" + strings.TrimPrefix(sideband.URL, "http") + "/"
 			var received struct {
 				Session avasSessionPayload `json:"session"`
 			}
@@ -24,6 +43,7 @@ func TestAVASSessionInstructionsCreateBody(t *testing.T) {
 				if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
 					t.Error(err)
 				}
+				w.Header().Set("Location", "https://example.invalid/live/instructions-test")
 				w.WriteHeader(http.StatusCreated)
 				_, _ = io.WriteString(w, "v=0\r\n")
 			}))
@@ -41,6 +61,7 @@ func TestAVASSessionInstructionsCreateBody(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			t.Cleanup(func() { svc.ReleaseSession("api_key:1", result.VoiceSessionID) })
 			if received.Session.Instructions != instructions {
 				t.Fatalf("session.instructions = %q, want exact input %q", received.Session.Instructions, instructions)
 			}
@@ -54,6 +75,14 @@ func TestAVASSessionInstructionsCreateBody(t *testing.T) {
 			}
 			if result.OpeningContext == nil || !result.OpeningContext.Applied || result.OpeningContext.Silent != true {
 				t.Fatalf("AVAS acknowledgement = %+v", result.OpeningContext)
+			}
+			var hash string
+			var generation int64
+			if err := db.Conn().QueryRow(`SELECT opening_context_hash,opening_context_generation FROM call_sessions WHERE owner=? AND voice_session_id=?`, req.Owner, result.VoiceSessionID).Scan(&hash, &generation); err != nil {
+				t.Fatal(err)
+			}
+			if generation <= 0 || generation != result.VoiceSessionGeneration || hash != openingContextContentHash(req.OpeningContext) || result.OpeningContext.ContentHash != hash {
+				t.Fatalf("receipt not bound to durable current media: hash=%q generation=%d receipt=%+v", hash, generation, result.OpeningContext)
 			}
 		})
 	}
