@@ -41,7 +41,7 @@ func TestUpgradeFrom411251cPreservesRowsAndSupportsReceipts(t *testing.T) {
 	exec(legacy, `INSERT INTO bridge_idempotency VALUES('key','remote-1','digest')`)
 	exec(legacy, `INSERT INTO api_keys(name,key_prefix,secret_hash) VALUES('fake','prefix','fake-hash')`)
 	exec(legacy, `INSERT INTO auth_sessions(token_hash,username,expires_at) VALUES('fake','user','2030-01-01')`)
-	exec(legacy, `INSERT INTO conversations(id,owner,title,account_id) VALUES('conversation','owner','title',1)`)
+	exec(legacy, `INSERT INTO conversations(id,owner,title,title_locked,preview,account_id,upstream_conversation_id,upstream_parent_message_id,upstream_voice_session_id,gateway_voice_session_id,created_at,updated_at) VALUES('conversation','owner','title',1,'preview',1,'upstream','parent','upstream-voice','session','2026-01-01','2026-01-02')`)
 	exec(legacy, `INSERT INTO conversation_messages(conversation_id,client_id,role,content) VALUES('conversation','message','user','synthetic')`)
 	exec(legacy, `INSERT INTO call_sessions(voice_session_id,owner,account_id,upstream_conversation_id,context_chars,opening_context_version) VALUES('session','owner',1,'upstream',17,2),('released','owner',2,'other',19,1)`)
 	exec(legacy, `INSERT INTO voice_creation_outcomes(request_id,owner,outcome,attempt_id,voice_session_id,media_generation) VALUES('request','owner','established','old-attempt','session',1)`)
@@ -52,7 +52,9 @@ func TestUpgradeFrom411251cPreservesRowsAndSupportsReceipts(t *testing.T) {
 	tables := []string{"accounts", "bridge_accounts", "bridge_idempotency", "api_keys", "auth_sessions", "conversations", "conversation_messages", "call_sessions", "voice_creation_outcomes", "voice_media_sessions", "voice_termination_evidence"}
 	queries := make(map[string]string)
 	before := make(map[string][][]any)
+	columnsBefore := make(map[string][][]any)
 	for _, table := range tables {
+		columnsBefore[table] = upgradeRows(t, legacy, "PRAGMA table_info("+table+")")
 		rows, err := legacy.Query("SELECT * FROM " + table + " LIMIT 0")
 		if err != nil {
 			t.Fatal(err)
@@ -79,6 +81,17 @@ func TestUpgradeFrom411251cPreservesRowsAndSupportsReceipts(t *testing.T) {
 	assertPreserved := func() {
 		t.Helper()
 		for _, table := range tables {
+			// Only the two opening receipt fields may be added to the captured
+			// production tables; conversations must retain its real 12 columns.
+			wantColumns := append([][]any(nil), columnsBefore[table]...)
+			if table == "call_sessions" {
+				wantColumns = append(wantColumns,
+					[]any{int64(26), "opening_context_hash", "TEXT", int64(1), "''", int64(0)},
+					[]any{int64(27), "opening_context_generation", "INTEGER", int64(1), "0", int64(0)})
+			}
+			if got := upgradeRows(t, db.Conn(), "PRAGMA table_info("+table+")"); !reflect.DeepEqual(got, wantColumns) {
+				t.Errorf("%s columns after migration = %v; want %v", table, got, wantColumns)
+			}
 			if got := upgradeRows(t, db.Conn(), queries[table]); !reflect.DeepEqual(got, before[table]) {
 				t.Errorf("%s rows changed during migration", table)
 			}
@@ -97,6 +110,7 @@ func TestUpgradeFrom411251cPreservesRowsAndSupportsReceipts(t *testing.T) {
 		}
 	}
 	assertPreserved()
+	t.Log("production schema ALTERs: ALTER TABLE call_sessions ADD COLUMN opening_context_hash TEXT NOT NULL DEFAULT ''; ALTER TABLE call_sessions ADD COLUMN opening_context_generation INTEGER NOT NULL DEFAULT 0; no conversations ALTERs")
 	for _, row := range upgradeRows(t, db.Conn(), `SELECT opening_context_hash,opening_context_generation FROM call_sessions`) {
 		if !reflect.DeepEqual(row, []any{"", int64(0)}) {
 			t.Fatalf("opening defaults = %v", row)
