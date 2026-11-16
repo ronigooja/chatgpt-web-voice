@@ -211,6 +211,8 @@ func (db *DB) ensureCallSessionResumeColumns() error {
 		"opening_context_items INTEGER NOT NULL DEFAULT 0",
 		"opening_context_chars INTEGER NOT NULL DEFAULT 0",
 		"opening_context_applied_at TEXT NOT NULL DEFAULT ''",
+		"opening_context_hash TEXT NOT NULL DEFAULT ''",
+		"opening_context_generation INTEGER NOT NULL DEFAULT 0",
 	} {
 		name := column[:strings.IndexByte(column, ' ')]
 		has, err := db.hasColumn("call_sessions", name)
