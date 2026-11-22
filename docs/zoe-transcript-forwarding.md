@@ -1,76 +1,63 @@
-# Zoe transcript forwarding
+# Zoe gateway integration
 
-Applies when `VOICE_ZOE_URL` and `VOICE_ZOE_TOKEN_FILE` are both nonempty and the
-trimmed token file contains a bearer token. Either absent setting or an empty
-token disables forwarding. Configuration validation rejects unreadable files,
-credentials in URLs, queries/fragments, and non-HTTPS destinations except HTTP
-on localhost/loopback. Token contents are read once at service startup.
+## Deployment
 
-## Operator deployment
+Set `VOICE_UPSTREAM_ROUTE=avas`, enable the media relay, and configure:
 
-On the gateway host, provision the token through the existing secret-management
-process at `/opt/llm-auth-bridge/.secrets/zoe_voice_ingest_token`. Do not put its
-value in compose, source, logs, or shell arguments. Add this to the host compose
-configuration (the repository compose remains opt-in/unmodified):
+| Environment variable | Value |
+|---|---|
+| `VOICE_ZOE_URL` | Zoe HTTPS base URL, using a trusted certificate. |
+| `VOICE_ZOE_TOKEN_FILE` | Mounted secret file containing Zoe's voice runner bearer. Read at startup; never put the value in compose or logs. |
+| `VOICE_ZOE_GATEWAY_API_KEY_ID` | Numeric ID of the enabled gateway API key whose secret Zoe uses as `ZOE_VOICE_GATEWAY_API_KEY`. Defaults to `0` (gateway-owned admission disabled). Do not set this to a secret, prefix, or instance ID. |
+| `VOICE_ZOE_SILENCE_SECONDS` | Positive timeout in seconds; defaults to `60`. |
 
-```yaml
-services:
-  chatgpt-web-voice:
-    environment:
-      VOICE_ZOE_URL: https://zoe.nodemgr.uk
-      VOICE_ZOE_TOKEN_FILE: /run/secrets/zoe_voice_ingest_token
-    secrets:
-      - zoe_voice_ingest_token
-secrets:
-  zoe_voice_ingest_token:
-    file: /opt/llm-auth-bridge/.secrets/zoe_voice_ingest_token
-```
+Expose the Apple routes at the HTTPS origin advertised by Zoe. If terminating
+TLS at a reverse proxy, do not expose the plaintext gateway listener and
+disable headers/body logging for these routes. Upgrade Zoe, gateway, and Apple
+together. Rotated Zoe instance keys take effect at Zoe without gateway reload.
 
-The compose secret `zoe_voice_ingest_token` mounts at
-`/run/secrets/zoe_voice_ingest_token`. Use an image built from the forwarding
-branch; this change does not deploy an image, alter external services, or modify
-any debug/probe switch. Media evidence must be enabled: forwarding uses exactly
-the gateway session ID and `voice_session_generation` returned by session
-creation, not upstream call IDs. Sessions without a recorded generation are
-not forwarded and produce a metadata-only warning.
+## Signaling and reconciliation
 
-## Event and delivery contract
+- `POST /client/v1/voice/calls` accepts the instance bearer plus `request_id`,
+  `offer_sdp`, and optional `voice`, `voice_mode`, `language_code`. The gateway
+  sends the key only in the runner-authenticated `call.start`. No relay or
+  upstream allocation occurs until Zoe accepts the request. The answer and
+  IDs are returned only after Zoe acknowledges `call.established`.
+- `POST /client/v1/voice/calls/{gateway_session_id}/hangup` checks the instance
+  bearer against Zoe's owner-scoped session read. An authenticated, matching
+  close attempt returns an empty `204`, not a lease release confirmation.
+- `GET /v1/voice/requests/{request_id}/outcome` takes Zoe's `gateway_request_id`.
+  A failed pre-binding create is reconciled through this read, not a fabricated
+  `call.ended`. A durable attempt fence prevents re-creating media on replay.
+- `GET /v1/voice/sessions/{gateway_session_id}/termination-evidence` requires
+  `media_generation`, `account_lease_id`, and `account_lease_generation`. It
+  returns `released` with the exact joined evidence, `not_yet` for an active or
+  closing tuple, or `unknown`. It never closes media or mutates a lease.
+- These reads, config, and in-call result/context APIs use the existing gateway
+  API-key authentication. Gateway-owned mode disables legacy downstream create,
+  DELETE, and account-lease release; legacy standalone mode retains them.
 
-AVAS sideband events are observed after the existing normalizer/injector.
-`turn.created` opens a turn; `turn.done` supplies final transcript/content/text.
-Client-target `delegation.created` supplies final user text. User completion via
-both representations is deduplicated within the current user turn. Text deltas
-(`turn.text.delta`, `output_text.delta`, `output_audio_transcript.delta`) append
-to the open turn. The legacy WM `chat_message_delta` snapshots and append ops
-are supported separately. Next-message start and media close flush unfinished
-turns. Non-conversation events are ignored. Neither collector changes the
-existing handoff tail or relies on final-turn/debug/probe switches.
+Hangup, silence, upstream end, transport loss, and gateway shutdown close
+both relay legs. Only established calls send end reports. End reports reuse one
+immutable identity, reason, close timestamp, and optional evidence across the
+short in-memory retries. Evidence certifies gateway-local cleanup only; an
+unresolved account remains unavailable. A restart does not turn an unresolved
+lease into evidence. Silence uses new upstream user turns, not transport or
+render traffic; in-place upstream swaps are disabled for gateway-owned calls.
 
-One worker per call sends ordered sequences from zero to
-`POST /runner/v1/voice/turns`, batches at most 20 turns/512 KiB, and waits at most
-500 ms to accumulate a small batch. Each individual turn is limited to 64 KiB;
-oversized turns are cut to a complete UTF-8 prefix at or below 65,536 bytes
-and delivered without an added suffix.
-The 1,000-turn queue drops oldest unsent turns on overflow, retaining sequence
-gaps and reporting counts. An already in-flight batch may still arrive after
-its queue entry has been evicted. IDs/sequence/text remain stable across retry.
+## Turns and delegation
 
-Network/5xx retry exponentially from 1 s to 30 s. Unknown sessions (404) retry
-for two minutes; 409 is terminal. 400/413 batches are isolated to single turns
-so only rejected turns are dropped, with one terminal log containing only seq
-and status (plus standard logger metadata). Sequence gaps do not block later
-turns. 401/403 retry, logging at most once per
-minute per call. HTTPS certificate verification is always enabled, independent
-of upstream `SkipSSLVerify`. Redirects are not followed. Destination response
-bodies and network error strings are never logged. No turn text or bearer is
-logged, even when other debug switches are on.
+After establishment, the runner sends `POST /runner/v1/voice/turns`. Ordinary
+turns batch for up to 500 ms (20 turns and 512 KiB per batch). Text is capped at
+64 KiB at a UTF-8 boundary, and the ordinary 1000-turn queue drops oldest entries
+on overflow. Network/5xx retry with long backoff; 404 and 409 are terminal for
+established calls.
 
-Media close initiates an asynchronous flush with a 60 s overall deadline,
-including in-flight requests. Call control/media never waits for delivery.
-There is **no disk persistence**: gateway crash/restart loses all queued and
-unfinished turns, plus any in-flight delivery not yet accepted by Zoe. During
-normal healthy operation the queueing window is up to 500 ms plus HTTP time;
-during outages the loss window spans the entire backlog (up to 1,000 turns).
-Shutdown does not provide process-wide draining; an immediate process exit
-can interrupt the per-call 60 s flush. This is bounded in-memory reliability,
-not restart-durable or unconditional lossless delivery.
+A client-targeted AVAS delegation marks the corresponding user sequence with
+the upstream item ID, even if Zoe already received the unmarked turn. Marked
+turns bypass batching and ordinary backoff, are overflow-exempt, and retry
+only network failures and 5xx for up to 10 seconds with jitter. Marked text is
+never truncated to make it executable. On expiry, terminal response, or
+oversize, the gateway attempts to append a failure note to the still-open
+delegation and queues the ordinary transcript. There is no synthetic final
+turn sent to Apple. Reports and turn queues are in memory only.

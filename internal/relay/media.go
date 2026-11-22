@@ -383,7 +383,7 @@ func (r *PionRelay) NewSession(ctx context.Context, clientOffer string, route Ro
 		return nil, "", err
 	}
 	if _, err := buildProxyDialer(route.ProxyURL); err != nil {
-		return nil, "", fmt.Errorf("configure relay remote TCP proxy: %w", err)
+		return nil, "", errors.Join(ErrCreateClean, fmt.Errorf("configure relay remote TCP proxy: %w", err))
 	}
 	if !r.limiter.acquire() {
 		return nil, "", ErrCapacity
@@ -392,7 +392,7 @@ func (r *PionRelay) NewSession(ctx context.Context, clientOffer string, route Ro
 	downstream, err := r.downstreamAPI.NewPeerConnection(r.configuration)
 	if err != nil {
 		releaseSlot()
-		return nil, "", fmt.Errorf("create peer A: %w", err)
+		return nil, "", errors.Join(ErrCreateClean, fmt.Errorf("create peer A: %w", err))
 	}
 
 	id := uuid.NewString()
@@ -420,12 +420,17 @@ func (r *PionRelay) NewSession(ctx context.Context, clientOffer string, route Ro
 	session.logger.Info("relay session created")
 
 	fail := func(format string, err error) (Session, string, error) {
-		_ = session.Close()
-		return nil, "", fmt.Errorf(format+": %w", err)
+		closeErr := session.Close()
+		return nil, "", errors.Join(fmt.Errorf(format+": %w", err), closeErr)
 	}
 
 	if err := downstream.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: clientOffer}); err != nil {
-		return fail("set client offer on peer A", err)
+		// No peer B or tunnels exist yet; cleanly closing A proves non-admission.
+		if closeErr := session.Close(); closeErr == nil {
+			return nil, "", errors.Join(ErrCreateClean, fmt.Errorf("set client offer on peer A: %w", err))
+		} else {
+			return nil, "", errors.Join(fmt.Errorf("set client offer on peer A: %w", err), closeErr)
+		}
 	}
 	toClient, err := webrtc.NewTrackLocalStaticRTP(opusCodec, "audio", "relay")
 	if err != nil {

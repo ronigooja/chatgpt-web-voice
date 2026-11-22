@@ -24,6 +24,11 @@ type safeForwardLog struct {
 	b  bytes.Buffer
 }
 
+func avasData(v any) []byte {
+	b, _ := json.Marshal(v)
+	return normalizeAVASEvent(b)
+}
+
 func (l *safeForwardLog) Write(b []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

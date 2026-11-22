@@ -2,8 +2,13 @@ package relay
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// ErrCreateClean marks a failed creation with no resources or with every
+// partially allocated component closed successfully.
+var ErrCreateClean = errors.New("relay creation left no live components")
 
 // Route carries per-session network routing.
 type Route struct {

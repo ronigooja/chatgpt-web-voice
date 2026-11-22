@@ -191,7 +191,16 @@ func (db *DB) migrate() error {
 }
 
 func (db *DB) cleanupVoiceCreationOutcomes() error {
-	if _, err := db.conn.Exec(`DELETE FROM voice_creation_outcomes WHERE updated_at < datetime('now', '-7 days')`); err != nil {
+	has, err := db.hasColumn("voice_creation_outcomes", "gateway_owned")
+	if err != nil {
+		return err
+	}
+	if !has {
+		if _, err := db.conn.Exec(`ALTER TABLE voice_creation_outcomes ADD COLUMN gateway_owned INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("add gateway-owned creation fence: %w", err)
+		}
+	}
+	if _, err := db.conn.Exec(`DELETE FROM voice_creation_outcomes WHERE gateway_owned = 0 AND updated_at < datetime('now', '-7 days')`); err != nil {
 		return fmt.Errorf("cleanup voice creation outcomes: %w", err)
 	}
 	if _, err := db.conn.Exec(`UPDATE voice_creation_outcomes SET outcome = 'unknown', updated_at = CURRENT_TIMESTAMP WHERE outcome = 'pending'`); err != nil {
@@ -540,6 +549,8 @@ func (db *DB) ensureMediaEvidenceTables() error {
 		{"retired_legs", "INTEGER NOT NULL DEFAULT 0"},
 		{"retired_legs_unclean", "INTEGER NOT NULL DEFAULT 0"},
 		{"current_account_id", "INTEGER NOT NULL DEFAULT 0"},
+		{"zoe_session_id", "TEXT NOT NULL DEFAULT ''"},
+		{"zoe_generation", "INTEGER NOT NULL DEFAULT 0"},
 	} {
 		has, err := db.hasColumn("voice_media_sessions", column.name)
 		if err != nil {

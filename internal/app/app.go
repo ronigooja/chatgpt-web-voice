@@ -83,6 +83,12 @@ func Run() error {
 	conversationStore := conversations.NewStore(db)
 	callSessionStore := callsessions.NewStore(db)
 	apiKeyStore := apikeys.NewStore(db)
+	if cfg.ZoeGatewayAPIKeyID > 0 {
+		key, err := apiKeyStore.Get(int64(cfg.ZoeGatewayAPIKeyID))
+		if err != nil || !key.Enabled {
+			return fmt.Errorf("VOICE_ZOE_GATEWAY_API_KEY_ID must name an enabled API key")
+		}
+	}
 	releasedOrphans, err := callSessionStore.MarkAllActiveReleased()
 	if err != nil {
 		return fmt.Errorf("release orphan call sessions failed: %w", err)
@@ -178,14 +184,21 @@ func Run() error {
 	select {
 	case sig := <-stop:
 		logger.Info("shutdown_requested", "signal", sig.String())
+		voiceService.StopOwnedAdmission()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := server.Shutdown(ctx); err != nil {
-			return fmt.Errorf("shutdown failed: %w", err)
+			logger.Error("http_shutdown_failed", "error", err)
 		}
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer closeCancel()
+		voiceService.ShutdownOwned(closeCtx)
 		logger.Info("shutdown_completed")
 		return nil
 	case err := <-serverErr:
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		voiceService.ShutdownOwned(ctx)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("server failed: %w", err)
 		}
@@ -203,6 +216,7 @@ func newHandler(cfg config.Config, authManager *auth.Manager, apiKeyManager *aut
 	bridge := http.NewServeMux()
 	apiServer.RegisterBridge(bridge)
 	root := http.NewServeMux()
+	apiServer.RegisterClientVoice(root)
 	root.Handle("/bridge/", authManager.RequireBasic(bridge))
 	// Shared CSS/assets must be public: login.html loads /static/app.css before auth.
 	registerPublicStaticAssets(root, cfg.StaticDir)

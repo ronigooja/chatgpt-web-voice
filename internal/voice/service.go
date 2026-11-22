@@ -133,10 +133,13 @@ type sessionBinding struct {
 	// mediaID is the evidence identity of media; zero when evidence is not tracked.
 	mediaID mediaevidence.Identity
 	// call holds in-memory per-call data for rebuilds; nil for client-direct media.
-	call           *callState
-	avasCancel     context.CancelFunc
-	avasSideband   *avasSidebandWriter
-	openDelegation string
+	call              *callState
+	avasCancel        context.CancelFunc
+	avasSideband      *avasSidebandWriter
+	openDelegation    string
+	openUserTurn      string
+	seenDelegation    map[string]bool
+	recentDelegations []string
 }
 
 const avasContextMaxBytes = 8000
@@ -227,6 +230,7 @@ type Service struct {
 	records     CallSessionStore
 	logger      *slog.Logger
 	zoeToken    string
+	zoeHTTP     *http.Client
 
 	// realtimeURL overrides the voice endpoint in tests.
 	realtimeURL string
@@ -247,9 +251,12 @@ type Service struct {
 	creationOutcomes CreationOutcomeStore
 	resultReceipts   ResultReceiptStore
 
-	mu        sync.Mutex
-	bindings  map[string]*sessionBinding
-	openingMu sync.Mutex
+	mu            sync.Mutex
+	bindings      map[string]*sessionBinding
+	openingMu     sync.Mutex
+	ownedCalls    map[string]*ownedCall
+	ownedStopping bool
+	ownedDials    sync.WaitGroup
 }
 
 // New creates a voice service.
@@ -263,6 +270,7 @@ func New(cfg config.Config, pool AccountRepository, logger *slog.Logger) *Servic
 	}
 	return &Service{
 		zoeToken:              zoeToken,
+		zoeHTTP:               &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 		cfg:                   cfg,
 		httpOptions:           httpclient.FromConfig(cfg),
 		pool:                  pool,
@@ -270,6 +278,7 @@ func New(cfg config.Config, pool AccountRepository, logger *slog.Logger) *Servic
 		settingsUserURL:       settingsUserURL,
 		conversationURLPrefix: conversationURLPrefix,
 		bindings:              make(map[string]*sessionBinding),
+		ownedCalls:            make(map[string]*ownedCall),
 	}
 }
 
@@ -547,7 +556,27 @@ func (s *Service) bindVoiceSessionMedia(owner, sessionID, token string, account 
 	// replays closure, and onMediaClosed fences removal by the exact media.
 	s.mu.Unlock()
 	if media != nil {
-		media.SetCloseHandler(func(reason string) { s.onMediaClosed(owner, sessionID, media, mediaID, reason) })
+		media.SetCloseHandler(func(reason string) {
+			if call != nil && call.owned != nil {
+				c := call.owned
+				s.mu.Lock()
+				b := s.bindings[sessionID]
+				var sideband *avasSidebandWriter
+				if b != nil && b.media == media {
+					sideband = b.avasSideband
+				}
+				s.mu.Unlock()
+				if sideband != nil && !sideband.closeAndWait() {
+					if _, err := s.evidence.Close(mediaID, mediaevidence.Components{}, ownedEndReason(reason)); err != nil {
+						s.logger.Error("owned_call_unclean_sideband_evidence_failed", "gateway_session_id", sessionID)
+					}
+				}
+				s.onMediaClosed(owner, sessionID, media, mediaID, reason)
+				s.finishOwned(c, reason)
+				return
+			}
+			s.onMediaClosed(owner, sessionID, media, mediaID, reason)
+		})
 	}
 	return sessionID
 }
@@ -748,6 +777,10 @@ func (s *Service) UpdateSessionContext(owner, voiceSessionID string, patch Upstr
 		return UpstreamContext{}, &ServiceError{Message: "voice session does not belong to caller", StatusCode: 403}
 	}
 	if item != nil {
+		if item.call != nil && item.call.owned != nil && !item.call.owned.active() {
+			s.mu.Unlock()
+			return UpstreamContext{}, &ServiceError{Message: "voice session not active", StatusCode: 409}
+		}
 		var avasWriter *avasSidebandWriter
 		var avasDelegation string
 		if s.cfg.VoiceUpstreamRoute == "avas" && strings.TrimSpace(patch.Text) != "" {
@@ -786,6 +819,9 @@ func (s *Service) UpdateSessionContext(owner, voiceSessionID string, patch Upstr
 	s.mu.Unlock()
 
 	// Memory binding gone (typical after hangup): update durable metadata only.
+	if s.GatewayOwnsCalls() {
+		return UpstreamContext{}, &ServiceError{Message: "voice session not active", StatusCode: 404}
+	}
 	if s.records == nil {
 		return UpstreamContext{}, &ServiceError{Message: "voice session not found", StatusCode: 404}
 	}
@@ -1120,6 +1156,10 @@ func (s *Service) ReleaseSessionStatus(owner, voiceSessionID string) (released, 
 	var mediaID mediaevidence.Identity
 	var call *callState
 	if ok && item.Owner == owner {
+		if item.call != nil && item.call.owned != nil {
+			s.mu.Unlock()
+			return false, false
+		}
 		media, mediaID, call = item.media, item.mediaID, item.call
 		delete(s.bindings, sessionID)
 		released = true
@@ -1436,7 +1476,7 @@ func avasCallID(location string) string {
 	return strings.TrimSpace(part)
 }
 
-func (s *Service) startAVASSideband(ctx context.Context, media relay.Session, callID, token, proxy string) (*avasSidebandWriter, error) {
+func (s *Service) startAVASSideband(ctx context.Context, media relay.Session, callID, token, proxy string, observerReady <-chan struct{}) (*avasSidebandWriter, error) {
 	injector, ok := media.(relay.SidebandEventInjector)
 	if !ok {
 		return nil, errors.New("avas sideband requires gateway media relay")
@@ -1474,6 +1514,11 @@ func (s *Service) startAVASSideband(ctx context.Context, media relay.Session, ca
 		defer workers.Done()
 		defer close(readerDone)
 		defer writer.close()
+		select {
+		case <-ctx.Done():
+			return
+		case <-observerReady:
+		}
 		for {
 			select {
 			case <-ctx.Done():
@@ -1734,6 +1779,8 @@ type CreateSessionRequest struct {
 	OpeningContext          OpeningContext
 	Instructions            string
 	RequestID               string
+	owned                   *ownedCall
+	creationAttempt         string
 }
 
 func openingContextText(c OpeningContext) string {
@@ -1759,6 +1806,9 @@ func (s *Service) pickAccountForSession(preferredToken string, preferredAccountI
 
 // CreateSession POSTs offer SDP to /realtime/wm and returns answer SDP.
 func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult, createErr error) {
+	if req.owned == nil && s.cfg.ZoeGatewayAPIKeyID > 0 {
+		return nil, &ServiceError{Message: "media admission is gateway-owned", StatusCode: 503}
+	}
 	// Serialize AVAS opening preflight through finalization, without a DB
 	// transaction across network IO. Creation remains non-idempotent.
 	if s.cfg.VoiceUpstreamRoute == "avas" && len(req.OpeningContext.Items) > 0 {
@@ -1789,6 +1839,17 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 	bound, ownedByOther := s.boundVoiceSession(owner, req.VoiceSessionID)
 	if ownedByOther {
 		return nil, &ServiceError{Message: "voice session does not belong to caller", StatusCode: 403}
+	}
+	if bound != nil && bound.call != nil && bound.call.owned != nil {
+		return nil, &ServiceError{Message: "gateway-owned call cannot be replaced", StatusCode: 409}
+	}
+	if req.VoiceSessionID != "" {
+		if evidence, ok := s.evidence.(ownedEvidenceStore); ok {
+			_, _, err := evidence.OwnedBinding(owner, req.VoiceSessionID)
+			if !errors.Is(err, mediaevidence.ErrNotFound) {
+				return nil, &ServiceError{Message: "cannot reuse media handle", StatusCode: 409}
+			}
+		}
 	}
 	if s.cfg.VoiceUpstreamRoute == "avas" && len(req.OpeningContext.Items) > 0 && strings.TrimSpace(req.VoiceSessionID) != "" {
 		if err := s.checkOpeningHash(owner, req.VoiceSessionID, req.OpeningContext); err != nil {
@@ -1886,8 +1947,8 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 	if targetSessionID == "" {
 		targetSessionID = newVoiceSessionID()
 	}
-	var creationAttempt string
-	if s.creationOutcomes != nil && strings.TrimSpace(req.RequestID) != "" {
+	creationAttempt := req.creationAttempt
+	if creationAttempt == "" && s.creationOutcomes != nil && strings.TrimSpace(req.RequestID) != "" {
 		var err error
 		creationAttempt, err = s.creationOutcomes.BeginVoiceCreationOutcome(owner, req.RequestID)
 		if err != nil || creationAttempt == "" {
@@ -1919,6 +1980,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 	failedRelaysClean := freshCreate
 	transportReleaseEligible := false
 	var failedMediaID mediaevidence.Identity
+	var occupied bool
 	defer func() {
 		panicked := recover()
 		if panicked != nil {
@@ -1972,6 +2034,9 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 		if err != nil {
 			allAttemptsCleanRejection = false
 			if ae, ok := err.(*accounts.Error); ok {
+				if req.owned != nil && occupied && !resourcesStarted {
+					return nil, mediaevidence.ErrAccountOccupied
+				}
 				return nil, &ServiceError{Message: ae.Message, StatusCode: 503}
 			}
 			return nil, &ServiceError{Message: err.Error(), StatusCode: 503}
@@ -1991,15 +2056,54 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 		var media relay.Session
 		var avasSideband *avasSidebandWriter
 		var avasCancel context.CancelFunc
+		var observerReady chan struct{}
 		var mediaID mediaevidence.Identity
 		var cleanupOnce sync.Once
 		var finalizeOnce sync.Once
-		finalize := func(reason string) { finalizeOnce.Do(func() { s.finalizeMedia(media, mediaID, reason) }) }
+		ownedAmbiguous, sidebandUnclean := false, false
+		finalize := func(reason string) {
+			finalizeOnce.Do(func() {
+				if req.owned != nil && (ownedAmbiguous || sidebandUnclean) {
+					if _, err := s.evidence.Close(mediaID, mediaevidence.Components{}, reason); err != nil {
+						s.logger.Error("owned_call_cleanup_quarantine_failed")
+					}
+					return
+				}
+				s.finalizeMedia(media, mediaID, reason)
+			})
+		}
+		if req.owned != nil {
+			generation, err := s.evidence.NextGeneration(targetSessionID)
+			if err != nil {
+				return nil, unavailableCall
+			}
+			mediaID = mediaevidence.Identity{VoiceSessionID: targetSessionID, MediaGeneration: generation, AccountID: account.ID,
+				LeaseID: accountLeaseID(account.ID, targetSessionID), LeaseGeneration: 1}
+			if err := s.evidence.(ownedEvidenceStore).ReserveOwned(owner, mediaID, req.owned.zoeID, req.owned.generation); err != nil {
+				if errors.Is(err, mediaevidence.ErrAccountOccupied) {
+					occupied = true
+					attempt--
+					continue
+				}
+				return nil, unavailableCall
+			}
+		}
 		if s.relay != nil {
 			var relayErr error
 			resourcesStarted = true
 			media, wmOffer, relayErr = s.relay.NewSession(context.Background(), offerSDP, s.relayRoute(account))
 			if relayErr != nil {
+				if req.owned != nil {
+					comps := mediaevidence.Components{}
+					if errors.Is(relayErr, relay.ErrCapacity) || errors.Is(relayErr, relay.ErrCreateClean) {
+						// No live resources and no upstream POST; don't fabricate evidence.
+						if s.evidence.(ownedEvidenceStore).AbandonOwnedReservation(mediaID) == nil {
+							outcomeFinal = "never_established"
+							return nil, unavailableCall
+						}
+					}
+					_, _ = s.evidence.Close(mediaID, comps, "relay_session_create_failed")
+				}
 				failedRelaysClean = false
 				s.logger.Error("relay_session_create_failed", "account_id", account.ID, "attempt", attempt, "error", relayErr)
 				if errors.Is(relayErr, relay.ErrCapacity) {
@@ -2014,6 +2118,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 					avasCancel()
 				}
 				if avasSideband != nil && !avasSideband.closeAndWait() {
+					sidebandUnclean = true
 					failedRelaysClean = false
 				}
 				if media == nil {
@@ -2074,7 +2179,11 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 				avasPayload.addOpeningContext(req.OpeningContext)
 			}
 			resourcesStarted = true
+			ownedAmbiguous = true
 			status, contentType, text, upstreamLocation, err = s.postAVASResponse(token, wmOffer, avasPayload, explicitProxy, account.DeviceID)
+			if err == nil && status >= 400 && status <= 599 {
+				ownedAmbiguous = false
+			}
 		} else {
 			resourcesStarted = true
 			status, contentType, text, retryAfter, err = s.postWMResponse(token, wmOffer, sessionJSON, explicitProxy, account.DeviceID)
@@ -2084,6 +2193,9 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 			allAttemptsCleanRejection = false
 			var transportErr creationTransportError
 			transportReleaseEligible = attempt == 1 && status == 0 && errors.As(err, &transportErr)
+			if transportReleaseEligible {
+				ownedAmbiguous = false
+			}
 			closeMediaOnFailure("upstream_request_failed")
 			s.logger.Error("upstream_realtime_request_failed", "account_id", account.ID, "attempt", attempt, "error", err)
 			return nil, &ServiceError{
@@ -2140,7 +2252,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 					continue
 				}
 				closeMediaOnFailure("upstream_rejected")
-				if s.cfg.ZoeFinalTurnDebugText {
+				if s.cfg.ZoeFinalTurnDebugText && req.owned == nil {
 					s.logger.Debug("voice_create_rejected", "upstream_status", status, "upstream_body", strings.ToValidUTF8(text, "�"), "account_id", account.ID, "attempt", attempt)
 				}
 				lastStatus, lastDetail = status, truncate(text, 500)
@@ -2171,12 +2283,13 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 		}
 		outcomeFinal = "unknown"
 		if s.cfg.VoiceUpstreamRoute == "avas" && media != nil {
+			observerReady = make(chan struct{})
 			callID := avasCallID(upstreamLocation)
 			var err error
 			func() {
 				var sidebandCtx context.Context
 				sidebandCtx, avasCancel = context.WithCancel(context.Background())
-				avasSideband, err = s.startAVASSideband(sidebandCtx, media, callID, token, explicitProxy)
+				avasSideband, err = s.startAVASSideband(sidebandCtx, media, callID, token, explicitProxy, observerReady)
 				if err != nil {
 					avasCancel()
 					avasCancel = nil
@@ -2201,7 +2314,12 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 			answerSDP = clientAnswer
 		}
 
-		if media != nil && s.evidence != nil {
+		if req.owned != nil {
+			if err := s.evidence.(ownedEvidenceStore).AttachOwnedRelay(mediaID, media.ID()); err != nil {
+				closeMediaOnFailure("evidence_register_failed")
+				return nil, unavailableCall
+			}
+		} else if media != nil && s.evidence != nil {
 			generation, genErr := s.evidence.NextGeneration(targetSessionID)
 			if genErr == nil {
 				mediaID = mediaevidence.Identity{
@@ -2225,6 +2343,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 		var call *callState
 		if media != nil {
 			call = &callState{
+				owned: req.owned,
 				owner: owner,
 				voice: voice, voiceMode: options.VoiceMode, language: options.LanguageCode,
 				accountID: account.ID, token: token, proxy: account.Proxy, deviceID: account.DeviceID,
@@ -2236,6 +2355,19 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 			if s.cfg.RelayHandoffEnabled {
 				call.transcript = newTranscriptTail(s.cfg.RelayHandoffMaxChars)
 			}
+			call.forward = newTranscriptForward(s.cfg, s.zoeToken, targetSessionID, mediaID.MediaGeneration, s.logger)
+			if req.owned != nil {
+				call.forward.client.Transport = s.zoeHTTP.Transport
+			}
+			if s.cfg.VoiceUpstreamRoute == "avas" {
+				s.configureAVASTurns(targetSessionID, media, call)
+			}
+			if req.owned != nil {
+				req.owned.media, req.owned.id, req.owned.state = media, mediaID, call
+				s.mu.Lock()
+				s.ownedCalls[targetSessionID] = req.owned
+				s.mu.Unlock()
+			}
 		}
 		voiceSessionID := s.bindVoiceSessionMedia(owner, targetSessionID, token, account, upstreamForWM, media, mediaID, call)
 		s.mu.Lock()
@@ -2245,43 +2377,34 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 		}
 		s.mu.Unlock()
 		if call != nil {
-			call.forward = newTranscriptForward(s.cfg, s.zoeToken, voiceSessionID, mediaID.MediaGeneration, s.logger)
-			if call.forward != nil {
-				go call.forward.run()
+			if call.forward != nil && req.owned == nil {
+				call.startForward()
 			} else if s.zoeToken != "" {
-				s.logger.Warn("zoe_transcript_unavailable", "reason", "missing_media_generation")
+				if call.forward == nil {
+					s.logger.Warn("zoe_transcript_unavailable", "reason", "missing_media_generation")
+				}
 			}
 		}
-		markOutcome("established", voiceSessionID, mediaID.MediaGeneration)
-		outcomeDone = true
 		if avasSideband != nil {
 			s.attachAVASSideband(voiceSessionID, media, avasSideband, avasCancel)
 		}
+		if !markOutcome("established", voiceSessionID, mediaID.MediaGeneration) && req.owned != nil {
+			s.closeTracked(media, mediaID, "failure")
+			call.forward.abort()
+			s.mu.Lock()
+			delete(s.ownedCalls, voiceSessionID)
+			s.mu.Unlock()
+			return nil, unavailableCall
+		}
+		outcomeDone = true
 		if media != nil {
 			media.SetEventShapeMetadata(voiceSessionID, s.cfg.VoiceUpstreamRoute)
 			boundMedia, boundCall := media, call
-			var finalTurn zoeTurnMapper
-			if s.cfg.ZoeFinalTurn && s.cfg.VoiceUpstreamRoute == "wm" {
-				if injector, ok := media.(relay.EventInjector); ok {
-					finalTurn = newWMFinalTurnMapper(voiceSessionID, s.logger, injector, s.cfg.ZoeFinalTurnDebugText)
-				}
-			} else if s.cfg.ZoeFinalTurn && s.cfg.VoiceUpstreamRoute == "avas" {
-				if injector, ok := media.(relay.EventInjector); ok {
-					finalTurn = newAVASFinalTurnMapper(voiceSessionID, s.logger, injector, func(id string) {
-						s.mu.Lock()
-						b := s.bindings[voiceSessionID]
-						if b != nil && b.media == boundMedia {
-							b.openDelegation = id
-						}
-						s.mu.Unlock()
-					}, s.cfg.ZoeFinalTurnDebugText)
-				}
-			}
 			media.SetEventObserver(func(data []byte) {
-				boundCall.forward.Observe(data)
-				if finalTurn != nil {
-					finalTurn.Observe(data)
+				if s.cfg.VoiceUpstreamRoute == "avas" {
+					s.observeAVASCallEvent(voiceSessionID, boundMedia, boundCall, data)
 				}
+				boundCall.forward.Observe(data)
 				s.learnUpstreamIDs(voiceSessionID, func(b *sessionBinding) bool { return b.media == boundMedia }, data)
 				s.mu.Lock()
 				if current := s.bindings[voiceSessionID]; current != nil && current.media == boundMedia && current.call == boundCall {
@@ -2303,7 +2426,12 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 					s.persistSessionMetrics(voiceSessionID, boundCall, 0)
 				}
 			})
-			s.startRebuildLoop(owner, voiceSessionID, media, call)
+			if observerReady != nil {
+				close(observerReady)
+			}
+			if req.owned == nil {
+				s.startRebuildLoop(owner, voiceSessionID, media, call)
+			}
 		}
 		// Re-read binding so response fields match what was actually stored.
 		stored, _ := s.boundVoiceSession(owner, voiceSessionID)
@@ -2356,6 +2484,9 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 			OpeningContext:          openingResult,
 		}, nil
 	}
+	if req.owned != nil && occupied && !resourcesStarted {
+		return nil, mediaevidence.ErrAccountOccupied
+	}
 
 	if s.cfg.VoiceUpstreamRoute == "avas" && allAttemptsCleanRejection && lastStatus != 0 {
 		creationRejected := false
@@ -2405,10 +2536,17 @@ func (s *Service) attachAVASSideband(sessionID string, media relay.Session, side
 	}
 	sideband.setOnClose(func() {
 		s.mu.Lock()
+		var owned *ownedCall
 		if current := s.bindings[sessionID]; current != nil && current.media == media && current.avasSideband == sideband {
 			current.openDelegation = ""
+			if current.call != nil {
+				owned = current.call.owned
+			}
 		}
 		s.mu.Unlock()
+		if owned != nil {
+			go s.closeTracked(media, owned.id, "media_lost")
+		}
 	})
 }
 
@@ -2468,6 +2606,11 @@ func (s *Service) ReleaseAccountLease(owner, leaseID string, generation int64, s
 	if row.Owner != owner {
 		// Same answer as an unknown session so ownership is not disclosed.
 		return nil, errNoTerminationEvidence("no gateway-terminated media for this session")
+	}
+	if evidence, ok := s.evidence.(ownedEvidenceStore); ok {
+		if _, _, err := evidence.OwnedBinding(owner, sessionID); !errors.Is(err, mediaevidence.ErrNotFound) {
+			return nil, errNoTerminationEvidence("use the read-only termination evidence endpoint")
+		}
 	}
 	if row.LeaseID != leaseID || row.LeaseGeneration != generation {
 		return nil, &ServiceError{Message: "account lease identity does not match voice session", StatusCode: 409}

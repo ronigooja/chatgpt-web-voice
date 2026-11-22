@@ -77,13 +77,20 @@ func (w *responseRecorder) Unwrap() http.ResponseWriter {
 func HTTPMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
-		requestID := requestID(r)
+		clientVoice := strings.HasPrefix(r.URL.Path, "/client/v1/")
+		id, path, method, userAgent := "", "/client/v1/", "", ""
+		if clientVoice {
+			id = uuid.NewString()
+		} else {
+			id, path, method, userAgent = requestID(r), truncate(r.URL.Path, 2048), r.Method, truncate(r.UserAgent(), 512)
+		}
+		requestID := id
 		w.Header().Set("X-Request-ID", requestID)
 
 		requestLogger := logger.With(
 			"request_id", requestID,
-			"method", r.Method,
-			"path", truncate(r.URL.Path, 2048),
+			"method", method,
+			"path", path,
 		)
 		ctx := context.WithValue(r.Context(), contextKey{}, requestLogger)
 		ctx = context.WithValue(ctx, requestIDKey{}, requestID)
@@ -92,10 +99,14 @@ func HTTPMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				requestLogger.Error("http_panic",
-					"panic", fmt.Sprint(recovered),
-					"stack", string(debug.Stack()),
-				)
+				if clientVoice {
+					requestLogger.Error("http_panic")
+				} else {
+					requestLogger.Error("http_panic",
+						"panic", fmt.Sprint(recovered),
+						"stack", string(debug.Stack()),
+					)
+				}
 				if recorder.status == 0 {
 					http.Error(recorder, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 				}
@@ -110,7 +121,7 @@ func HTTPMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 				"response_bytes", recorder.bytes,
 				"duration_ms", float64(time.Since(started).Microseconds()) / 1000,
 				"remote_ip", remoteIP(r.RemoteAddr),
-				"user_agent", truncate(r.UserAgent(), 512),
+				"user_agent", userAgent,
 			}
 			switch {
 			case status >= 500:

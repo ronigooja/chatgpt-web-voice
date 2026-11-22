@@ -17,10 +17,17 @@ import (
 )
 
 type forwardedTurn struct {
-	Seq  int64  `json:"seq"`
-	Role string `json:"role"`
-	Text string `json:"text"`
-	At   string `json:"at"`
+	Seq          int64  `json:"seq"`
+	Role         string `json:"role"`
+	Text         string `json:"text"`
+	At           string `json:"at"`
+	DelegationID string `json:"delegation_id,omitempty"`
+}
+
+type markedTurn struct {
+	turn     forwardedTurn
+	deadline time.Time
+	reject   bool
 }
 
 type transcriptBatch struct {
@@ -39,6 +46,17 @@ type transcriptForward struct {
 	userCompleted                                  bool
 	userText                                       string
 	userID                                         string
+	userTurn                                       *forwardedTurn
+	userMarked                                     bool
+	marked                                         []markedTurn
+	markedInFlight                                 int
+	markedWake                                     chan struct{}
+	delegations                                    map[string]bool
+	delegationIDs                                  []string
+	markedWindow                                   time.Duration
+	failed                                         func(string)
+	interacted                                     func()
+	boundOnly                                      bool
 	seq                                            int64
 	seen                                           map[string]bool
 	seenIDs                                        []string
@@ -69,6 +87,7 @@ func newTranscriptForward(cfg config.Config, token, session string, generation i
 	return &transcriptForward{capacity: 1000, batch: transcriptBatch{Session: session, Generation: generation},
 		url: strings.TrimRight(cfg.ZoeURL, "/") + "/runner/v1/voice/turns", token: token, client: client, logger: logger,
 		seen: map[string]bool{}, wake: make(chan struct{}, 1), done: make(chan struct{}), ctx: ctx, cancel: cancel,
+		markedWake: make(chan struct{}, 1), markedWindow: shortRetryWindow, delegations: map[string]bool{},
 		interval: 500 * time.Millisecond, retryBase: time.Second, flushDeadline: 60 * time.Second, bindWindow: 2 * time.Minute}
 }
 
@@ -95,6 +114,19 @@ func (f *transcriptForward) Close() {
 	f.signal()
 }
 
+func (f *transcriptForward) abort() {
+	if f == nil {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closeTimer != nil {
+		f.closeTimer.Stop()
+	}
+	f.cancel()
+	f.client.CloseIdleConnections()
+}
+
 func (f *transcriptForward) emitLocked(role, id, text string) {
 	if (role != "user" && role != "assistant") || strings.TrimSpace(text) == "" {
 		return
@@ -114,6 +146,17 @@ func (f *transcriptForward) emitLocked(role, id, text string) {
 	text = boundedTurnText(text)
 	t := forwardedTurn{Seq: f.seq, Role: role, Text: text, At: time.Now().UTC().Format(time.RFC3339Nano)}
 	f.seq++
+	if role == "user" {
+		f.userTurn = &t
+		f.userMarked = false
+		if f.interacted != nil && id != "" {
+			f.interacted()
+		}
+	}
+	f.enqueueLocked(t)
+}
+
+func (f *transcriptForward) enqueueLocked(t forwardedTurn) {
 	if len(f.queue) >= f.capacity {
 		f.queue[0] = forwardedTurn{}
 		f.queue = f.queue[1:]
@@ -121,6 +164,57 @@ func (f *transcriptForward) emitLocked(role, id, text string) {
 	}
 	f.queue = append(f.queue, t)
 	f.signal()
+}
+
+func (f *transcriptForward) markLocked(id, text string) {
+	if id == "" || strings.TrimSpace(text) == "" || f.delegations[id] {
+		return
+	}
+	f.delegations[id] = true
+	f.delegationIDs = append(f.delegationIDs, id)
+	if len(f.delegationIDs) > 2048 {
+		delete(f.delegations, f.delegationIDs[0])
+		f.delegationIDs = f.delegationIDs[1:]
+	}
+	if f.cur.Role == "assistant" {
+		f.flushLocked()
+	}
+	if f.userTurn != nil && f.userMarked && f.cur.Role != "user" {
+		// Some AVAS sessions deliver delegation items without turn.created.
+		// A new item after an already correlated user turn starts a new turn.
+		f.userTurn = nil
+	}
+	turnID := f.cur.ID
+	if turnID == "" {
+		turnID = id
+	}
+	f.cur = transcriptTurn{}
+	if f.userTurn == nil {
+		f.emitLocked("user", turnID, text)
+	}
+	if f.userTurn == nil {
+		return
+	}
+	f.userMarked = true
+	f.userCompleted, f.userText, f.userID = true, f.userTurn.Text, turnID
+	turn := *f.userTurn
+	// A mark always uses the original sequence. A different transcript may
+	// already be committed or in flight, so don't execute mismatched text.
+	reject := utf8.RuneCountInString(text) > zoeFinalTurnMax || len(text) > 64<<10 || utf8.RuneCountInString(id) > 256 || turn.Text != text
+	for i, queued := range f.queue {
+		if queued.Seq == turn.Seq {
+			copy(f.queue[i:], f.queue[i+1:])
+			f.queue[len(f.queue)-1] = forwardedTurn{}
+			f.queue = f.queue[:len(f.queue)-1]
+			break
+		}
+	}
+	turn.DelegationID = id
+	f.marked = append(f.marked, markedTurn{turn, time.Now().Add(f.markedWindow), reject})
+	select {
+	case f.markedWake <- struct{}{}:
+	default:
+	}
 }
 
 func (f *transcriptForward) flushLocked() {
@@ -200,9 +294,13 @@ func (f *transcriptForward) Observe(data []byte) {
 	}
 	switch e.Type {
 	case "turn.created":
+		if e.Turn.Role == "user" && e.Turn.ID != "" && (f.cur.Role == "user" && f.cur.ID == e.Turn.ID || f.seen["user:"+e.Turn.ID]) {
+			return
+		}
 		f.flushLocked()
 		if e.Turn.Role == "user" {
 			f.userCompleted, f.userText, f.userID = false, "", ""
+			f.userTurn = nil
 		}
 		text := turnText(e.Turn.Transcript)
 		if text == "" {
@@ -227,6 +325,9 @@ func (f *transcriptForward) Observe(data []byte) {
 		if id == "" {
 			id = f.cur.ID
 		}
+		if id != "" && f.seen[role+":"+id] {
+			return
+		}
 		if text == "" {
 			text = f.cur.Text
 		}
@@ -235,7 +336,7 @@ func (f *transcriptForward) Observe(data []byte) {
 		}
 		f.cur = transcriptTurn{}
 		if role == "user" {
-			if f.userCompleted && f.userText == text && (id == "" || f.userID == "" || id == f.userID) {
+			if f.userCompleted && f.userText == boundedTurnText(text) && (id == "" || f.userID == "" || id == f.userID) {
 				return
 			}
 			f.userCompleted, f.userText, f.userID = true, boundedTurnText(text), id
@@ -243,22 +344,7 @@ func (f *transcriptForward) Observe(data []byte) {
 		f.emitLocked(role, id, text)
 	case "delegation.created":
 		if e.Item.Target == "client" {
-			// A delegation contains the final user transcription, not an
-			// assistant response. It must not duplicate turn.done for that user.
-			text := turnText(e.Item.Content)
-			if f.userCompleted && f.userText == text {
-				return
-			}
-			if f.cur.Role == "assistant" {
-				f.flushLocked()
-			}
-			id := f.cur.ID
-			if id == "" {
-				id = e.Item.ID
-			}
-			f.cur = transcriptTurn{}
-			f.userCompleted, f.userText, f.userID = true, boundedTurnText(text), id
-			f.emitLocked("user", id, text)
+			f.markLocked(e.Item.ID, delegationText(e.Item.Content))
 		}
 	case "turn.text.delta", "output_text.delta", "output_audio_transcript.delta":
 		if f.cur.Role != "" {
@@ -357,6 +443,9 @@ func (f *transcriptForward) run() {
 	}()
 	ticker := time.NewTicker(f.interval)
 	defer ticker.Stop()
+	markedDone := make(chan struct{})
+	go func() { defer close(markedDone); f.runMarked() }()
+	defer func() { f.cancel(); <-markedDone }()
 	var next time.Time
 	var first404 time.Time
 	var authLogged time.Time
@@ -372,13 +461,13 @@ func (f *transcriptForward) run() {
 		f.mu.Lock()
 		dropped := f.dropped
 		f.dropped = 0
-		n, closed := len(f.queue), f.closed
+		n, closed, marked := len(f.queue), f.closed, len(f.marked)+f.markedInFlight
 		f.mu.Unlock()
 		if dropped > 0 {
 			f.logger.Warn("zoe_transcript_overflow", "dropped", dropped)
 		}
 		if n == 0 {
-			if closed {
+			if closed && marked == 0 {
 				return
 			}
 			continue
@@ -431,20 +520,7 @@ func (f *transcriptForward) run() {
 			}
 		}
 		if valid {
-			body, _ := json.Marshal(batch)
-			req, err := http.NewRequestWithContext(f.ctx, http.MethodPost, f.url, bytes.NewReader(body))
-			if err != nil {
-				return
-			}
-			req.Header.Set("Authorization", "Bearer "+f.token)
-			req.Header.Set("Content-Type", "application/json")
-			resp, err := f.client.Do(req)
-			status = 0
-			if err == nil {
-				status = resp.StatusCode
-				_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-				resp.Body.Close()
-			}
+			status = f.post(f.ctx, batch)
 		}
 		// Isolate bad turns instead of dropping innocent members of a rejected batch.
 		if (status == 400 || status == 413) && len(batch.Turns) > 1 {
@@ -457,7 +533,7 @@ func (f *transcriptForward) run() {
 			if first404.IsZero() {
 				first404 = time.Now()
 			}
-			drop = time.Since(first404) >= f.bindWindow
+			drop = f.boundOnly || time.Since(first404) >= f.bindWindow
 		}
 		if status == 401 || status == 403 {
 			if authLogged.IsZero() || time.Since(authLogged) >= time.Minute {
@@ -470,12 +546,12 @@ func (f *transcriptForward) run() {
 			}
 		}
 		if drop {
-			last := batch.Turns[len(batch.Turns)-1].Seq
-			f.mu.Lock()
-			for len(f.queue) > 0 && f.queue[0].Seq <= last {
-				f.queue[0] = forwardedTurn{}
-				f.queue = f.queue[1:]
+			removed := make(map[int64]bool, len(batch.Turns))
+			for _, turn := range batch.Turns {
+				removed[turn.Seq] = true
 			}
+			f.mu.Lock()
+			f.queue = removeForwarded(f.queue, removed)
 			f.mu.Unlock()
 			backoff = f.retryBase
 			next = time.Time{}
@@ -489,4 +565,89 @@ func (f *transcriptForward) run() {
 			}
 		}
 	}
+}
+
+func removeForwarded(queue []forwardedTurn, removed map[int64]bool) []forwardedTurn {
+	var n int
+	for _, turn := range queue {
+		if !removed[turn.Seq] {
+			queue[n] = turn
+			n++
+		}
+	}
+	clear(queue[n:])
+	return queue[:n]
+}
+
+func (f *transcriptForward) post(ctx context.Context, batch transcriptBatch) int {
+	body, _ := json.Marshal(batch)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, f.url, bytes.NewReader(body))
+	if err != nil {
+		return -1
+	}
+	req.Header.Set("Authorization", "Bearer "+f.token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := f.client.Do(req)
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	return resp.StatusCode
+}
+
+// Marked work bypasses ordinary batching/backoff and stays in a separate
+// overflow-exempt lane, including during its in-flight retry window.
+func (f *transcriptForward) runMarked() {
+	var active sync.WaitGroup
+	defer active.Wait()
+	for {
+		if f.ctx.Err() != nil {
+			return
+		}
+		f.mu.Lock()
+		if len(f.marked) == 0 {
+			f.mu.Unlock()
+			select {
+			case <-f.ctx.Done():
+				return
+			case <-f.markedWake:
+				continue
+			}
+		}
+		marked := f.marked
+		f.marked = nil
+		f.markedInFlight += len(marked)
+		f.mu.Unlock()
+		for _, m := range marked {
+			active.Go(func() { f.deliverMarked(m) })
+		}
+	}
+}
+
+func (f *transcriptForward) deliverMarked(m markedTurn) {
+	status := 0
+	if !m.reject {
+		status = shortRetry(f.ctx, m.deadline, func(ctx context.Context) int {
+			ctx, cancel := context.WithTimeout(ctx, zoeRequestTimeout)
+			defer cancel()
+			b := f.batch
+			b.Turns = []forwardedTurn{m.turn}
+			return f.post(ctx, b)
+		})
+	}
+	if status != 200 {
+		f.logger.Error("zoe_delegation_handoff_failed", "seq", m.turn.Seq, "status", status)
+		if f.failed != nil {
+			f.failed(m.turn.DelegationID)
+		}
+	}
+	f.mu.Lock()
+	f.markedInFlight--
+	if status != 200 {
+		m.turn.DelegationID = ""
+		f.enqueueLocked(m.turn)
+	}
+	f.mu.Unlock()
+	f.signal()
 }

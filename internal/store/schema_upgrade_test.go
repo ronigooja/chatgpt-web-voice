@@ -81,13 +81,20 @@ func TestUpgradeFrom411251cPreservesRowsAndSupportsReceipts(t *testing.T) {
 	assertPreserved := func() {
 		t.Helper()
 		for _, table := range tables {
-			// Only the two opening receipt fields may be added to the captured
-			// production tables; conversations must retain its real 12 columns.
+			// Preserve captured production columns and add only approved fields.
 			wantColumns := append([][]any(nil), columnsBefore[table]...)
 			if table == "call_sessions" {
 				wantColumns = append(wantColumns,
 					[]any{int64(26), "opening_context_hash", "TEXT", int64(1), "''", int64(0)},
 					[]any{int64(27), "opening_context_generation", "INTEGER", int64(1), "0", int64(0)})
+			}
+			if table == "voice_creation_outcomes" {
+				wantColumns = append(wantColumns, []any{int64(8), "gateway_owned", "INTEGER", int64(1), "0", int64(0)})
+			}
+			if table == "voice_media_sessions" {
+				wantColumns = append(wantColumns,
+					[]any{int64(21), "zoe_session_id", "TEXT", int64(1), "''", int64(0)},
+					[]any{int64(22), "zoe_generation", "INTEGER", int64(1), "0", int64(0)})
 			}
 			if got := upgradeRows(t, db.Conn(), "PRAGMA table_info("+table+")"); !reflect.DeepEqual(got, wantColumns) {
 				t.Errorf("%s columns after migration = %v; want %v", table, got, wantColumns)
@@ -110,7 +117,6 @@ func TestUpgradeFrom411251cPreservesRowsAndSupportsReceipts(t *testing.T) {
 		}
 	}
 	assertPreserved()
-	t.Log("production schema ALTERs: ALTER TABLE call_sessions ADD COLUMN opening_context_hash TEXT NOT NULL DEFAULT ''; ALTER TABLE call_sessions ADD COLUMN opening_context_generation INTEGER NOT NULL DEFAULT 0; no conversations ALTERs")
 	for _, row := range upgradeRows(t, db.Conn(), `SELECT opening_context_hash,opening_context_generation FROM call_sessions`) {
 		if !reflect.DeepEqual(row, []any{"", int64(0)}) {
 			t.Fatalf("opening defaults = %v", row)

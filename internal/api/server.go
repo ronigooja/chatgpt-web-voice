@@ -118,8 +118,9 @@ func (s *Server) Register(mux *http.ServeMux) {
 func (s *Server) RegisterDownstream(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/health", s.downstreamHealth)
 	mux.HandleFunc("GET /v1/voice/config", s.voiceConfig)
-	mux.HandleFunc("POST /v1/voice/sessions", s.downstreamSession)
+	mux.HandleFunc("POST /v1/voice/sessions", s.legacyVoiceRoute(s.downstreamSession))
 	mux.HandleFunc("GET /v1/voice/requests/{request_id}/outcome", s.downstreamOutcome)
+	mux.HandleFunc("GET /v1/voice/sessions/{gateway_session_id}/termination-evidence", s.downstreamTerminationEvidence)
 	mux.HandleFunc("POST /v1/voice/sessions/{id}/context", s.downstreamSessionContext)
 	mux.HandleFunc("POST /v1/voice/sessions/{id}/result-deliveries", s.downstreamResultDelivery)
 	mux.HandleFunc("GET /v1/voice/sessions/{id}/result-deliveries/{delivery_id}", s.downstreamResultDelivery)
@@ -127,8 +128,8 @@ func (s *Server) RegisterDownstream(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/voice/sessions/{id}/title", s.downstreamSessionTitle)
 	mux.HandleFunc("POST /v1/voice/sessions/{id}/uploads", s.downstreamImageUpload)
 	mux.HandleFunc("POST /v1/voice/sessions/{id}/uploads/{file_id}/complete", s.downstreamImageUploadComplete)
-	mux.HandleFunc("DELETE /v1/voice/sessions/{id}", s.downstreamRelease)
-	mux.HandleFunc("POST /v1/voice/account-leases/{lease_id}/release", s.downstreamReleaseAccountLease)
+	mux.HandleFunc("DELETE /v1/voice/sessions/{id}", s.legacyVoiceRoute(s.downstreamRelease))
+	mux.HandleFunc("POST /v1/voice/account-leases/{lease_id}/release", s.legacyVoiceRoute(s.downstreamReleaseAccountLease))
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

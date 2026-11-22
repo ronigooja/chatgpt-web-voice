@@ -7,6 +7,41 @@ import (
 	"testing"
 )
 
+func TestOwnedAttemptFenceSurvivesLegacyCleanupAndReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fence.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := db.ClaimOwnedVoiceCreation("owner", "owned-request")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateVoiceCreationOutcome("owner", "owned-request", "never_established", "", 0, attempt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.conn.Exec(`UPDATE voice_creation_outcomes SET updated_at='2001-01-01'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.ClaimOwnedVoiceCreation("owner", "owned-request"); !errors.Is(err, ErrVoiceCreationAttemptStale) {
+		t.Fatal(err)
+	}
+	if _, err := db.BeginVoiceCreationOutcome("owner", "owned-request"); !errors.Is(err, ErrVoiceCreationAttemptStale) {
+		t.Fatal(err)
+	}
+	if outcome, _, err := db.VoiceCreationOutcomeSnapshot("owner", "owned-request"); err != nil || outcome != "never_established" {
+		t.Fatal(outcome, err)
+	}
+}
+
 func TestVoiceCreationOutcomeOldSchemaMigration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "legacy.db")
 	legacy, err := sql.Open("sqlite", path)

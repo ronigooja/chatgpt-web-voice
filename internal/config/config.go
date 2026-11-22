@@ -88,6 +88,8 @@ type Config struct {
 	VoiceUpstreamRoute     string
 	ZoeURL                 string
 	ZoeTokenFile           string
+	ZoeGatewayAPIKeyID     int
+	ZoeSilenceSeconds      int
 	ListenAddr             string
 	TLS                    bool
 	TLSCertFile            string
@@ -125,7 +127,6 @@ type Config struct {
 	RelayHandoffMaxChars             int
 	VoiceEventShapeSampling          bool
 	VoiceEventShapeSamplingMaxFrames int
-	ZoeFinalTurn                     bool
 	ZoeFinalTurnDebugText            bool
 }
 
@@ -268,9 +269,10 @@ func Load() Config {
 		RelayHandoffMaxChars:             envInt("VOICE_RELAY_HANDOFF_MAX_CHARS", 6000),
 		VoiceEventShapeSampling:          envBool("VOICE_EVENT_SHAPE_SAMPLING", false),
 		VoiceEventShapeSamplingMaxFrames: envInt("VOICE_EVENT_SHAPE_SAMPLING_MAX_FRAMES", 400),
-		ZoeFinalTurn:                     envBool("VOICE_ZOE_FINAL_TURN", false),
 		ZoeURL:                           env("VOICE_ZOE_URL", ""),
 		ZoeTokenFile:                     env("VOICE_ZOE_TOKEN_FILE", ""),
+		ZoeGatewayAPIKeyID:               envInt("VOICE_ZOE_GATEWAY_API_KEY_ID", 0),
+		ZoeSilenceSeconds:                envInt("VOICE_ZOE_SILENCE_SECONDS", 60),
 		ZoeFinalTurnDebugText:            envBool("VOICE_ZOE_FINAL_TURN_DEBUG_TEXT", true),
 	}
 }
@@ -284,8 +286,15 @@ func normalizeVoiceRoute(raw string) string {
 
 // Validate rejects configurations that would leave protected content exposed.
 func (c Config) Validate() error {
-	if _, err := c.ZoeTranscriptToken(); err != nil {
+	token, err := c.ZoeTranscriptToken()
+	if err != nil {
 		return err
+	}
+	if c.ZoeGatewayAPIKeyID < 0 || c.ZoeSilenceSeconds < 0 {
+		return fmt.Errorf("invalid Zoe gateway API key ID or silence duration")
+	}
+	if c.ZoeGatewayAPIKeyID > 0 && (!strings.HasPrefix(c.ZoeURL, "https://") || token == "" || c.VoiceUpstreamRoute != "avas" || !c.RelayEnabled) {
+		return fmt.Errorf("gateway-owned calls require AVAS, relay, and an HTTPS Zoe runner destination and token")
 	}
 	switch strings.ToLower(strings.TrimSpace(c.Environment)) {
 	case EnvironmentDevelopment, EnvironmentProduction:

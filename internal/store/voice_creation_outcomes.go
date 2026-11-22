@@ -31,15 +31,31 @@ func (db *DB) CreateVoiceCreationOutcome(owner, requestID string) error {
 // BeginVoiceCreationOutcome resets a duplicate request to a new, non-idempotent
 // attempt. Only the returned attempt identity may finalize this row.
 func (db *DB) BeginVoiceCreationOutcome(owner, requestID string) (string, error) {
+	return db.beginVoiceCreationOutcome(owner, requestID, false)
+}
+
+// ClaimOwnedVoiceCreation inserts a permanent fence without reopening a replay.
+func (db *DB) ClaimOwnedVoiceCreation(owner, requestID string) (string, error) {
+	return db.beginVoiceCreationOutcome(owner, requestID, true)
+}
+
+func (db *DB) beginVoiceCreationOutcome(owner, requestID string, owned bool) (string, error) {
 	var random [16]byte
 	if _, err := rand.Read(random[:]); err != nil {
 		return "", fmt.Errorf("generate creation attempt: %w", err)
 	}
 	attemptID := fmt.Sprintf("%x", random[:])
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err := db.conn.Exec(`INSERT INTO voice_creation_outcomes (request_id, owner, outcome, attempt_id, created_at, updated_at) VALUES (?, ?, 'pending', ?, ?, ?) ON CONFLICT(owner, request_id) DO UPDATE SET outcome='pending', attempt_id=excluded.attempt_id, voice_session_id=NULL, media_generation=NULL, updated_at=excluded.updated_at`, requestID, owner, attemptID, now, now)
+	conflict := ` ON CONFLICT(owner, request_id) DO NOTHING`
+	if !owned {
+		conflict = ` ON CONFLICT(owner, request_id) DO UPDATE SET outcome='pending', attempt_id=excluded.attempt_id, voice_session_id=NULL, media_generation=NULL, updated_at=excluded.updated_at WHERE voice_creation_outcomes.gateway_owned=0`
+	}
+	res, err := db.conn.Exec(`INSERT INTO voice_creation_outcomes (request_id, owner, outcome, attempt_id, created_at, updated_at, gateway_owned) VALUES (?, ?, 'pending', ?, ?, ?, ?)`+conflict, requestID, owner, attemptID, now, now, owned)
 	if err != nil {
 		return "", fmt.Errorf("create voice outcome: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return "", ErrVoiceCreationAttemptStale
 	}
 	return attemptID, nil
 }

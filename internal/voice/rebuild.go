@@ -30,6 +30,8 @@ type callState struct {
 	stopOnce              sync.Once
 	transcript            *transcriptTail
 	forward               *transcriptForward
+	forwardOnce           sync.Once
+	owned                 *ownedCall
 	conversation          string
 	conversationReason    string
 	conversationConfirmed *bool
@@ -38,6 +40,12 @@ type callState struct {
 
 func (c *callState) halt() {
 	c.stopOnce.Do(func() { close(c.stop); c.forward.Close() })
+}
+
+func (c *callState) startForward() {
+	if c.forward != nil {
+		c.forwardOnce.Do(func() { go c.forward.run() })
+	}
 }
 
 // RebuildOutcome says what a rebuild attempt did.
@@ -98,7 +106,7 @@ func (s *Service) RebuildMedia(owner, voiceSessionID, why string) (RebuildOutcom
 	media, mediaID, state := item.media, item.mediaID, item.call
 	conversation := item.upstreamContext()
 	s.mu.Unlock()
-	if media == nil || state == nil {
+	if media == nil || state == nil || state.owned != nil {
 		return RebuildOutcome{}, errRebuildNoMedia
 	}
 	if _, closed := media.Termination(); closed {

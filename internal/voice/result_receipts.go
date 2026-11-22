@@ -97,6 +97,9 @@ func (s *Service) SubmitResultDelivery(owner, session string, p ResultDeliveryRe
 	if b == nil || b.Owner != owner {
 		return r, &ServiceError{Message: "voice session not found", StatusCode: 404}
 	}
+	if b.call != nil && b.call.owned != nil && !b.call.owned.active() {
+		return r, &ServiceError{Message: "voice session not active", StatusCode: 409}
+	}
 	if b.mediaID.MediaGeneration != p.MediaGeneration {
 		return r, &ServiceError{Message: "media generation mismatch", StatusCode: 409}
 	}

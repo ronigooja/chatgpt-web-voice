@@ -209,7 +209,6 @@ func newAVASRig(t *testing.T, configure ...func(*Service)) *avasRig {
 		DefaultUA:          "ua",
 		SessionTTLSeconds:  180,
 		VoiceUpstreamRoute: "avas",
-		ZoeFinalTurn:       true,
 	}, pool, nil)
 	svc.avasURL = server.URL + "/calls"
 	u, _ := url.Parse(sideband.URL)
@@ -272,53 +271,14 @@ func TestAVASContextGoesToSidebandNotDataChannel(t *testing.T) {
 	}
 }
 
-func TestAVASSidebandDelegationEmitsFinalTurnDownstreamAndOpensContext(t *testing.T) {
+func TestAVASSidebandDelegationDoesNotInjectFinalTurn(t *testing.T) {
 	r := newAVASRig(t)
 	r.delegate(t, "deleg-weather", "research the weather")
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		r.media.mu.Lock()
-		injected := append([]string(nil), r.media.injected...)
-		r.media.mu.Unlock()
-		for _, raw := range injected {
-			var event map[string]any
-			if json.Unmarshal([]byte(raw), &event) == nil && event["type"] == "user_audio_turn.final" {
-				if event["transcript"] != "research the weather" || event["turn_id"] != "deleg-weather" {
-					t.Fatalf("final event=%v", event)
-				}
-				if _, err := r.svc.UpdateSessionContext("api_key:1", r.id, UpstreamContext{Text: "Tokyo is rainy"}); err != nil {
-					t.Fatal(err)
-				}
-				frame := r.upstream.waitFrames(t, 1)[0]
-				if frame["type"] != "delegation.context.append" || frame["delegation_item_id"] != "deleg-weather" {
-					t.Fatalf("sideband context frame=%v", frame)
-				}
-				return
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
+	r.media.mu.Lock()
+	defer r.media.mu.Unlock()
+	if len(r.media.observed) != 1 || len(r.media.injected) != 1 || strings.Contains(r.media.injected[0], "user_audio_turn.final") {
+		t.Fatal("expected only the original sideband event")
 	}
-	t.Fatal("user_audio_turn.final was not injected downstream")
-}
-
-func TestAVASSidebandMapperInjectionDoesNotReenterObserver(t *testing.T) {
-	r := newAVASRig(t)
-	r.delegate(t, "deleg-one", "research the weather")
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		r.media.mu.Lock()
-		observed := append([]string(nil), r.media.observed...)
-		injected := append([]string(nil), r.media.injected...)
-		r.media.mu.Unlock()
-		if len(injected) >= 2 {
-			if len(observed) != 1 {
-				t.Fatalf("observer saw %d events: %v", len(observed), observed)
-			}
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("mapper did not inject final turn")
 }
 
 func TestAVASContextWithoutDelegationIsSessionAppend(t *testing.T) {

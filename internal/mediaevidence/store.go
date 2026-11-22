@@ -25,6 +25,8 @@ const (
 	StateUnknown    = "unknown"
 )
 
+const restartWithoutClose = "gateway restarted before close was observed"
+
 // ErrNotFound means no media session matches the exact identity.
 var ErrNotFound = errors.New("media session not found")
 
@@ -72,6 +74,12 @@ type MediaSession struct {
 	TerminatedAt     string
 	EvidenceID       string
 	EvidenceError    string
+}
+
+// CloseAttemptFinished does not treat a pre-crash closing flag as an observation.
+func (m MediaSession) CloseAttemptFinished() bool {
+	return m.State == StateTerminated || m.State == StateUnknown && m.CloseReason != "" &&
+		m.EvidenceError != "" && m.EvidenceError != restartWithoutClose
 }
 
 // Evidence is one row of voice_termination_evidence.
@@ -295,10 +303,10 @@ func (s *Store) RecoverUnfinished() (int64, error) {
 	defer s.db.Unlock()
 	res, err := s.db.Conn().Exec(`
 		UPDATE voice_media_sessions SET
-			state = ?, evidence_error = 'gateway restarted before close was observed',
+			state = ?, evidence_error = ?,
 			updated_at = ?
 		WHERE state IN (?, ?)`,
-		StateUnknown, ts(s.now()), StateActive, StateClosing)
+		StateUnknown, restartWithoutClose, ts(s.now()), StateActive, StateClosing)
 	if err != nil {
 		return 0, fmt.Errorf("recover media sessions: %w", err)
 	}

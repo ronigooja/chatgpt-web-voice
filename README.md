@@ -26,20 +26,20 @@ not identify a build containing this fork's changes.
 - 下游 `/v1` 接入：只持 API Key + `voice_session_id` 即可建连 / 恢复
 - 粘性账号与上游续聊线索由网关持久化，不向下游暴露池内账号信息
 
-### Zoe 用户语音回合完成事件
+### Zoe gateway-owned AVAS calls
 
-设置 `VOICE_ZOE_FINAL_TURN=true` 时，WM 上游完成一个有文本的用户语音回合后，网关通过下游事件通道发送严格的顶层 JSON：`{"type":"user_audio_turn.final","turn_id":"<message id>","revision":1,"transcript":"<text>"}`。功能默认关闭，AVAS 不支持。状态只保留当前媒体会话，文本超过 20000 个字符、为空、格式错误或出现消息交错时均不发送；重复 ID 只发送一次，且只在最近添加的用户消息完成时发送。若有文本的用户消息仍为 `in_progress`，随后收到 assistant 的首个 add，也会将其视为用户回合结束并发送（日志 `commit_reason=assistant_add`）；这是一次 live capture 的证据，AVAS 仍未验证。其他角色的 add、第二个 user add 以及空/超长文本继续 fail-closed。观察器在触发状态帧入队前运行，因此事件可能先于该状态帧抵达客户端。
-
-未验证：累计文本是否完全等于用户实际说出的内容；补丁归属消息依赖上游帧的顺序；AVAS 映射尚未实现。
+Apple dials and hangs up at the gateway with its Zoe instance bearer. The
+gateway authorizes and binds media through Zoe before returning the answer SDP.
+See the [Zoe gateway integration](docs/zoe-transcript-forwarding.md) for routes,
+configuration, evidence lookup, and delegation delivery. Upgrade Zoe, gateway,
+and Apple together; there is no old Apple client compatibility path.
 
 ### Voice creation outcomes
 
 When AVAS rejects session creation before returning an accepted SDP, `POST /v1/voice/sessions` returns HTTP 422 with `{"error":"upstream_rejected","established":false,"upstream_status":<status>}`. Clients may query the owner-scoped result with `GET /v1/voice/requests/{request_id}/outcome`; it returns `never_established`, `open`, `released`, or `unknown`.
 For fresh creates, no-usable-account failures before any account selection succeeds or any resource starts report `never_established`.
 
-### WM final-turn text diagnosis
-
-When final-turn mapping is enabled with `VOICE_ZOE_FINAL_TURN=true`, `VOICE_ZOE_FINAL_TURN_DEBUG_TEXT` is on by default. Its spoken/assistant text, message and patch details, and gated upstream rejection bodies are logged only at DEBUG, without truncation. `VOICE_LOG_LEVEL` defaults to `debug` so these records appear by default; explicitly set the switch to `false` to disable them, or select `info` to retain metadata-only logs. Secrets (tokens, API keys, credentials, and Authorization headers) must never be logged at any level. See [logging guidance](docs/LOGGING.md).
+Content diagnostics, where supported, are gated by [logging settings](docs/LOGGING.md).
 
 ## 网页效果
 
@@ -194,7 +194,10 @@ the loaded image.
 | `VOICE_TLS_CERT_DIR` | `./data/certs` | 自签证书目录 |
 | `VOICE_SKIP_SSL_VERIFY` | `false` | 仅 development 可临时用于上游证书排障 |
 | `VOICE_LOG_LEVEL` | `debug` | DEBUG may include gated full content text; `info` retains metadata only |
-| `VOICE_ZOE_FINAL_TURN_DEBUG_TEXT` | `true` | Explicit `false` disables gated debug text; no truncation |
+| `VOICE_ZOE_FINAL_TURN_DEBUG_TEXT` | `true` | Legacy content diagnostics only; gateway-owned calls do not log turn text or upstream response bodies |
+| `VOICE_ZOE_URL`, `VOICE_ZOE_TOKEN_FILE` | unset | HTTPS Zoe destination and runner bearer file; see [Zoe integration](docs/zoe-transcript-forwarding.md) |
+| `VOICE_ZOE_GATEWAY_API_KEY_ID` | `0` | Enable gateway-owned mode and select the downstream owner namespace by existing API key ID |
+| `VOICE_ZOE_SILENCE_SECONDS` | `60` | End a gateway-owned call after this long without valid interaction |
 | `VOICE_LOG_FORMAT` | `json` | 想看文本日志时改为 `text` |
 | `VOICE_DATA_DIR` | `./data` | 数据目录（证书、运行数据等） |
 | `VOICE_DATABASE_FILE` | `./data/voice.db` | SQLite 文件路径 |
