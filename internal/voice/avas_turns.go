@@ -8,7 +8,6 @@ import (
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/relay"
 )
 
-const zoeFinalTurnMax = 20000
 const failedHandoffNote = "The hand-off to the background tool failed. Tell the user the request was not confirmed; do not claim it was completed."
 
 func delegationText(raw json.RawMessage) string {

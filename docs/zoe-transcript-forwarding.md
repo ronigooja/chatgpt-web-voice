@@ -58,8 +58,11 @@ established calls.
 A client-targeted AVAS delegation marks the corresponding user sequence with
 the upstream item ID, even if Zoe already received the unmarked turn. Marked
 turns bypass batching and ordinary backoff, are overflow-exempt, and retry
-only network failures and 5xx for up to 10 seconds with jitter. Marked text is
-never truncated to make it executable. On expiry, terminal response, or
-oversize, the gateway attempts to append a failure note to the still-open
-delegation and queues the ordinary transcript. There is no synthetic final
-turn sent to Apple. Reports and turn queues are in memory only.
+only network failures and 5xx for up to 10 seconds with jitter. Delegation text
+within the 64 KiB transcript limit reaches Zoe unchanged; Zoe enforces its own
+task request limit later. On expiry, terminal response, or oversize, the gateway
+attempts to append a failure note to the still-open delegation and queues the
+ordinary transcript. Over-limit text is cut at the same UTF-8 boundary as an
+ordinary turn, never sent marked, and logged at ERROR with IDs and byte counts
+only. There is no synthetic final turn sent to Apple. Reports and turn queues
+are in memory only.

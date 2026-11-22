@@ -16,6 +16,8 @@ import (
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/httpclient"
 )
 
+const transcriptTurnMaxBytes = 64 << 10
+
 type forwardedTurn struct {
 	Seq          int64  `json:"seq"`
 	Role         string `json:"role"`
@@ -25,9 +27,10 @@ type forwardedTurn struct {
 }
 
 type markedTurn struct {
-	turn     forwardedTurn
-	deadline time.Time
-	reject   bool
+	turn      forwardedTurn
+	deadline  time.Time
+	reject    bool
+	textBytes int
 }
 
 type transcriptBatch struct {
@@ -196,7 +199,7 @@ func (f *transcriptForward) markLocked(id, text string) {
 	turn := *f.userTurn
 	// A mark always uses the original sequence. A different transcript may
 	// already be committed or in flight, so don't execute mismatched text.
-	reject := utf8.RuneCountInString(text) > zoeFinalTurnMax || len(text) > 64<<10 || utf8.RuneCountInString(id) > 256 || turn.Text != text
+	reject := len(text) > transcriptTurnMaxBytes || utf8.RuneCountInString(id) > 256 || turn.Text != text
 	for i, queued := range f.queue {
 		if queued.Seq == turn.Seq {
 			copy(f.queue[i:], f.queue[i+1:])
@@ -206,7 +209,7 @@ func (f *transcriptForward) markLocked(id, text string) {
 		}
 	}
 	turn.DelegationID = id
-	f.marked = append(f.marked, markedTurn{turn, time.Now().Add(f.markedWindow), reject})
+	f.marked = append(f.marked, markedTurn{turn: turn, deadline: time.Now().Add(f.markedWindow), reject: reject, textBytes: len(text)})
 	select {
 	case f.markedWake <- struct{}{}:
 	default:
@@ -354,8 +357,8 @@ func (f *transcriptForward) Observe(data []byte) {
 // When a turn exceeds Zoe's byte limit, retain only its complete UTF-8 prefix.
 // No suffix is appended: even an ellipsis could exceed the wire contract.
 func boundedTurnText(s string) string {
-	if len(s) > 64<<10 {
-		end := 64 << 10
+	if len(s) > transcriptTurnMaxBytes {
+		end := transcriptTurnMaxBytes
 		for end > 0 && !utf8.RuneStart(s[end]) {
 			end--
 		}
@@ -492,7 +495,7 @@ func (f *transcriptForward) run() {
 		f.mu.Unlock()
 		batch.Turns = nil
 		for _, turn := range candidates {
-			if len(turn.Text) > 64<<10 {
+			if len(turn.Text) > transcriptTurnMaxBytes {
 				if len(batch.Turns) == 0 {
 					batch.Turns = append(batch.Turns, turn)
 				}
@@ -511,7 +514,7 @@ func (f *transcriptForward) run() {
 		status := http.StatusRequestEntityTooLarge
 		valid := true
 		for _, turn := range batch.Turns {
-			if len(turn.Text) > 64<<10 {
+			if len(turn.Text) > transcriptTurnMaxBytes {
 				valid = false
 			}
 		}
@@ -633,7 +636,12 @@ func (f *transcriptForward) deliverMarked(m markedTurn) {
 		})
 	}
 	if status != 200 {
-		f.logger.Error("zoe_delegation_handoff_failed", "seq", m.turn.Seq, "status", status)
+		if m.textBytes > transcriptTurnMaxBytes {
+			f.logger.Error("zoe_delegation_transcript_too_large", "gateway_session_id", f.batch.Session,
+				"delegation_id", m.turn.DelegationID, "seq", m.turn.Seq, "text_bytes", m.textBytes, "limit_bytes", transcriptTurnMaxBytes)
+		} else {
+			f.logger.Error("zoe_delegation_handoff_failed", "seq", m.turn.Seq, "status", status)
+		}
 		if f.failed != nil {
 			f.failed(m.turn.DelegationID)
 		}

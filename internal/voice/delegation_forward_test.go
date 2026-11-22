@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func delegationEvent(id, text string) map[string]any {
@@ -124,12 +125,32 @@ func TestDelegationShortRetryAndTerminalClassification(t *testing.T) {
 	}
 }
 
+func TestDelegationWithinTranscriptByteLimitReachesZoeMarked(t *testing.T) {
+	for _, n := range []int{60000, transcriptTurnMaxBytes} {
+		t.Run(fmt.Sprint(n), func(t *testing.T) {
+			sink := newForwardSink(t, nil)
+			f := forwardTestWorker(t, sink, &safeForwardLog{}, false)
+			text := strings.Repeat("é", n/2)
+			f.Observe(avasData(delegationEvent("long-delegation", text)))
+			go f.run()
+			f.Close()
+			<-f.done
+			got := flattenForward(sink.snapshot())
+			if len(got) != 1 || got[0].DelegationID != "long-delegation" || got[0].Text != text {
+				t.Fatal("within-limit delegation did not reach Zoe unchanged and marked")
+			}
+		})
+	}
+}
+
 func TestOversizedDelegationIsVisibleWithoutMarkOrTruncatingToExecute(t *testing.T) {
 	sink := newForwardSink(t, nil)
-	f := forwardTestWorker(t, sink, &safeForwardLog{}, false)
+	log := &safeForwardLog{}
+	f := forwardTestWorker(t, sink, log, false)
 	failed := make(chan string, 1)
 	f.failed = func(id string) { failed <- id }
-	text := strings.Repeat("界", zoeFinalTurnMax+1)
+	text := strings.Repeat("界", transcriptTurnMaxBytes/3+1) + "private-text"
+	want := strings.Repeat("界", transcriptTurnMaxBytes/3)
 	f.Observe(avasData(delegationEvent("oversize", text)))
 	go f.run()
 	defer func() { f.Close(); <-f.done }()
@@ -137,7 +158,16 @@ func TestOversizedDelegationIsVisibleWithoutMarkOrTruncatingToExecute(t *testing
 		t.Fatal(id)
 	}
 	waitForward(t, func() bool { return len(sink.snapshot()) != 0 })
-	if got := flattenForward(sink.snapshot()); len(got) != 1 || got[0].DelegationID != "" || got[0].Text != text {
+	if got := flattenForward(sink.snapshot()); len(got) != 1 || got[0].DelegationID != "" || got[0].Text != want || !utf8.ValidString(got[0].Text) {
 		t.Fatal("oversized delegation executed or lost its ordinary transcript")
+	}
+	line := log.String()
+	for _, field := range []string{"level=ERROR", "zoe_delegation_transcript_too_large", "gateway_session_id=gw-session", "delegation_id=oversize", "seq=0", fmt.Sprintf("text_bytes=%d", len(text)), "limit_bytes=65536"} {
+		if !strings.Contains(line, field) {
+			t.Errorf("missing log field %q", field)
+		}
+	}
+	if strings.Contains(line, "界") || strings.Contains(line, "private-text") || strings.Contains(line, "test-secret") {
+		t.Fatal("oversized delegation log leaked text or credentials")
 	}
 }
