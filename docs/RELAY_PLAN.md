@@ -1,8 +1,7 @@
 # Gateway media relay and account rotation plan
 
-Status: phases 0 to 4 are implemented. Rebuilds were run against the real upstream
-for about 6 minutes (see "Live rebuild test"). Not yet exercised: longer runs,
-24 hours, rebuilds over the account proxy path. This document applies to work
+Status: media relay, termination evidence, and account admission are implemented.
+Long-running provider behavior remains unverified. This document applies to work
 in this fork that changes how voice media is terminated, how account leases are
 released, and how pool accounts are selected for continuous voice.
 
@@ -131,39 +130,6 @@ was structural only. The probe binary and database copy were removed afterwards.
 Still not established: upstream release of the account (see "Termination
 evidence").
 
-## Live rebuild test (2026-10-30)
-
-One call, about 6 minutes, in the production container with the real relay, a
-copy of the account database, direct media, rebuild interval 5 minutes, two pool
-accounts (both account proxies `socks5h://`, used for signaling). The test client
-sent synthetic silence and typed text. The test binary was built on a GitHub
-runner. Output was structural plus the assistant's short replies.
-
-| Check | Result |
-|---|---|
-| Same-account rebuild (manual) | Swapped; old leg closed cleanly; assistant answered a question about earlier content |
-| Scheduled rebuild after 5 minutes | Fired on time; swapped; assistant still knew the earlier content |
-| Forced account change with text handoff | Account 1 to 2; swapped; assistant on account 2 answered correctly from the handoff text |
-| Client `oai-events` channel | Stayed open for the whole call |
-| Client audio | About 17,000 packets; sequence never went backward; 18 gaps, largest 8 packets (about 160 ms), near leg switches. Not checked by ear |
-| Release after three rebuilds | `terminated`, reported account is the one the call ended on; 3 retired legs, 0 unclean; all four components closed |
-
-Finding: the gateway relied on the client calling `UpdateSessionContext` to learn
-`conversation_id` and `parent_message_id`. A client that does not report them
-made every rebuild start a new conversation (assistant did not know earlier
-content). The gateway now reads both ids from the active leg's events
-(`internal/voice/upstream_ids.go`, same rule as `static/voice.html`) and keeps
-them in memory. After that change a same-account rebuild resumed correctly with
-no client report.
-
-Account 2 failed signaling while its proxy was `socks5://` (curl error
-`SOCKS5 connection ... (5)`) and worked as `socks5h://`. The cause was not
-isolated: both proxies exit over IPv6, and `socks5h` makes the proxy resolve
-the name. Use `socks5h` for account proxies.
-
-Limits: one run, one short history, 6 minutes, direct media only, no listening
-check, token expiry untested.
-
 ## Termination evidence
 
 Report `terminated=true` only when all of the following hold:
@@ -194,34 +160,15 @@ New tables (names indicative):
 `call_sessions` gains the current generation, lease identity, and the latest
 evidence reference.
 
-## Continuous operation
+## Session lifetime and opening context
 
-Implemented: `internal/relay/swap.go`, `internal/voice/rebuild.go`,
-`internal/voice/transcript.go`. Settings are in the README table.
+A relayed call is not cut by idle TTL; its close handler reclaims the binding.
+The upstream leg stays with the call until termination.
+Legacy retired-leg columns remain intact, and an unclean historical retired leg
+still prevents termination attestation.
 
-- Only the upstream leg (peer B) is replaced. The client leg (peer A) and its
-  channel never change, so the client sees no reconnect. Interval:
-  `VOICE_RELAY_REBUILD_MINUTES`; the new leg must be ready within
-  `VOICE_RELAY_REBUILD_READY_SECONDS`.
-- Order: build new leg, wait until connected and its `oai-events` is open, send
-  handoff text if needed, commit, then close the old leg. Any failure before
-  commit keeps the old leg and the call.
-- Audio from a retired or pending leg is dropped. Client-facing RTP sequence and
-  timestamp are re-based so the stream stays continuous.
-- One lease for the whole call. Media generation and lease generation stay at the
-  values handed out at creation; Zoe needs no change. Each retired leg is counted
-  in `voice_media_sessions`. If any retired leg closed uncleanly, the call can
-  never be attested `terminated`.
-- Account choice: same account first (keeps the conversation via
-  `conversation_id`); another account only when the current one is unusable
-  (cooldown, token expiry guard).
-- Binding TTL: a relayed call is not cut by idle TTL; its close handler reclaims
-  the binding.
-
-### Account change and context
-
-Opening context is route-specific. WM has a proven upstream typed-text envelope
-used by account-change handoff; this gateway uses that same envelope only when a
+Opening context is route-specific. WM has a proven upstream typed-text envelope;
+this gateway uses that envelope only when a
 live upstream write is available, and does not claim that it is silent. AVAS
 creation accepts `initial_items`, which is the only proven silent creation form.
 The AVAS sideband context-append event shape was observed by the disposable probe
@@ -230,7 +177,7 @@ live AVAS opening-context injection therefore remains unsupported (501).
 
 The WM opening-context API response reports `silent:"unverified"`: the envelope
 is the typed-text form and may trigger a spoken reply. The live probe observed no
-unprompted speech for the handoff text, but this is not a protocol guarantee.
+unprompted speech for the text, but this is not a protocol guarantee.
 No forwarded `response.cancel`, system-role item, or `conversation.item.create`
 silent form was found in this repository's traffic handling. Zoe must decide
 whether to accept that uncertainty.
@@ -239,18 +186,6 @@ Measured 2026-10-30 (see "Live probe"): a different account cannot resume the
 conversation; upstream sends `goodbye` (`reason=error`, `detail=internal_error`)
 and closes (3 of 3). The same account resumes normally and may hold two sessions
 at once.
-
-So a forced account change starts a new upstream conversation. To soften it, the
-gateway keeps the most recent turns in memory (`VOICE_RELAY_HANDOFF`, on by
-default, `VOICE_RELAY_HANDOFF_MAX_CHARS`) and sends them to the new session as one
-user text message (same envelope as typed text in `static/voice.html`). Probe:
-the new session answered a question about earlier content, and did not start
-speaking on receiving the text. Limits: one short history, one account, one run;
-voice and tone are not carried over. If delivering the text fails, the rebuild is
-aborted and the old leg stays.
-
-The conversation text exists only in memory, is bounded, is never logged or
-persisted, and is dropped with the call. Disable with `VOICE_RELAY_HANDOFF=false`.
 
 ## Account pool
 
@@ -279,8 +214,8 @@ Changes:
 | 0 | Decode the probe `error` event; repeat the probe with audio and a realistic `session`; record the `wm` request and response shape with a local fixture | `internal/voice/service.go`, tests |
 | 1 | Port the Pion bridge into `internal/relay`; replace logrus, Gin, and CLIProxyAPI config; keep copyright notices | `internal/relay/*`, `go.mod` |
 | 2 | Route `CreateSession` through peers A and B; return peer A's answer, not the upstream answer. Done behind `VOICE_RELAY_ENABLED`, with the per-account `media_route` field choosing direct or account-proxy media | `internal/voice/service.go` |
-| 3 | Lease identity, generations, evidence tables, idempotent release. Done in `internal/mediaevidence`; generations are persisted and stay at 1; phase 4 swaps only the upstream leg, so they do not change | `internal/store/schema.go`, `internal/callsessions`, `internal/api/voice.go` |
-| 4 | Cooldown, expiry guard (done); upstream leg rebuild with text handoff (done, see "Continuous operation"); restart recovery of unknown state (done in phase 3) | `internal/accounts/*`, `internal/relay/swap.go`, `internal/voice/rebuild.go` |
+| 3 | Lease identity, generations, evidence tables, idempotent release. Done in `internal/mediaevidence`; generations are persisted and stay at 1 | `internal/store/schema.go`, `internal/callsessions`, `internal/api/voice.go` |
+| 4 | Cooldown, expiry guard (done); restart recovery of unknown state (done in phase 3) | `internal/accounts/*` |
 
 Phase 3 depends on phases 1 and 2. Phase 4 depends on phase 3. Phase 0 gates
 phase 2.
@@ -294,8 +229,7 @@ phase 2.
   retry; session resume.
 - Phase 3: repeated release; stale generation; peer A or B close failure;
   evidence write failure; restart with unknown state; evidence uniqueness.
-- Phase 4: generation rebuild; new connection fails and old one survives;
-  allocation stops before token expiry; `Retry-After`; multi-account rotation;
+- Phase 4: allocation stops before token expiry; `Retry-After`; multi-account rotation;
   capacity at limit.
 
 CI fixtures and loopback peers establish source and protocol behavior only. Real
@@ -309,7 +243,6 @@ provider acceptance needs a separate run with authorized accounts.
    practice.
 3. Termination evidence is local. Do not present it as proof that the upstream
    account is free.
-4. Rebuild failure handling is the most likely source of defects.
 5. Two pool accounts limit rotation regardless of code.
 6. Relaying audio changes the network path the upstream sees (source address
    moves from the client to the gateway host). Account and proxy configuration

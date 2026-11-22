@@ -52,7 +52,7 @@ func upstreamIDsFromEvent(data []byte) (conversationID, parentMessageID string) 
 }
 
 // learnUpstreamIDs records the ids a relayed call's active upstream leg
-// announces, so a rebuild can resume the conversation without depending on the
+// announces, so session continuity does not depend on the
 // client to report them. It only touches the binding that owns this media, and
 // keeps the values in memory.
 func (s *Service) learnUpstreamIDs(sessionID string, owned func(*sessionBinding) bool, data []byte) {

@@ -10,5 +10,5 @@ Legacy diagnostics gated by `VOICE_ZOE_FINAL_TURN_DEBUG_TEXT` (default `true`)
 may carry content at DEBUG only. Gateway-owned calls do not use this content
 switch. Client voice access logs omit caller-supplied IDs, paths, user agents,
 and panic contents. Lifecycle and transcript delivery log status/metadata, not
-response bodies, network error strings, or credentials. Event-shape sampling,
-create instructions, and relay handoff retain their no-text logging contracts.
+response bodies, network error strings, or credentials. Event-shape sampling
+and create instructions retain their no-text logging contracts.

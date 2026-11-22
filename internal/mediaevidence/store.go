@@ -246,37 +246,6 @@ func (s *Store) markUnknownUnlocked(id Identity, c Components, reason, now, why 
 	return nil
 }
 
-// RecordLegSwap records that the active upstream leg was replaced by one on
-// newAccountID. clean says whether the retired leg closed without error. Only an
-// active row can change; a closing or finished row is left alone.
-func (s *Store) RecordLegSwap(id Identity, newAccountID int64, clean bool) error {
-	if err := id.valid(); err != nil {
-		return err
-	}
-	unclean := 0
-	if !clean {
-		unclean = 1
-	}
-	s.db.Lock()
-	defer s.db.Unlock()
-	res, err := s.db.Conn().Exec(`
-		UPDATE voice_media_sessions SET
-			retired_legs = retired_legs + 1,
-			retired_legs_unclean = retired_legs_unclean + ?,
-			current_account_id = ?,
-			updated_at = ?
-		WHERE voice_session_id = ? AND media_generation = ? AND lease_id = ? AND lease_generation = ? AND state = ?`,
-		unclean, newAccountID, ts(s.now()),
-		id.VoiceSessionID, id.MediaGeneration, id.LeaseID, id.LeaseGeneration, StateActive)
-	if err != nil {
-		return fmt.Errorf("record leg swap: %w", err)
-	}
-	if n, _ := res.RowsAffected(); n != 1 {
-		return errors.New("media session is not active")
-	}
-	return nil
-}
-
 // MarkClosing moves an active row to closing so a crash during close is
 // recoverable as unknown. It is a no-op for other states.
 func (s *Store) MarkClosing(id Identity, reason string) error {

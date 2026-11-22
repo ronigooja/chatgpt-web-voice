@@ -82,7 +82,6 @@ type MediaEvidenceStore interface {
 	Get(voiceSessionID string, generation int64) (mediaevidence.MediaSession, error)
 	Evidence(id mediaevidence.Identity) (mediaevidence.Evidence, error)
 	NextGeneration(voiceSessionID string) (int64, error)
-	RecordLegSwap(id mediaevidence.Identity, newAccountID int64, clean bool) error
 }
 
 // relayAcceptTimeout bounds applying the upstream answer and gathering peer A candidates.
@@ -132,7 +131,7 @@ type sessionBinding struct {
 	media relay.Session
 	// mediaID is the evidence identity of media; zero when evidence is not tracked.
 	mediaID mediaevidence.Identity
-	// call holds in-memory per-call data for rebuilds; nil for client-direct media.
+	// call holds in-memory per-call metadata; nil for client-direct media.
 	call              *callState
 	avasCancel        context.CancelFunc
 	avasSideband      *avasSidebandWriter
@@ -2345,15 +2344,12 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 				owned: req.owned,
 				owner: owner,
 				voice: voice, voiceMode: options.VoiceMode, language: options.LanguageCode,
-				accountID: account.ID, token: token, proxy: account.Proxy, deviceID: account.DeviceID,
+				accountID:             account.ID,
 				conversation:          conversationState(upstreamForWM),
 				conversationReason:    conversationReason(upstreamForWM),
 				conversationConfirmed: upstreamForWM.ConversationConfirmed,
-				stop:                  make(chan struct{}),
 			}
-			if s.cfg.RelayHandoffEnabled {
-				call.transcript = newTranscriptTail(s.cfg.RelayHandoffMaxChars)
-			}
+			call.transcript = newTranscriptTail(6000)
 			call.forward = newTranscriptForward(s.cfg, s.zoeToken, targetSessionID, mediaID.MediaGeneration, s.logger)
 			if req.owned != nil {
 				call.forward.client.Transport = s.zoeHTTP.Transport
@@ -2427,9 +2423,6 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 			})
 			if observerReady != nil {
 				close(observerReady)
-			}
-			if req.owned == nil {
-				s.startRebuildLoop(owner, voiceSessionID, media, call)
 			}
 		}
 		// Re-read binding so response fields match what was actually stored.
@@ -2646,8 +2639,7 @@ func (s *Service) ReleaseAccountLease(owner, leaseID string, generation int64, s
 	if err != nil || ev.EvidenceID != row.EvidenceID {
 		return nil, errNoTerminationEvidence("termination evidence row is missing")
 	}
-	// After a rebuild onto another account the call ends on that account, not
-	// on the one it started with.
+	// Preserve the final account recorded by earlier gateway versions.
 	releasedAccount := row.AccountID
 	if row.CurrentAccountID > 0 {
 		releasedAccount = row.CurrentAccountID

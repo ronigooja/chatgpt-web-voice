@@ -3,11 +3,44 @@ package voice
 import (
 	"strings"
 	"testing"
-	"unicode/utf8"
 )
 
 func appendFrame(path, text string) string {
 	return `{"type":"data_message","data":"{\"type\":\"chat_message_delta\",\"payload\":{\"delta\":{\"v\":[{\"o\":\"append\",\"p\":\"` + path + `\",\"v\":\"` + text + `\"}]}}}"}`
+}
+
+func deltaFrame(role, id, text string) string {
+	return `{"type":"data_message","data":"{\"type\":\"chat_message_delta\",\"payload\":{\"delta\":{\"v\":{\"message\":{\"id\":\"` + id +
+		`\",\"author\":{\"role\":\"` + role + `\"},\"content\":{\"parts\":[\"` + text + `\"]}}}}}}"}`
+}
+
+func TestTranscriptCallStateIsNotWrittenToDisk(t *testing.T) {
+	f := newLeaseFixture(t, okAnswer(t))
+	f.create(t)
+	f.fr.session(0).emit(deltaFrame("user", "m1", "a very private sentence"))
+	for _, table := range []string{"voice_media_sessions", "voice_termination_evidence", "call_sessions"} {
+		rows, err := f.pool.DB().Conn().Query("SELECT * FROM " + table)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cols, _ := rows.Columns()
+		for rows.Next() {
+			vals := make([]any, len(cols))
+			ptrs := make([]any, len(cols))
+			for i := range vals {
+				ptrs[i] = &vals[i]
+			}
+			if err := rows.Scan(ptrs...); err != nil {
+				t.Fatal(err)
+			}
+			for _, v := range vals {
+				if s, ok := v.(string); ok && strings.Contains(s, "private sentence") {
+					t.Fatalf("conversation text leaked into %s", table)
+				}
+			}
+		}
+		rows.Close()
+	}
 }
 
 func TestTranscriptRecordsBothSidesInOrder(t *testing.T) {
@@ -15,10 +48,8 @@ func TestTranscriptRecordsBothSidesInOrder(t *testing.T) {
 	tr.Observe([]byte(deltaFrame("user", "u1", "hello")))
 	tr.Observe([]byte(deltaFrame("assistant", "a1", "hi there")))
 	tr.Observe([]byte(deltaFrame("user", "u2", "what time is it")))
-	h := tr.Handoff()
-	iu1, ia1, iu2 := strings.Index(h, "User: hello"), strings.Index(h, "Assistant: hi there"), strings.Index(h, "User: what time is it")
-	if iu1 < 0 || ia1 < iu1 || iu2 < ia1 {
-		t.Fatalf("turns missing or out of order:\n%s", h)
+	if len(tr.turns) != 2 || tr.turns[0].Role != "user" || tr.turns[0].Text != "hello" || tr.turns[1].Role != "assistant" || tr.turns[1].Text != "hi there" || tr.cur.Text != "what time is it" {
+		t.Fatalf("turns missing or out of order: %+v %+v", tr.turns, tr.cur)
 	}
 }
 
@@ -29,8 +60,8 @@ func TestTranscriptAppendsStreamedText(t *testing.T) {
 	tr.Observe([]byte(appendFrame("/message/content/parts/0/text", " a time")))
 	// Unrelated append paths must be ignored.
 	tr.Observe([]byte(appendFrame("/message/metadata/foo", " IGNORED")))
-	if h := tr.Handoff(); !strings.Contains(h, "Assistant: Once upon a time") || strings.Contains(h, "IGNORED") {
-		t.Fatalf("streamed text wrong:\n%s", h)
+	if tr.cur.Role != "assistant" || tr.cur.Text != "Once upon a time" {
+		t.Fatalf("streamed text wrong: %+v", tr.cur)
 	}
 }
 
@@ -38,8 +69,8 @@ func TestTranscriptKeepsAudioTranscriptionDirection(t *testing.T) {
 	tr := newTranscriptTail(6000)
 	frame := `{"type":"data_message","data":"{\"type\":\"chat_message_delta\",\"payload\":{\"delta\":{\"v\":{\"message\":{\"id\":\"x1\",\"author\":{\"role\":\"tool\"},\"content\":{\"parts\":[{\"content_type\":\"audio_transcription\",\"direction\":\"in\",\"text\":\"spoken words\"}]}}}}}}"}`
 	tr.Observe([]byte(frame))
-	if h := tr.Handoff(); !strings.Contains(h, "User: spoken words") {
-		t.Fatalf("audio_transcription direction=in must map to the user:\n%s", h)
+	if tr.cur.Role != "user" || tr.cur.Text != "spoken words" {
+		t.Fatalf("audio_transcription direction=in must map to the user: %+v", tr.cur)
 	}
 }
 
@@ -53,12 +84,12 @@ func TestTranscriptIgnoresNoiseAndBrokenFrames(t *testing.T) {
 	} {
 		tr.Observe([]byte(f))
 	}
-	if !tr.Empty() || tr.Handoff() != "" {
-		t.Fatalf("noise must record nothing, got %q", tr.Handoff())
+	if !tr.Empty() || tr.ContextChars() != 0 {
+		t.Fatalf("noise must record nothing, got %+v %+v", tr.turns, tr.cur)
 	}
 }
 
-func TestTranscriptHandoffRespectsBudgetAndDropsOldestFirst(t *testing.T) {
+func TestTranscriptTailDropsOldestFirst(t *testing.T) {
 	tr := newTranscriptTail(500)
 	for i := 0; i < 20; i++ {
 		role := "user"
@@ -67,31 +98,14 @@ func TestTranscriptHandoffRespectsBudgetAndDropsOldestFirst(t *testing.T) {
 		}
 		tr.Observe([]byte(deltaFrame(role, "m"+string(rune('a'+i)), strings.Repeat("x", 60)+string(rune('A'+i)))))
 	}
-	h := tr.Handoff()
-	body := h[strings.Index(h, "\n")+1:]
-	if len(body) > 500 {
-		t.Fatalf("body %d bytes exceeds the 500 budget", len(body))
+	if tr.sizeLocked() > 500 {
+		t.Fatalf("retained text exceeds budget: %d", tr.sizeLocked())
 	}
-	// Turns end with a marker letter; check the body only, since the header
-	// contains capital letters of its own.
-	lines := strings.Split(body, "\n")
-	if last := lines[len(lines)-1]; !strings.HasSuffix(last, string(rune('A'+19))) {
+	if last := tr.cur.Text; !strings.HasSuffix(last, string(rune('A'+19))) {
 		t.Fatalf("the newest turn must be last, got %q", last)
 	}
-	if first := lines[0]; strings.HasSuffix(first, string(rune('A'+0))) {
+	if first := tr.turns[0].Text; strings.HasSuffix(first, string(rune('A'+0))) {
 		t.Fatalf("the oldest turn must have been dropped, first line %q", first)
-	}
-}
-
-func TestTranscriptTrimsOneHugeTurnWithoutBreakingRunes(t *testing.T) {
-	tr := newTranscriptTail(500)
-	tr.Observe([]byte(deltaFrame("user", "u1", strings.Repeat("语", 400))))
-	h := tr.Handoff()
-	if h == "" || !utf8.ValidString(h) {
-		t.Fatalf("a single oversized turn must still hand over valid UTF-8, got %q", h)
-	}
-	if len(h[strings.Index(h, "\n")+1:]) > 500 {
-		t.Fatal("oversized turn exceeded the budget")
 	}
 }
 

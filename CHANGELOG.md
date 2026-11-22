@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Removed scheduled upstream-leg rebuilds and account-change text handoff,
+  including their four relay configuration variables. Existing environment
+  settings are ignored; session creation, transcript metrics, and WM remain.
+
 - Added gateway-owned AVAS dial and hangup, Zoe lifecycle binding, account
   admission fencing, and owner-scoped termination evidence lookup. Client-side
   silence hangups use the same route and end reason as manual hangups.

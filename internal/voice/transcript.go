@@ -2,14 +2,12 @@ package voice
 
 import (
 	"encoding/json"
-	"fmt"
 	"regexp"
 	"strings"
 	"sync"
 )
 
-// transcriptTail keeps the most recent finished turns of one call in memory so
-// a forced account change can hand the conversation to a new session as text.
+// transcriptTail keeps bounded recent turns and running character metrics.
 // It is never written to disk, never logged, and dropped with the media session.
 type transcriptTail struct {
 	mu           sync.Mutex
@@ -191,7 +189,7 @@ func (t *transcriptTail) trimLocked() {
 	}
 }
 
-// Empty reports whether nothing worth handing over was recorded.
+// Empty reports whether any conversation text was recorded.
 func (t *transcriptTail) Empty() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -199,62 +197,4 @@ func (t *transcriptTail) Empty() bool {
 		return false
 	}
 	return len(t.turns) == 0
-}
-
-// Handoff renders the recorded turns as one text message for a new session.
-// It returns "" when there is nothing to hand over. The result is capped at
-// maxChars, dropping the oldest turns first and trimming a single long turn.
-func (t *transcriptTail) Handoff() string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	turns := append([]transcriptTurn(nil), t.turns...)
-	if strings.TrimSpace(t.cur.Text) != "" && t.cur.Role != "" {
-		turns = append(turns, t.cur)
-	}
-	if len(turns) == 0 {
-		return ""
-	}
-	const header = "Context handoff. The voice session moved to another account, so earlier context was lost. " +
-		"Here is the recent conversation, oldest first, for you to remember. " +
-		"Do not reply to this message; continue naturally when the user speaks next.\n"
-	budget := t.maxChars
-	var lines []string
-	used := 0
-	for i := len(turns) - 1; i >= 0; i-- {
-		who := "User"
-		if turns[i].Role == "assistant" {
-			who = "Assistant"
-		}
-		text := strings.TrimSpace(turns[i].Text)
-		line := fmt.Sprintf("%s: %s", who, text)
-		if used+len(line) > budget {
-			remaining := budget - used - len(who) - 6
-			if len(lines) == 0 && remaining > 40 {
-				line = fmt.Sprintf("%s: …%s", who, tailBytes(text, remaining))
-			} else {
-				break
-			}
-		}
-		lines = append([]string{line}, lines...)
-		used += len(line) + 1
-	}
-	if len(lines) == 0 {
-		return ""
-	}
-	return header + strings.Join(lines, "\n")
-}
-
-// tailBytes returns at most n bytes from the end of s without splitting a rune.
-func tailBytes(s string, n int) string {
-	if n <= 0 {
-		return ""
-	}
-	if len(s) <= n {
-		return s
-	}
-	cut := len(s) - n
-	for cut < len(s) && s[cut]&0xC0 == 0x80 {
-		cut++
-	}
-	return s[cut:]
 }

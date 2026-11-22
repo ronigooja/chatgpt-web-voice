@@ -39,29 +39,22 @@ func TestUpstreamIDsFromEventShapes(t *testing.T) {
 	}
 }
 
-func TestRebuildResumesConversationLearnedFromEventsWithoutClientReport(t *testing.T) {
-	r := newRebuildFixture(t, okAnswer(t))
-	r.m.emit(wrapEvent(`{"type":"conversation_update","conversation_id":"conv-learned","parent_message_id":"msg-learned"}`))
-
-	out, err := r.svc.RebuildMedia("api_key:1", r.res.VoiceSessionID, "scheduled")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !out.Swapped || out.ChangedAccount {
-		t.Fatalf("outcome: %+v", out)
-	}
-	reqs := r.requests()
-	session := reqs[len(reqs)-1].Fields["session"]
-	if !strings.Contains(session, `"conversation_id":"conv-learned"`) || !strings.Contains(session, `"parent_message_id":"msg-learned"`) {
-		t.Fatalf("the rebuild must resume the conversation the gateway saw on the wire, session=%q", session)
+func TestConversationIDsLearnedFromEventsWithoutClientReport(t *testing.T) {
+	svc := New(config.Config{SessionTTLSeconds: 3600}, nil, nil)
+	id := svc.bindVoiceSession("api_key:1", "vs_learned", "token", accounts.Account{ID: 1}, UpstreamContext{})
+	svc.learnUpstreamIDs(id, func(*sessionBinding) bool { return true }, []byte(wrapEvent(`{"conversation_id":"conv-learned","parent_message_id":"msg-learned"}`)))
+	ctxNow, _ := svc.SessionContext("api_key:1", id)
+	if ctxNow.ConversationID != "conv-learned" || ctxNow.ParentMessageID != "msg-learned" {
+		t.Fatalf("learned context: %+v", ctxNow)
 	}
 }
 
-func TestLearnedIDsDoNotLeakToAnotherBindingOrAfterAccountChange(t *testing.T) {
-	r := newRebuildFixture(t, okAnswer(t))
-	r.svc.learnUpstreamIDs("vs_unknown", func(*sessionBinding) bool { return true }, []byte(wrapEvent(`{"conversation_id":"x"}`)))
-	r.svc.learnUpstreamIDs(r.res.VoiceSessionID, func(*sessionBinding) bool { return false }, []byte(wrapEvent(`{"conversation_id":"y"}`)))
-	if ctxNow, _ := r.svc.SessionContext("api_key:1", r.res.VoiceSessionID); ctxNow.ConversationID != "" {
+func TestLearnedIDsDoNotLeakToAnotherBinding(t *testing.T) {
+	svc := New(config.Config{SessionTTLSeconds: 3600}, nil, nil)
+	id := svc.bindVoiceSession("api_key:1", "vs_learned", "token", accounts.Account{ID: 1}, UpstreamContext{})
+	svc.learnUpstreamIDs("vs_unknown", func(*sessionBinding) bool { return true }, []byte(wrapEvent(`{"conversation_id":"x"}`)))
+	svc.learnUpstreamIDs(id, func(*sessionBinding) bool { return false }, []byte(wrapEvent(`{"conversation_id":"y"}`)))
+	if ctxNow, _ := svc.SessionContext("api_key:1", id); ctxNow.ConversationID != "" {
 		t.Fatalf("ids from a non-owning media must be ignored, got %+v", ctxNow)
 	}
 }

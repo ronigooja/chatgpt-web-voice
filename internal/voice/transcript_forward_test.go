@@ -395,7 +395,7 @@ func TestForwardLogsNoTurnTextWhenDebugTextOff(t *testing.T) {
 	}
 }
 
-func TestForwardDoesNotChangeTranscriptTailHandoffBehavior(t *testing.T) {
+func TestForwardDoesNotChangeTranscriptTailMetricsAndTrimming(t *testing.T) {
 	s := newForwardSink(t, nil)
 	f := forwardTestWorker(t, s, &safeForwardLog{}, true)
 	with, without := newTranscriptTail(500), newTranscriptTail(500)
@@ -404,17 +404,17 @@ func TestForwardDoesNotChangeTranscriptTailHandoffBehavior(t *testing.T) {
 		with.Observe(b)
 		f.Observe(b)
 		without.Observe(b)
-		if with.Handoff() != without.Handoff() || with.ContextChars() != without.ContextChars() {
-			t.Fatal("handoff behavior changed")
+		if fmt.Sprint(with.turns, with.cur) != fmt.Sprint(without.turns, without.cur) || with.ContextChars() != without.ContextChars() {
+			t.Fatal("transcript metrics or retained turns changed")
 		}
 	}
 	f.Close()
 	<-f.done
 	if len(flattenForward(s.snapshot())) != 100 {
-		t.Fatal("forwarder inherited handoff trimming")
+		t.Fatal("forwarder inherited transcript tail trimming")
 	}
 	if len(with.turns) >= 100 {
-		t.Fatal("handoff no longer trims")
+		t.Fatal("transcript tail no longer trims")
 	}
 }
 
