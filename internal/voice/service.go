@@ -362,7 +362,6 @@ type SessionResult struct {
 	Conversation            string                `json:"conversation"`
 	ConversationReason      string                `json:"conversation_reason,omitempty"`
 	ConversationConfirmed   *bool                 `json:"conversation_confirmed,omitempty"`
-	ContextChars            int                   `json:"context_chars"`
 	OpeningContext          *OpeningContextResult `json:"opening_context,omitempty"`
 }
 
