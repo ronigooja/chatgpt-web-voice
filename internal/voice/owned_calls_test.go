@@ -87,7 +87,6 @@ func newOwnedTestRig(t *testing.T, upstreamStatus int) *ownedTestRig {
 	svc.avasSidebandURL = "ws" + strings.TrimPrefix(ws.URL, "http") + "/"
 	svc.cfg.ZoeGatewayAPIKeyID = 42
 	svc.cfg.ZoeFinalTurnDebugText = true
-	svc.cfg.ZoeSilenceSeconds = 3
 	svc.zoeToken = "synthetic-runner"
 	rig := &ownedTestRig{svc: svc, logs: logs, relay: &fakeRelay{}, upstream: up,
 		payload: ClientDialRequest{RequestID: "apple-id", OfferSDP: readTestdata(t, "wm_offer.sdp"), Voice: "cove"},
@@ -313,12 +312,9 @@ func TestOwnedEstablishedBeforeAnswerAndForwarding(t *testing.T) {
 }
 
 func TestOwnedEndTriggersAndEvidence(t *testing.T) {
-	for _, reason := range []string{"user_hangup", "silence_timeout", "upstream_voice_end", "media_lost", "gateway_shutdown", "failure"} {
+	for _, reason := range []string{"user_hangup", "upstream_voice_end", "media_lost", "gateway_shutdown", "failure"} {
 		t.Run(reason, func(t *testing.T) {
 			r := newOwnedTestRig(t, 201)
-			if reason == "silence_timeout" {
-				r.svc.cfg.ZoeSilenceSeconds = 1
-			}
 			close(r.release)
 			ctx := context.Background()
 			a, err := r.svc.DialClient(ctx, ownedTestKey, r.payload)
@@ -359,16 +355,6 @@ func TestOwnedEndTriggersAndEvidence(t *testing.T) {
 				r.svc.ShutdownOwned(ctx)
 			case "failure":
 				_ = media.CloseWithReason("failure")
-			case "silence_timeout":
-				media.emit(`{"type":"turn.done","turn":{"id":"activity","role":"user","transcript":"speech"}}`)
-				for range 8 {
-					media.emit(`{"type":"render.ack"}`)
-					media.emit(`{"type":"turn.done","turn":{"id":"activity","role":"user","transcript":"speech"}}`)
-					time.Sleep(150 * time.Millisecond)
-				}
-				if len(r.ended) == 0 {
-					t.Fatal("render chatter or duplicates reset silence")
-				}
 			}
 			report := takeOwned(t, r.ended)
 			evidence, _ := report["termination_evidence"].(map[string]any)

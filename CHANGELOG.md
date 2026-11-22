@@ -3,7 +3,8 @@
 ## Unreleased
 
 - Added gateway-owned AVAS dial and hangup, Zoe lifecycle binding, account
-  admission fencing, and owner-scoped termination evidence lookup.
+  admission fencing, and owner-scoped termination evidence lookup. Client-side
+  silence hangups use the same route and end reason as manual hangups.
 - Deliver client-targeted AVAS delegation through Zoe transcript ingest with
   immediate marked-turn delivery and visible failure degradation. Removed
   synthetic final-turn client events and `VOICE_ZOE_FINAL_TURN`.

@@ -55,7 +55,6 @@ type transcriptForward struct {
 	delegationIDs                                  []string
 	markedWindow                                   time.Duration
 	failed                                         func(string)
-	interacted                                     func()
 	boundOnly                                      bool
 	seq                                            int64
 	seen                                           map[string]bool
@@ -149,9 +148,6 @@ func (f *transcriptForward) emitLocked(role, id, text string) {
 	if role == "user" {
 		f.userTurn = &t
 		f.userMarked = false
-		if f.interacted != nil && id != "" {
-			f.interacted()
-		}
 	}
 	f.enqueueLocked(t)
 }

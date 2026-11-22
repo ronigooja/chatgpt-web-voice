@@ -115,6 +115,12 @@ func TestUpgradeFrom411251cPreservesRowsAndSupportsReceipts(t *testing.T) {
 		if !reflect.DeepEqual(oldObjects, objects) {
 			t.Error("legacy indexes or triggers changed")
 		}
+		if got := upgradeRows(t, db.Conn(), `SELECT gateway_owned FROM voice_creation_outcomes ORDER BY request_id`); !reflect.DeepEqual(got, [][]any{{int64(0)}}) {
+			t.Errorf("legacy creation fence defaults = %v", got)
+		}
+		if got := upgradeRows(t, db.Conn(), `SELECT zoe_session_id, zoe_generation FROM voice_media_sessions ORDER BY voice_session_id`); !reflect.DeepEqual(got, [][]any{{"", int64(0)}, {"", int64(0)}}) {
+			t.Errorf("legacy Zoe binding defaults = %v", got)
+		}
 	}
 	assertPreserved()
 	for _, row := range upgradeRows(t, db.Conn(), `SELECT opening_context_hash,opening_context_generation FROM call_sessions`) {

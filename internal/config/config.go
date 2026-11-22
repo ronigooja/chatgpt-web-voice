@@ -89,7 +89,6 @@ type Config struct {
 	ZoeURL                 string
 	ZoeTokenFile           string
 	ZoeGatewayAPIKeyID     int
-	ZoeSilenceSeconds      int
 	ListenAddr             string
 	TLS                    bool
 	TLSCertFile            string
@@ -272,7 +271,6 @@ func Load() Config {
 		ZoeURL:                           env("VOICE_ZOE_URL", ""),
 		ZoeTokenFile:                     env("VOICE_ZOE_TOKEN_FILE", ""),
 		ZoeGatewayAPIKeyID:               envInt("VOICE_ZOE_GATEWAY_API_KEY_ID", 0),
-		ZoeSilenceSeconds:                envInt("VOICE_ZOE_SILENCE_SECONDS", 60),
 		ZoeFinalTurnDebugText:            envBool("VOICE_ZOE_FINAL_TURN_DEBUG_TEXT", true),
 	}
 }
@@ -290,8 +288,8 @@ func (c Config) Validate() error {
 	if err != nil {
 		return err
 	}
-	if c.ZoeGatewayAPIKeyID < 0 || c.ZoeSilenceSeconds < 0 {
-		return fmt.Errorf("invalid Zoe gateway API key ID or silence duration")
+	if c.ZoeGatewayAPIKeyID < 0 {
+		return fmt.Errorf("invalid Zoe gateway API key ID")
 	}
 	if c.ZoeGatewayAPIKeyID > 0 && (!strings.HasPrefix(c.ZoeURL, "https://") || token == "" || c.VoiceUpstreamRoute != "avas" || !c.RelayEnabled) {
 		return fmt.Errorf("gateway-owned calls require AVAS, relay, and an HTTPS Zoe runner destination and token")

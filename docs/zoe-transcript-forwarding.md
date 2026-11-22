@@ -9,12 +9,13 @@ Set `VOICE_UPSTREAM_ROUTE=avas`, enable the media relay, and configure:
 | `VOICE_ZOE_URL` | Zoe HTTPS base URL, using a trusted certificate. |
 | `VOICE_ZOE_TOKEN_FILE` | Mounted secret file containing Zoe's voice runner bearer. Read at startup; never put the value in compose or logs. |
 | `VOICE_ZOE_GATEWAY_API_KEY_ID` | Numeric ID of the enabled gateway API key whose secret Zoe uses as `ZOE_VOICE_GATEWAY_API_KEY`. Defaults to `0` (gateway-owned admission disabled). Do not set this to a secret, prefix, or instance ID. |
-| `VOICE_ZOE_SILENCE_SECONDS` | Positive timeout in seconds; defaults to `60`. |
 
 Expose the Apple routes at the HTTPS origin advertised by Zoe. If terminating
 TLS at a reverse proxy, do not expose the plaintext gateway listener and
 disable headers/body logging for these routes. Upgrade Zoe, gateway, and Apple
-together. Rotated Zoe instance keys take effect at Zoe without gateway reload.
+together. Keep the existing SQLite database and data volume: startup upgrades
+the schema in place. Rotated Zoe instance keys take effect at Zoe without
+gateway reload.
 
 ## Signaling and reconciliation
 
@@ -37,13 +38,14 @@ together. Rotated Zoe instance keys take effect at Zoe without gateway reload.
   API-key authentication. Gateway-owned mode disables legacy downstream create,
   DELETE, and account-lease release; legacy standalone mode retains them.
 
-Hangup, silence, upstream end, transport loss, and gateway shutdown close
-both relay legs. Only established calls send end reports. End reports reuse one
+The client owns the silence timer and uses the same hangup route as a manual
+hangup; both report `user_hangup`. Hangup, upstream end, transport loss,
+shutdown, and failure close both relay legs. Only established calls send end
+reports and reuse one
 immutable identity, reason, close timestamp, and optional evidence across the
 short in-memory retries. Evidence certifies gateway-local cleanup only; an
 unresolved account remains unavailable. A restart does not turn an unresolved
-lease into evidence. Silence uses new upstream user turns, not transport or
-render traffic; in-place upstream swaps are disabled for gateway-owned calls.
+lease into evidence. In-place upstream swaps are disabled for gateway-owned calls.
 
 ## Turns and delegation
 

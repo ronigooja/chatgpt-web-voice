@@ -197,7 +197,6 @@ the loaded image.
 | `VOICE_ZOE_FINAL_TURN_DEBUG_TEXT` | `true` | Legacy content diagnostics only; gateway-owned calls do not log turn text or upstream response bodies |
 | `VOICE_ZOE_URL`, `VOICE_ZOE_TOKEN_FILE` | unset | HTTPS Zoe destination and runner bearer file; see [Zoe integration](docs/zoe-transcript-forwarding.md) |
 | `VOICE_ZOE_GATEWAY_API_KEY_ID` | `0` | Enable gateway-owned mode and select the downstream owner namespace by existing API key ID |
-| `VOICE_ZOE_SILENCE_SECONDS` | `60` | End a gateway-owned call after this long without valid interaction |
 | `VOICE_LOG_FORMAT` | `json` | 想看文本日志时改为 `text` |
 | `VOICE_DATA_DIR` | `./data` | 数据目录（证书、运行数据等） |
 | `VOICE_DATABASE_FILE` | `./data/voice.db` | SQLite 文件路径 |

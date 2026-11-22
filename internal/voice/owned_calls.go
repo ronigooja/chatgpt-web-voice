@@ -93,8 +93,6 @@ type ownedCall struct {
 	closedAt                time.Time
 	reason                  string
 	closed, reported        chan struct{}
-	activity                chan struct{}
-	latestActivity          time.Time
 	endOnce                 sync.Once
 }
 
@@ -240,7 +238,7 @@ func (s *Service) DialClient(ctx context.Context, key string, p ClientDialReques
 		return nil, unavailableCall
 	}
 	call := &ownedCall{owner: owner, zoeID: start.VoiceSessionID, generation: start.Generation, requestID: start.RequestID,
-		closed: make(chan struct{}), reported: make(chan struct{}), activity: make(chan struct{}, 1)}
+		closed: make(chan struct{}), reported: make(chan struct{})}
 	// Before the create path takes ownership of this attempt, a malformed Zoe
 	// response is a provable no-allocation outcome for Zoe's recovery read.
 	validManifest := start.Instructions != nil && len(*start.Instructions) <= 6000 && start.Opening.Kind == "full" && start.Opening.Version > 0 &&
@@ -332,9 +330,7 @@ func (s *Service) establishOwnedCall(ctx context.Context, c *ownedCall, res *Ses
 	}
 	answer := ClientDialResult{res.AnswerSDP, res.VoiceSessionID, c.zoeID, c.generation}
 	c.answer = &answer
-	c.latestActivity = time.Now()
 	c.mu.Unlock()
-	go s.watchSilence(c)
 	return &answer, nil
 }
 
@@ -415,7 +411,7 @@ func (s *Service) LookupTermination(owner string, id mediaevidence.Identity) (me
 
 func ownedEndReason(reason string) string {
 	switch reason {
-	case "user_hangup", "silence_timeout", "upstream_voice_end", "gateway_shutdown", "failure":
+	case "user_hangup", "upstream_voice_end", "gateway_shutdown", "failure":
 		return reason
 	default:
 		return "media_lost"
@@ -479,44 +475,6 @@ func (s *Service) startEndReport(c *ownedCall) {
 			}
 		}()
 	})
-}
-
-func (s *Service) watchSilence(c *ownedCall) {
-	limit := time.Duration(s.cfg.ZoeSilenceSeconds) * time.Second
-	if limit <= 0 {
-		limit = 60 * time.Second
-	}
-	timer := time.NewTimer(limit)
-	defer timer.Stop()
-	for {
-		select {
-		case <-c.closed:
-			return
-		case <-c.activity:
-		case <-timer.C:
-		}
-		c.mu.Lock()
-		wait := time.Until(c.latestActivity.Add(limit))
-		if wait <= 0 {
-			c.answer = nil
-		}
-		c.mu.Unlock()
-		if wait <= 0 {
-			s.closeTracked(c.media, c.id, "silence_timeout")
-			return
-		}
-		timer.Reset(wait)
-	}
-}
-
-func (c *ownedCall) interacted() {
-	c.mu.Lock()
-	c.latestActivity = time.Now()
-	c.mu.Unlock()
-	select {
-	case c.activity <- struct{}{}:
-	default:
-	}
 }
 
 func (c *ownedCall) active() bool {

@@ -28,9 +28,6 @@ func delegationText(raw json.RawMessage) string {
 func (s *Service) configureAVASTurns(session string, media relay.Session, call *callState) {
 	if f := call.forward; f != nil {
 		f.boundOnly = call.owned != nil
-		if call.owned != nil {
-			f.interacted = call.owned.interacted
-		}
 		f.failed = func(id string) {
 			s.mu.Lock()
 			b := s.bindings[session]
