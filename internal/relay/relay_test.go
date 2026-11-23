@@ -107,6 +107,10 @@ func newRelay(t *testing.T, max int) *PionRelay {
 
 // connect wires client -> relay (A/B) -> fake upstream, all on loopback.
 func connect(t *testing.T, r *PionRelay) *rig {
+	return connectWithOffer(t, r, nil)
+}
+
+func connectWithOffer(t *testing.T, r *PionRelay, transform func(string) string) *rig {
 	t.Helper()
 	g := &rig{relay: r, client: newPeer(t), upstream: newPeer(t), clientEv: make(chan string, 64)}
 	var err error
@@ -140,7 +144,11 @@ func connect(t *testing.T, r *PionRelay) *rig {
 
 	ctx, cancel := context.WithTimeout(context.Background(), testWait)
 	defer cancel()
-	sess, upstreamOffer, err := r.NewSession(ctx, gather(t, g.client.pc), Route{})
+	clientOffer := gather(t, g.client.pc)
+	if transform != nil {
+		clientOffer = transform(clientOffer)
+	}
+	sess, upstreamOffer, err := r.NewSession(ctx, clientOffer, Route{})
 	if err != nil {
 		t.Fatal(err)
 	}

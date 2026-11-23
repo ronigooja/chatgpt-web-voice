@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/pion/webrtc/v4"
 )
 
 func TestOversizeCapture(t *testing.T) {
@@ -65,7 +67,31 @@ func TestOversizeSidebandFailsAndCaptures(t *testing.T) {
 	dir := t.TempDir()
 	r := newRelay(t, 1)
 	r.oversizeCaptureDir = dir
-	g := connect(t, r)
+	logFile, err := os.CreateTemp(t.TempDir(), "relay-log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = logFile.Close() })
+	r.logger = slog.New(slog.NewJSONHandler(logFile, nil))
+	g := connectWithOffer(t, r, func(offer string) string {
+		const original = "a=max-message-size:1073741823"
+		if !strings.Contains(offer, original) {
+			t.Fatal("unexpected client SDP limit")
+		}
+		return strings.Replace(offer, original, "a=max-message-size:262144", 1)
+	})
+	session := g.session.(*pionSession)
+	select {
+	case <-session.bridge.upToDown.ready:
+	case <-time.After(testWait):
+		t.Fatal("relay downstream channel not open")
+	}
+	if got := session.downstream.SCTP().GetCapabilities().MaxMessageSize; got != mediaDataMessageMaxSize {
+		t.Fatalf("relay SCTP send limit = %d", got)
+	}
+	if g.events.ReadyState() != webrtc.DataChannelStateOpen {
+		t.Fatal("client channel not open")
+	}
 	payload := []byte(`{"type":"event","data":"` + strings.Repeat("x", mediaDataMessageMaxSize) + `"}`)
 	reason := make(chan string, 1)
 	g.session.SetCloseHandler(func(s string) { reason <- s })
@@ -89,7 +115,8 @@ func TestOversizeSidebandFailsAndCaptures(t *testing.T) {
 		if len(entries) > 0 {
 			// The asynchronous writer may not have closed the file yet.
 			got, err := os.ReadFile(filepath.Join(dir, entries[0].Name()))
-			if err == nil && bytes.Equal(got, payload) {
+			logData, logErr := os.ReadFile(logFile.Name())
+			if err == nil && bytes.Equal(got, payload) && logErr == nil && bytes.Contains(logData, []byte(`"msg":"relay_oversize_message"`)) && bytes.Contains(logData, []byte(`"capture":"written"`)) {
 				if !strings.Contains(entries[0].Name(), "-avas_sideband-") {
 					t.Fatal(entries[0].Name())
 				}
@@ -99,4 +126,33 @@ func TestOversizeSidebandFailsAndCaptures(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("capture missing or incomplete")
+}
+
+func TestDefaultLoopbackAcceptsOversizeSideband(t *testing.T) {
+	r := newRelay(t, 1)
+	g := connect(t, r)
+	session := g.session.(*pionSession)
+	select {
+	case <-session.bridge.upToDown.ready:
+	case <-time.After(testWait):
+		t.Fatal("relay downstream channel not open")
+	}
+	if got := session.downstream.SCTP().GetCapabilities().MaxMessageSize; got != 1073741823 {
+		t.Fatalf("default send limit = %d", got)
+	}
+	payload := []byte(`{"type":"event","data":"` + strings.Repeat("x", mediaDataMessageMaxSize) + `"}`)
+	if err := g.session.(SidebandEventInjector).InjectSidebandEvent(payload); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-g.clientEv:
+		if got != string(payload) {
+			t.Fatal("payload differs")
+		}
+	case <-time.After(testWait):
+		t.Fatal("message was not delivered")
+	}
+	if tr, ok := g.session.Termination(); ok {
+		t.Fatalf("session terminated: %+v", tr)
+	}
 }
