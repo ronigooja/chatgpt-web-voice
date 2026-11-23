@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -125,6 +126,49 @@ func TestCaptureRollingQuotas(t *testing.T) {
 	}
 	if (&oversizeCapture{}).threshold() != mediaDataMessageMaxSize {
 		t.Fatal("wrong default threshold")
+	}
+}
+
+func TestCaptureEvictsOldestDespiteCreationOrder(t *testing.T) {
+	c := &oversizeCapture{dir: t.TempDir(), mediaID: "media"}
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	m := dataChannelMessage{data: []byte("small"), source: "test"}
+	var oldest string
+	for i := smallCaptureLimit - 1; i >= 0; i-- {
+		status, path, _, _ := c.write(m, now.Add(time.Duration(i)))
+		if status != "written" {
+			t.Fatal(status)
+		}
+		if i == 0 {
+			oldest = path
+		}
+	}
+	if status, _, _, _ := c.write(m, now.Add(time.Duration(smallCaptureLimit))); status != "written" {
+		t.Fatal(status)
+	}
+	if _, err := os.Stat(oldest); !os.IsNotExist(err) {
+		t.Fatalf("oldest capture: %v", err)
+	}
+}
+
+func TestConcurrentSmallCapturesRespectLimit(t *testing.T) {
+	c := &oversizeCapture{dir: t.TempDir(), mediaID: "media"}
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	m := dataChannelMessage{data: []byte("small"), source: "test"}
+	var wg sync.WaitGroup
+	for i := 0; i < 60; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if status, _, _, _ := c.write(m, now.Add(time.Duration(i))); status != "written" {
+				t.Errorf("capture: %s", status)
+			}
+		}(i)
+	}
+	wg.Wait()
+	entries, err := os.ReadDir(c.dir)
+	if err != nil || len(entries) != smallCaptureLimit {
+		t.Fatalf("entries %d: %v", len(entries), err)
 	}
 }
 

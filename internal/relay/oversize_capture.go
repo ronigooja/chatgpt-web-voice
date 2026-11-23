@@ -39,7 +39,8 @@ func (c *oversizeCapture) threshold() int {
 }
 
 func (c *oversizeCapture) start(message dataChannelMessage, direction string) {
-	c.record(message, direction)
+	// The queue owns an immutable copy of the message bytes.
+	go c.record(message, direction)
 }
 
 func (c *oversizeCapture) failure(message dataChannelMessage, direction string) {
@@ -78,6 +79,7 @@ func (c *oversizeCapture) write(message dataChannelMessage, now time.Time) (stat
 	if err != nil {
 		return "error", "", false, "readdir"
 	}
+	// os.ReadDir returns names sorted, so the first small file is the oldest.
 	var smallFiles []string
 	oversizeCount := 0
 	for _, entry := range entries {
