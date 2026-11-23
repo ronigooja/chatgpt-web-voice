@@ -64,22 +64,21 @@ func TestOversizeCapture(t *testing.T) {
 	}
 }
 
-func TestCaptureRollingQuotas(t *testing.T) {
+func TestCaptureRollingLimitRestartSafe(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	small := dataChannelMessage{data: []byte("small"), source: "test"}
-	large := dataChannelMessage{data: make([]byte, mediaDataMessageMaxSize+1), source: "test"}
+	m := dataChannelMessage{data: make([]byte, mediaDataMessageMaxSize+1), source: "test"}
 	unrelated := filepath.Join(dir, "unrelated.bin")
 	if err := os.WriteFile(unrelated, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
 	c := &oversizeCapture{dir: dir, mediaID: "media"}
 	var paths []string
-	for i := 0; i < 32; i++ {
+	for i := 0; i < 33; i++ {
 		if i == 31 {
 			c = &oversizeCapture{dir: dir, mediaID: "media"}
 		}
-		status, path, _, _ := c.write(small, now.Add(time.Duration(i)))
+		status, path, _, _ := c.write(m, now.Add(time.Duration(i)))
 		if status != "written" {
 			t.Fatal(status)
 		}
@@ -87,45 +86,16 @@ func TestCaptureRollingQuotas(t *testing.T) {
 	}
 	for i, path := range paths {
 		_, err := os.Stat(path)
-		if (i < 2 && !os.IsNotExist(err)) || (i >= 2 && err != nil) {
-			t.Fatalf("small %d: %v", i, err)
+		if (i < 3 && !os.IsNotExist(err)) || (i >= 3 && err != nil) {
+			t.Fatalf("capture %d: %v", i, err)
 		}
 	}
-	var largePaths []string
-	for i := 0; i < 20; i++ {
-		if i%4 == 0 {
-			c = &oversizeCapture{dir: dir, mediaID: "media"}
-		}
-		status, path, _, _ := c.write(large, now.Add(time.Duration(100+i)))
-		if status != "written" {
-			t.Fatal(status)
-		}
-		largePaths = append(largePaths, path)
-	}
-	if status, _, _, _ := c.write(large, now.Add(200)); status != "skipped_limit" {
-		t.Fatal(status)
-	}
-	c = &oversizeCapture{dir: dir, mediaID: "media"}
-	if status, _, _, _ := c.write(large, now.Add(201)); status != "skipped_limit" {
-		t.Fatal(status)
-	}
-	if status, _, _, _ := c.write(small, now.Add(202)); status != "written" {
-		t.Fatal(status)
-	}
-	if _, err := os.Stat(paths[2]); !os.IsNotExist(err) {
-		t.Fatalf("oldest small still present: %v", err)
-	}
-	for _, path := range append(largePaths, unrelated) {
-		if _, err := os.Stat(path); err != nil {
-			t.Fatal(err)
-		}
+	if _, err := os.Stat(unrelated); err != nil {
+		t.Fatal(err)
 	}
 	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != 51 {
+	if err != nil || len(entries) != 31 {
 		t.Fatalf("entries %d: %v", len(entries), err)
-	}
-	if (&oversizeCapture{}).threshold() != mediaDataMessageMaxSize {
-		t.Fatal("wrong default threshold")
 	}
 }
 
@@ -134,7 +104,7 @@ func TestCaptureEvictsOldestDespiteCreationOrder(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	m := dataChannelMessage{data: []byte("small"), source: "test"}
 	var oldest string
-	for i := smallCaptureLimit - 1; i >= 0; i-- {
+	for i := captureLimit - 1; i >= 0; i-- {
 		status, path, _, _ := c.write(m, now.Add(time.Duration(i)))
 		if status != "written" {
 			t.Fatal(status)
@@ -143,7 +113,7 @@ func TestCaptureEvictsOldestDespiteCreationOrder(t *testing.T) {
 			oldest = path
 		}
 	}
-	if status, _, _, _ := c.write(m, now.Add(time.Duration(smallCaptureLimit))); status != "written" {
+	if status, _, _, _ := c.write(m, now.Add(time.Duration(captureLimit))); status != "written" {
 		t.Fatal(status)
 	}
 	if _, err := os.Stat(oldest); !os.IsNotExist(err) {
@@ -151,7 +121,7 @@ func TestCaptureEvictsOldestDespiteCreationOrder(t *testing.T) {
 	}
 }
 
-func TestConcurrentSmallCapturesRespectLimit(t *testing.T) {
+func TestConcurrentCapturesRespectLimit(t *testing.T) {
 	c := &oversizeCapture{dir: t.TempDir(), mediaID: "media"}
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	m := dataChannelMessage{data: []byte("small"), source: "test"}
@@ -167,31 +137,27 @@ func TestConcurrentSmallCapturesRespectLimit(t *testing.T) {
 	}
 	wg.Wait()
 	entries, err := os.ReadDir(c.dir)
-	if err != nil || len(entries) != smallCaptureLimit {
+	if err != nil || len(entries) != captureLimit {
 		t.Fatalf("entries %d: %v", len(entries), err)
 	}
 }
 
-func TestCaptureThresholdSuccessfulSend(t *testing.T) {
+func TestCaptureSizeBoundary(t *testing.T) {
 	dir := t.TempDir()
-	logFile, err := os.CreateTemp(t.TempDir(), "log")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = logFile.Close() })
-	r, err := New(Config{OversizeCaptureDir: dir, OversizeCaptureThresholdBytes: 5, includeLoopback: true}, slog.New(slog.NewJSONHandler(logFile, nil)))
+	r, err := New(Config{OversizeCaptureDir: dir, includeLoopback: true}, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
 	g := connect(t, r)
-	for _, payload := range []string{"12345", "123456"} {
+	for _, size := range []int{5, mediaDataMessageMaxSize, mediaDataMessageMaxSize + 1} {
+		payload := strings.Repeat("x", size)
 		if err := g.session.(SidebandEventInjector).InjectSidebandEvent([]byte(payload)); err != nil {
 			t.Fatal(err)
 		}
 		select {
 		case got := <-g.clientEv:
 			if got != payload {
-				t.Fatalf("got %q", got)
+				t.Fatalf("payload size %d differs", size)
 			}
 		case <-time.After(testWait):
 			t.Fatal("message not delivered")
@@ -203,20 +169,18 @@ func TestCaptureThresholdSuccessfulSend(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		logs, err := os.ReadFile(logFile.Name())
-		if err == nil && len(entries) == 1 && bytes.Contains(logs, []byte(`"capture":"written"`)) {
+		if len(entries) > 0 {
+			if len(entries) != 1 {
+				t.Fatalf("got %d captures", len(entries))
+			}
 			data, err := os.ReadFile(filepath.Join(dir, entries[0].Name()))
-			if err != nil || string(data) != "123456" {
-				t.Fatalf("capture %q: %v", data, err)
+			if err == nil && len(data) == mediaDataMessageMaxSize+1 {
+				return
 			}
-			if !bytes.Contains(logs, []byte(`"level":"INFO"`)) || !bytes.Contains(logs, []byte(`"threshold_bytes":5`)) || bytes.Contains(logs, []byte(`"capture":"send_failed"`)) {
-				t.Fatalf("logs: %s", logs)
-			}
-			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("capture missing")
+	t.Fatal("boundary capture missing or incomplete")
 }
 
 func TestOversizeSidebandFailsAndCaptures(t *testing.T) {

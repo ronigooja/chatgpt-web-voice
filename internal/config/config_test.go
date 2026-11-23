@@ -45,22 +45,6 @@ func TestLoadDefaultsToDevelopmentEnvironment(t *testing.T) {
 	}
 }
 
-func TestLoadOversizeCaptureThreshold(t *testing.T) {
-	for _, tc := range []struct {
-		value string
-		want  int
-	}{
-		{"", 262144}, {"invalid", 262144}, {"0", 262144}, {"-1", 262144}, {"1", 1},
-	} {
-		t.Run(tc.value, func(t *testing.T) {
-			t.Setenv("VOICE_OVERSIZE_CAPTURE_THRESHOLD_BYTES", tc.value)
-			if got := Load().VoiceOversizeCaptureThresholdBytes; got != tc.want {
-				t.Fatalf("got %d, want %d", got, tc.want)
-			}
-		})
-	}
-}
-
 func TestLoadZoeFinalTurnDebugTextDefaultsOnAndLoads(t *testing.T) {
 	t.Setenv("VOICE_ZOE_FINAL_TURN_DEBUG_TEXT", "")
 	t.Setenv("VOICE_LOG_LEVEL", "")
