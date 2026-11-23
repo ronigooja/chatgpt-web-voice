@@ -14,6 +14,8 @@ const DefaultMaxSessions = 16
 type Config struct {
 	// OversizeCaptureDir enables private oversize message captures when nonempty.
 	OversizeCaptureDir string
+	// OversizeCaptureThresholdBytes captures messages above this size; nonpositive values use 256 KiB.
+	OversizeCaptureThresholdBytes int
 	// MaxSessions bounds concurrent relay sessions. Zero selects DefaultMaxSessions.
 	MaxSessions int
 	// UDPPortMin and UDPPortMax restrict the ephemeral UDP port range. Both zero means unrestricted.

@@ -62,14 +62,15 @@ var opusCodec = webrtc.RTPCodecCapability{
 
 // PionRelay is the Pion based Relay implementation.
 type PionRelay struct {
-	downstreamAPI      *webrtc.API
-	upstreamAPI        *webrtc.API
-	proxyUpstreamAPI   *webrtc.API
-	configuration      webrtc.Configuration
-	limiter            *sessionLimiter
-	logger             *slog.Logger
-	eventShapeConfig   eventShapeConfig
-	oversizeCaptureDir string
+	downstreamAPI                 *webrtc.API
+	upstreamAPI                   *webrtc.API
+	proxyUpstreamAPI              *webrtc.API
+	configuration                 webrtc.Configuration
+	limiter                       *sessionLimiter
+	logger                        *slog.Logger
+	eventShapeConfig              eventShapeConfig
+	oversizeCaptureDir            string
+	oversizeCaptureThresholdBytes int
 }
 
 var _ Relay = (*PionRelay)(nil)
@@ -301,13 +302,14 @@ func New(cfg Config, logger *slog.Logger) (*PionRelay, error) {
 		return nil, err
 	}
 	return &PionRelay{
-		downstreamAPI:      downstreamAPI,
-		upstreamAPI:        upstreamAPI,
-		proxyUpstreamAPI:   proxyUpstreamAPI,
-		limiter:            &sessionLimiter{limit: cfg.EffectiveMaxSessions()},
-		logger:             logger,
-		oversizeCaptureDir: cfg.OversizeCaptureDir,
-		eventShapeConfig:   eventShapeConfig{enabled: cfg.EventShapeSampling, maxFrames: cfg.EventShapeSamplingMaxFrames, route: cfg.EventShapeRoute},
+		downstreamAPI:                 downstreamAPI,
+		upstreamAPI:                   upstreamAPI,
+		proxyUpstreamAPI:              proxyUpstreamAPI,
+		limiter:                       &sessionLimiter{limit: cfg.EffectiveMaxSessions()},
+		logger:                        logger,
+		oversizeCaptureDir:            cfg.OversizeCaptureDir,
+		oversizeCaptureThresholdBytes: cfg.OversizeCaptureThresholdBytes,
+		eventShapeConfig:              eventShapeConfig{enabled: cfg.EventShapeSampling, maxFrames: cfg.EventShapeSamplingMaxFrames, route: cfg.EventShapeRoute},
 	}, nil
 }
 
@@ -403,7 +405,7 @@ func (r *PionRelay) NewSession(ctx context.Context, clientOffer string, route Ro
 	session.bridge = newDataChannelBridge(session.done, session.logger, func(err error) {
 		session.fail("data_channel_failed", err)
 	}, session.markActiveChannelOpen)
-	session.bridge.upToDown.capture = &oversizeCapture{dir: r.oversizeCaptureDir, mediaID: id, logger: session.logger}
+	session.bridge.upToDown.capture = &oversizeCapture{dir: r.oversizeCaptureDir, mediaID: id, logger: session.logger, thresholdBytes: r.oversizeCaptureThresholdBytes}
 	session.bridge.setObserver(session.observeEvent)
 	if session.shapeSampler != nil {
 		session.bridge.setShapeObserver(session.shapeSampler.observe)
@@ -1263,8 +1265,8 @@ func (p *dataChannelPipe) run() {
 				p.reportError(fmt.Errorf("%s DataChannel destination unavailable", p.name))
 				return
 			}
-			oversized := len(message.data) > mediaDataMessageMaxSize
-			if oversized && p.capture != nil {
+			capture := p.capture != nil && len(message.data) > p.capture.threshold()
+			if capture {
 				p.capture.start(message, p.name)
 			}
 			if !p.waitWritable(destination, len(message.data)) {
@@ -1277,7 +1279,7 @@ func (p *dataChannelPipe) run() {
 				err = destination.Send(message.data)
 			}
 			if err != nil {
-				if oversized && p.capture != nil {
+				if capture {
 					p.capture.failure(message, p.name)
 				}
 				p.reportError(fmt.Errorf("send %s DataChannel message: %w", p.name, err))

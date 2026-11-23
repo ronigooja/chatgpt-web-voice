@@ -115,10 +115,11 @@ type Config struct {
 	RelayPublicIP    string
 
 	// VoiceOversizeCaptureDir enables private oversize relay captures when nonempty.
-	VoiceOversizeCaptureDir          string
-	VoiceEventShapeSampling          bool
-	VoiceEventShapeSamplingMaxFrames int
-	ZoeFinalTurnDebugText            bool
+	VoiceOversizeCaptureDir            string
+	VoiceOversizeCaptureThresholdBytes int
+	VoiceEventShapeSampling            bool
+	VoiceEventShapeSamplingMaxFrames   int
+	ZoeFinalTurnDebugText              bool
 }
 
 func env(name, def string) string {
@@ -187,6 +188,10 @@ func Load() Config {
 	if maxAttempts < 1 {
 		maxAttempts = 1
 	}
+	oversizeCaptureThreshold := envInt("VOICE_OVERSIZE_CAPTURE_THRESHOLD_BYTES", 256<<10)
+	if oversizeCaptureThreshold <= 0 {
+		oversizeCaptureThreshold = 256 << 10
+	}
 
 	transport := normalizeUpstreamTransport(env("VOICE_UPSTREAM_TRANSPORT", TransportTLSClient))
 
@@ -254,13 +259,14 @@ func Load() Config {
 		RelayUDPPortMax:  envInt("VOICE_RELAY_UDP_PORT_MAX", 0),
 		RelayPublicIP:    env("VOICE_RELAY_PUBLIC_IP", ""),
 
-		VoiceOversizeCaptureDir:          env("VOICE_OVERSIZE_CAPTURE_DIR", ""),
-		VoiceEventShapeSampling:          envBool("VOICE_EVENT_SHAPE_SAMPLING", false),
-		VoiceEventShapeSamplingMaxFrames: envInt("VOICE_EVENT_SHAPE_SAMPLING_MAX_FRAMES", 400),
-		ZoeURL:                           env("VOICE_ZOE_URL", ""),
-		ZoeTokenFile:                     env("VOICE_ZOE_TOKEN_FILE", ""),
-		ZoeGatewayAPIKeyID:               envInt("VOICE_ZOE_GATEWAY_API_KEY_ID", 0),
-		ZoeFinalTurnDebugText:            envBool("VOICE_ZOE_FINAL_TURN_DEBUG_TEXT", true),
+		VoiceOversizeCaptureDir:            env("VOICE_OVERSIZE_CAPTURE_DIR", ""),
+		VoiceOversizeCaptureThresholdBytes: oversizeCaptureThreshold,
+		VoiceEventShapeSampling:            envBool("VOICE_EVENT_SHAPE_SAMPLING", false),
+		VoiceEventShapeSamplingMaxFrames:   envInt("VOICE_EVENT_SHAPE_SAMPLING_MAX_FRAMES", 400),
+		ZoeURL:                             env("VOICE_ZOE_URL", ""),
+		ZoeTokenFile:                       env("VOICE_ZOE_TOKEN_FILE", ""),
+		ZoeGatewayAPIKeyID:                 envInt("VOICE_ZOE_GATEWAY_API_KEY_ID", 0),
+		ZoeFinalTurnDebugText:              envBool("VOICE_ZOE_FINAL_TURN_DEBUG_TEXT", true),
 	}
 }
 
