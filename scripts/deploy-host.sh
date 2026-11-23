@@ -172,29 +172,35 @@ update_compose() {
   python3 - "$COMPOSE_FILE" "$IMAGE_TAG" "$PUBLIC_IP" "$UDP_MIN" "$UDP_MAX" "$1" <<'PY'
 import difflib
 import pathlib
+import re
 import sys
 path, image, public_ip, udp_min, udp_max, dry_run = sys.argv[1:]
 p = pathlib.Path(path)
-old = p.read_text()
+with p.open(newline="") as f:
+    old = f.read()
 lines = old.splitlines(keepends=True)
 service = next((i for i, line in enumerate(lines) if line.rstrip("\r\n") == "  voice:"), None)
 if service is None:
     raise SystemExit("compose.yaml has no voice service")
-end = next((i for i in range(service + 1, len(lines)) if lines[i].startswith("  ") and not lines[i].startswith("    ")), len(lines))
+end = next((i for i in range(service + 1, len(lines)) if lines[i].strip() and (not lines[i][0].isspace() or (lines[i].startswith("  ") and not lines[i].startswith("    ")))), len(lines))
 block = lines[service:end]
 def key(name):
     return next((i for i, line in enumerate(block) if line.startswith("    " + name + ":")), None)
 def section_end(index):
     return next((i for i in range(index + 1, len(block)) if block[i].startswith("    ") and not block[i].startswith("      ")), len(block))
+def before_trailing_blanks(index):
+    while index > 0 and not block[index - 1].strip():
+        index -= 1
+    return index
 image_i = key("image")
 if image_i is None:
     raise SystemExit("voice service has no image key")
 block[image_i] = f'    image: "{image}"\n'
 env_i = key("environment")
 if env_i is None:
-    block.append("    environment:\n")
-    env_i = len(block) - 1
-env_end = section_end(env_i)
+    env_i = before_trailing_blanks(len(block))
+    block.insert(env_i, "    environment:\n")
+env_end = before_trailing_blanks(section_end(env_i))
 values = {"VOICE_RELAY_ENABLED": '"true"', "VOICE_RELAY_PUBLIC_IP": f'"{public_ip}"', "VOICE_RELAY_UDP_PORT_MIN": f'"{udp_min}"', "VOICE_RELAY_UDP_PORT_MAX": f'"{udp_max}"'}
 for name, value in values.items():
     found = next((i for i in range(env_i + 1, env_end) if block[i].startswith("      " + name + ":")), None)
@@ -203,20 +209,24 @@ for name, value in values.items():
         env_end += 1
     else:
         block[found] = f"      {name}: {value}\n"
-ports_i = key("ports")
-if ports_i is None:
-    block.append("    ports:\n")
-    ports_i = len(block) - 1
-ports_end = section_end(ports_i)
-udp_line = f'      - "{udp_min}-{udp_max}:{udp_min}-{udp_max}/udp"\n'
-udp_spec = f'{udp_min}-{udp_max}:{udp_min}-{udp_max}/udp'
-if not any(line.strip().lstrip('-').strip().strip('"').strip("'") == udp_spec for line in block[ports_i + 1:ports_end]):
-    block.insert(ports_end, udp_line)
+network_i = key("network_mode")
+host_network = network_i is not None and re.fullmatch(r'''\s*(?:host|"host"|'host')\s*(?:#.*)?''', block[network_i].split(":", 1)[1]) is not None
+if not host_network:
+    ports_i = key("ports")
+    if ports_i is None:
+        ports_i = before_trailing_blanks(len(block))
+        block.insert(ports_i, "    ports:\n")
+    ports_end = before_trailing_blanks(section_end(ports_i))
+    udp_line = f'      - "{udp_min}-{udp_max}:{udp_min}-{udp_max}/udp"\n'
+    udp_spec = f'{udp_min}-{udp_max}:{udp_min}-{udp_max}/udp'
+    if not any(line.strip().lstrip('-').strip().strip('"').strip("'") == udp_spec for line in block[ports_i + 1:ports_end]):
+        block.insert(ports_end, udp_line)
 new = "".join(lines[:service] + block + lines[end:])
 if dry_run == "true":
     sys.stdout.writelines(difflib.unified_diff(old.splitlines(True), new.splitlines(True), fromfile=str(path), tofile=str(path) + " (planned)"))
 else:
-    p.write_text(new)
+    with p.open("w", newline="") as f:
+        f.write(new)
 PY
 }
 wait_for_health() {
