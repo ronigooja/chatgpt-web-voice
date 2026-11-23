@@ -130,6 +130,7 @@ func Run() error {
 	voiceService := voice.New(cfg, accountPool, logger).WithCallSessions(callSessionStore).WithMediaEvidence(mediaEvidenceStore).WithCreationOutcomes(db).WithResultReceipts(db)
 	if cfg.RelayEnabled {
 		mediaRelay, err := relay.New(relay.Config{
+			OversizeCaptureDir:          cfg.VoiceOversizeCaptureDir,
 			MaxSessions:                 cfg.RelayMaxSessions,
 			UDPPortMin:                  uint16(cfg.RelayUDPPortMin),
 			UDPPortMax:                  uint16(cfg.RelayUDPPortMax),

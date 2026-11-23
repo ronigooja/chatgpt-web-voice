@@ -62,13 +62,14 @@ var opusCodec = webrtc.RTPCodecCapability{
 
 // PionRelay is the Pion based Relay implementation.
 type PionRelay struct {
-	downstreamAPI    *webrtc.API
-	upstreamAPI      *webrtc.API
-	proxyUpstreamAPI *webrtc.API
-	configuration    webrtc.Configuration
-	limiter          *sessionLimiter
-	logger           *slog.Logger
-	eventShapeConfig eventShapeConfig
+	downstreamAPI      *webrtc.API
+	upstreamAPI        *webrtc.API
+	proxyUpstreamAPI   *webrtc.API
+	configuration      webrtc.Configuration
+	limiter            *sessionLimiter
+	logger             *slog.Logger
+	eventShapeConfig   eventShapeConfig
+	oversizeCaptureDir string
 }
 
 var _ Relay = (*PionRelay)(nil)
@@ -181,7 +182,7 @@ func (s *pionSession) InjectEvent(data []byte) error {
 	if s.shapeSampler != nil {
 		s.shapeSampler.observe(data, "sideband", "b-to-a")
 	}
-	return s.bridge.sendDownstream(data)
+	return s.bridge.sendDownstream(data, "inject_event")
 }
 
 func (s *pionSession) InjectSidebandEvent(data []byte) error {
@@ -191,7 +192,7 @@ func (s *pionSession) InjectSidebandEvent(data []byte) error {
 	if s.shapeSampler != nil {
 		s.shapeSampler.observe(data, "sideband", "b-to-a")
 	}
-	err := s.bridge.sendDownstream(data)
+	err := s.bridge.sendDownstream(data, "avas_sideband")
 	// Observe even when downstream delivery fails, but return that delivery error.
 	s.observeEvent(data)
 	return err
@@ -216,6 +217,7 @@ func (s *pionSession) observeEvent(data []byte) {
 type dataChannelMessage struct {
 	data     []byte
 	isString bool
+	source   string
 }
 
 type dataChannelPipe struct {
@@ -230,6 +232,7 @@ type dataChannelPipe struct {
 	onError     func(error)
 	onOpen      func()
 	logger      *slog.Logger
+	capture     *oversizeCapture
 }
 
 type dataChannelBridge struct {
@@ -249,12 +252,12 @@ type dataChannelBridge struct {
 	shapeObserve func([]byte, string, string)
 }
 
-func (b *dataChannelBridge) sendDownstream(data []byte) error {
+func (b *dataChannelBridge) sendDownstream(data []byte, source string) error {
 	if b == nil || b.upToDown == nil {
 		return errors.New("downstream event channel unavailable")
 	}
 	select {
-	case b.upToDown.queue <- dataChannelMessage{data: append([]byte(nil), data...), isString: true}:
+	case b.upToDown.queue <- dataChannelMessage{data: append([]byte(nil), data...), isString: true, source: source}:
 		return nil
 	case <-b.done:
 		return errors.New("relay closed")
@@ -268,7 +271,7 @@ func (b *dataChannelBridge) sendUpstream(data []byte) error {
 		return errors.New("upstream event channel unavailable")
 	}
 	select {
-	case b.downToUp.queue <- dataChannelMessage{data: append([]byte(nil), data...), isString: true}:
+	case b.downToUp.queue <- dataChannelMessage{data: append([]byte(nil), data...), isString: true, source: "inject_event"}:
 		return nil
 	case <-b.done:
 		return errors.New("relay closed")
@@ -298,12 +301,13 @@ func New(cfg Config, logger *slog.Logger) (*PionRelay, error) {
 		return nil, err
 	}
 	return &PionRelay{
-		downstreamAPI:    downstreamAPI,
-		upstreamAPI:      upstreamAPI,
-		proxyUpstreamAPI: proxyUpstreamAPI,
-		limiter:          &sessionLimiter{limit: cfg.EffectiveMaxSessions()},
-		logger:           logger,
-		eventShapeConfig: eventShapeConfig{enabled: cfg.EventShapeSampling, maxFrames: cfg.EventShapeSamplingMaxFrames, route: cfg.EventShapeRoute},
+		downstreamAPI:      downstreamAPI,
+		upstreamAPI:        upstreamAPI,
+		proxyUpstreamAPI:   proxyUpstreamAPI,
+		limiter:            &sessionLimiter{limit: cfg.EffectiveMaxSessions()},
+		logger:             logger,
+		oversizeCaptureDir: cfg.OversizeCaptureDir,
+		eventShapeConfig:   eventShapeConfig{enabled: cfg.EventShapeSampling, maxFrames: cfg.EventShapeSamplingMaxFrames, route: cfg.EventShapeRoute},
 	}, nil
 }
 
@@ -399,6 +403,7 @@ func (r *PionRelay) NewSession(ctx context.Context, clientOffer string, route Ro
 	session.bridge = newDataChannelBridge(session.done, session.logger, func(err error) {
 		session.fail("data_channel_failed", err)
 	}, session.markActiveChannelOpen)
+	session.bridge.upToDown.capture = &oversizeCapture{dir: r.oversizeCaptureDir, mediaID: id, logger: session.logger}
 	session.bridge.setObserver(session.observeEvent)
 	if session.shapeSampler != nil {
 		session.bridge.setShapeObserver(session.shapeSampler.observe)
@@ -1108,7 +1113,7 @@ func (b *dataChannelBridge) bindUpstreamSource(channel *webrtc.DataChannel) {
 			}
 		}
 		select {
-		case destination.queue <- dataChannelMessage{data: payload, isString: message.IsString}:
+		case destination.queue <- dataChannelMessage{data: payload, isString: message.IsString, source: "upstream_datachannel"}:
 		case <-b.done:
 		}
 	})
@@ -1160,7 +1165,7 @@ func (b *dataChannelBridge) bindSource(channel *webrtc.DataChannel, destination 
 			}
 		}
 		select {
-		case destination.queue <- dataChannelMessage{data: payload, isString: message.IsString}:
+		case destination.queue <- dataChannelMessage{data: payload, isString: message.IsString, source: "client_datachannel"}:
 		case <-b.done:
 		}
 	})
@@ -1258,6 +1263,10 @@ func (p *dataChannelPipe) run() {
 				p.reportError(fmt.Errorf("%s DataChannel destination unavailable", p.name))
 				return
 			}
+			oversized := len(message.data) > mediaDataMessageMaxSize
+			if oversized && p.capture != nil {
+				p.capture.start(message, p.name)
+			}
 			if !p.waitWritable(destination, len(message.data)) {
 				return
 			}
@@ -1268,6 +1277,9 @@ func (p *dataChannelPipe) run() {
 				err = destination.Send(message.data)
 			}
 			if err != nil {
+				if oversized && p.capture != nil {
+					p.capture.failure(message, p.name)
+				}
 				p.reportError(fmt.Errorf("send %s DataChannel message: %w", p.name, err))
 				return
 			}

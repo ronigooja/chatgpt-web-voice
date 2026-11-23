@@ -114,6 +114,8 @@ type Config struct {
 	RelayUDPPortMax  int
 	RelayPublicIP    string
 
+	// VoiceOversizeCaptureDir enables private oversize relay captures when nonempty.
+	VoiceOversizeCaptureDir          string
 	VoiceEventShapeSampling          bool
 	VoiceEventShapeSamplingMaxFrames int
 	ZoeFinalTurnDebugText            bool
@@ -252,6 +254,7 @@ func Load() Config {
 		RelayUDPPortMax:  envInt("VOICE_RELAY_UDP_PORT_MAX", 0),
 		RelayPublicIP:    env("VOICE_RELAY_PUBLIC_IP", ""),
 
+		VoiceOversizeCaptureDir:          env("VOICE_OVERSIZE_CAPTURE_DIR", ""),
 		VoiceEventShapeSampling:          envBool("VOICE_EVENT_SHAPE_SAMPLING", false),
 		VoiceEventShapeSamplingMaxFrames: envInt("VOICE_EVENT_SHAPE_SAMPLING_MAX_FRAMES", 400),
 		ZoeURL:                           env("VOICE_ZOE_URL", ""),
