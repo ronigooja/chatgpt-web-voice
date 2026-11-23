@@ -1722,10 +1722,6 @@
   var gatewayVoiceDefaults = { voice: 'cove', voice_mode: 'wingman', language_code: 'auto' };
   var gatewayWebRTCConfig = {
     data_channel: { label: 'oai-events', negotiated: true, id: 0 },
-    ice_servers: [
-      { urls: ['stun:stun.l.google.com:19302'] },
-      { urls: ['stun:stun4.l.google.com:19302'] }
-    ],
     receive_audio: true,
     receive_video: false
   };
@@ -2273,7 +2269,6 @@
 
   function newVoicePeerConnection() {
     return new RTCPeerConnection({
-      iceServers: Array.isArray(gatewayWebRTCConfig.ice_servers) ? gatewayWebRTCConfig.ice_servers : [],
       bundlePolicy: 'max-bundle'
     });
   }

@@ -297,23 +297,10 @@ func New(cfg Config, logger *slog.Logger) (*PionRelay, error) {
 	if err != nil {
 		return nil, err
 	}
-	iceServers := make([]webrtc.ICEServer, 0, len(cfg.ICEServers))
-	for _, server := range cfg.ICEServers {
-		urls := make([]string, 0, len(server.URLs))
-		for _, raw := range server.URLs {
-			urls = append(urls, strings.TrimSpace(raw))
-		}
-		iceServers = append(iceServers, webrtc.ICEServer{
-			URLs:       urls,
-			Username:   server.Username,
-			Credential: server.Credential,
-		})
-	}
 	return &PionRelay{
 		downstreamAPI:    downstreamAPI,
 		upstreamAPI:      upstreamAPI,
 		proxyUpstreamAPI: proxyUpstreamAPI,
-		configuration:    webrtc.Configuration{ICEServers: iceServers},
 		limiter:          &sessionLimiter{limit: cfg.EffectiveMaxSessions()},
 		logger:           logger,
 		eventShapeConfig: eventShapeConfig{enabled: cfg.EventShapeSampling, maxFrames: cfg.EventShapeSamplingMaxFrames, route: cfg.EventShapeRoute},
@@ -488,7 +475,6 @@ func (s *pionSession) buildLeg(ctx context.Context, route Route) (*leg, string, 
 	api, configuration := s.upstreamAPI, s.configuration
 	if dialer != nil {
 		api = s.proxyUpstreamAPI
-		configuration.ICEServers = nil
 	}
 	pc, err := api.NewPeerConnection(configuration)
 	if err != nil {

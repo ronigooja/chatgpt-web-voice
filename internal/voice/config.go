@@ -50,15 +50,9 @@ type DataChannelConfig struct {
 	ID         int    `json:"id"`
 }
 
-// ICEServerConfig is compatible with the browser RTCIceServer shape.
-type ICEServerConfig struct {
-	URLs []string `json:"urls"`
-}
-
 // WebRTCConfig contains connection bootstrap values safe for downstream use.
 type WebRTCConfig struct {
 	DataChannel  DataChannelConfig `json:"data_channel"`
-	ICEServers   []ICEServerConfig `json:"ice_servers"`
 	ReceiveAudio bool              `json:"receive_audio"`
 	ReceiveVideo bool              `json:"receive_video"`
 }
@@ -189,11 +183,7 @@ func Config() PublicConfig {
 		VoiceModes: append([]Choice(nil), voiceModeChoices...),
 		Languages:  append([]LanguageChoice(nil), languageChoices...),
 		WebRTC: WebRTCConfig{
-			DataChannel: DataChannelConfig{Label: "oai-events", Negotiated: true, ID: 0},
-			ICEServers: []ICEServerConfig{
-				{URLs: []string{"stun:stun.l.google.com:19302"}},
-				{URLs: []string{"stun:stun4.l.google.com:19302"}},
-			},
+			DataChannel:  DataChannelConfig{Label: "oai-events", Negotiated: true, ID: 0},
 			ReceiveAudio: true,
 			ReceiveVideo: false,
 		},

@@ -399,7 +399,6 @@ func TestConfigValidate(t *testing.T) {
 		{UDPPortMin: 100},
 		{UDPPortMin: 200, UDPPortMax: 100},
 		{PublicIP: "nope"},
-		{ICEServers: []ICEServer{{}}},
 	}
 	for i, c := range bad {
 		if c.Validate() == nil {

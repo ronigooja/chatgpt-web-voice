@@ -308,7 +308,7 @@ The `/v1/voice/sessions/{id}/context` endpoint is unchanged.
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `GET` | `/v1/health` | 健康检查 |
-| `GET` | `/v1/voice/config` | 音色、语言、STUN、DataChannel 约定 |
+| `GET` | `/v1/voice/config` | Voice, language, and DataChannel configuration |
 | `POST` | `/v1/voice/sessions` | 建立或恢复语音会话（SDP 交换） |
 | `POST` | `/v1/voice/sessions/{voice_session_id}/context` | Upstream continuity metadata |
 | `POST` | `/v1/voice/sessions/{voice_session_id}/opening-context` | Apply bounded, versioned opening context |

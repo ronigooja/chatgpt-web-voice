@@ -276,6 +276,20 @@ func TestDownstreamConfigAndSessionIsolation(t *testing.T) {
 	if configResp.Code != http.StatusOK || !strings.Contains(configResp.Body.String(), "oai-events") {
 		t.Fatalf("config status=%d body=%s", configResp.Code, configResp.Body.String())
 	}
+	var configBody struct {
+		WebRTC map[string]json.RawMessage `json:"webrtc"`
+	}
+	if err := json.Unmarshal(configResp.Body.Bytes(), &configBody); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"data_channel", "receive_audio", "receive_video"} {
+		if _, exists := configBody.WebRTC[key]; !exists {
+			t.Fatalf("config missing webrtc.%s: %s", key, configResp.Body.String())
+		}
+	}
+	if _, exists := configBody.WebRTC["ice_servers"]; exists {
+		t.Fatalf("config exposed webrtc.ice_servers: %s", configResp.Body.String())
+	}
 	for _, forbidden := range []string{"access_token", "proxy", "account_id"} {
 		if strings.Contains(configResp.Body.String(), forbidden) {
 			t.Fatalf("config leaked %q: %s", forbidden, configResp.Body.String())

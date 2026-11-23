@@ -169,9 +169,9 @@ api_key:<numeric_id>
 
 ```text
 1. GET /api/voice/config  （或 /v1/voice/config）
-   ← voices / languages / STUN / DataChannel 约定
+   ← voices / languages / DataChannel configuration
 
-2. getUserMedia → RTCPeerConnection({ iceServers, bundlePolicy: max-bundle })
+2. getUserMedia → RTCPeerConnection({ bundlePolicy: max-bundle })
 3. createDataChannel("oai-events", { negotiated: true, id: 0 })
 4. addTrack(本地音轨) → createOffer → setLocalDescription → ICE gather
 
@@ -417,7 +417,7 @@ Production 强制校验证书；development 才允许 `VOICE_SKIP_SSL_VERIFY`。
 | 端点 | 作用 |
 |---|---|
 | `GET /v1/health` | 鉴权健康检查 |
-| `GET /v1/voice/config` | 音色 / 语言 / STUN / DataChannel |
+| `GET /v1/voice/config` | Voice, language, and DataChannel configuration |
 | `POST /v1/voice/sessions` | offer → answer；返回 `voice_session_id`、`conversation` (`resumed`/`new`)、`conversation_confirmed`、可选 `conversation_reason` 等公开字段。WM 只有在上游事件回显存储的 `conversation_id` 和 `parent_message_id` 后才确认恢复；创建时无证据则为 `new/unverified`。`VOICE_UPSTREAM_ROUTE` 默认为 `wm`，可显式设为 `avas`; AVAS 为 `new/avas_no_resume` 且失败不会回退到 WM。 |
 | `POST .../context` | 上报上游 id |
 | `GET .../title` | 拉上游标题 |
