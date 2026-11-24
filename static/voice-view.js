@@ -6,7 +6,7 @@
 }(typeof window !== 'undefined' ? window : this, function (Captions, root) {
   'use strict';
 
-  // Read-only upstream context viewer, opened as /voice?view=<gateway_session_id>&gen=<n>.
+  // Read-only upstream context viewer, opened as /viewer?session=<gateway_session_id>&gen=<n>.
   // Never calls the dial, microphone, device or conversation-store code in voice.html.
   // Events are kept per seq, so duplicates and out-of-order arrivals are harmless.
 
@@ -22,6 +22,32 @@
     gateway_to_upstream: 'gateway → upstream',
     gateway_creation: 'creation'
   };
+
+  var GROUPS = [
+    { id: 'conversation', label: 'Conversation' },
+    { id: 'delegation', label: 'Delegation' },
+    { id: 'instructions', label: 'Instructions & opening' },
+    { id: 'context', label: 'Context writes' },
+    { id: 'client', label: 'Client messages' },
+    { id: 'session', label: 'Session & usage' },
+    { id: 'other', label: 'Other' }
+  ];
+  var GROUP_IDS = GROUPS.map(function (g) { return g.id; });
+  var PRESETS = [
+    { id: 'conversation', label: 'Conversation only', groups: ['conversation'] },
+    { id: 'delegation', label: 'Delegation only', groups: ['delegation'] },
+    { id: 'everything', label: 'Everything', groups: GROUP_IDS }
+  ];
+  var CONVERSATION_TYPES = {
+    'turn.created': true,
+    'turn.delta': true,
+    'turn.text.delta': true,
+    'turn.done': true,
+    'chat_message_delta': true,
+    'output_text.delta': true,
+    'output_audio_transcript.delta': true
+  };
+  var DELEGATION_MARKER = /"delegation_item_id"\s*:/;
 
   function toSeq(value) {
     var n = Number(value);
@@ -52,7 +78,7 @@
   function parseGeneration(value) {
     if (value === null || value === undefined || String(value).trim() === '') return { value: 0 };
     var n = toSeq(String(value).trim());
-    return n ? { value: n } : { error: 'Invalid generation parameter. Use /voice?view=<session>&gen=<positive integer>.' };
+    return n ? { value: n } : { error: 'Invalid generation parameter. Use /viewer?session=<session>&gen=<positive integer>.' };
   }
 
   function chooseGeneration(gens, requested) {
@@ -89,8 +115,155 @@
       '/events/stream?after=' + toInt(after);
   }
 
-  function viewerUrl(sessionId, gen) {
-    return '/voice?view=' + enc(sessionId) + (gen ? '&gen=' + enc(gen) : '');
+  function groupLabel(id) {
+    for (var i = 0; i < GROUPS.length; i++) if (GROUPS[i].id === id) return GROUPS[i].label;
+    return id;
+  }
+
+  // Inner type of a frame. Only data_message carries the real type in its payload.
+  function innerType(type, payload) {
+    if (type !== 'data_message') return type;
+    var obj = Captions.parseEventPayload(payload);
+    return obj && typeof obj.type === 'string' && obj.type && obj.type !== 'data_message' ? obj.type : type;
+  }
+
+  function groupOf(direction, type, payload) {
+    if (direction === 'gateway_creation') return 'instructions';
+    if (type.indexOf('delegation') >= 0) return 'delegation';
+    var contextWrite = type === 'session.context.append' || type === 'session.context.appended';
+    if (contextWrite && DELEGATION_MARKER.test(String(payload || ''))) return 'delegation';
+    if (contextWrite) return 'context';
+    if (direction === 'client_to_upstream') return 'client';
+    if (direction === 'gateway_to_upstream') return 'context';
+    if (CONVERSATION_TYPES[type] || /^(input|output)_transcript\./.test(type)) return 'conversation';
+    if (type.indexOf('session.') === 0) return 'session';
+    return 'other';
+  }
+
+  // Exactly one group per event. Direction-based groups are checked first so that
+  // gateway writes about delegations land in Delegation, not Context writes.
+  function classifyEvent(raw) {
+    var direction = String((raw && raw.direction) || '');
+    var payload = raw && raw.payload !== undefined && raw.payload !== null ? raw.payload : '';
+    if (typeof payload !== 'string') payload = JSON.stringify(payload);
+    var wire = String((raw && raw.type) || '');
+    var type = innerType(wire, payload) || wire;
+    return { type: type, group: groupOf(direction, type, payload) };
+  }
+
+  function eventMatches(ev, filter) {
+    var f = filter || {};
+    if (f.groups && f.groups.indexOf(ev.group) < 0) return false;
+    if (f.type && ev.type !== f.type) return false;
+    return searchMatches(ev, f.q);
+  }
+
+  // Case-insensitive substring match over type, direction, source and payload text.
+  // Payload text is only compared, never parsed for execution.
+  function searchMatches(ev, q) {
+    var needle = String(q || '').trim().toLowerCase();
+    if (!needle) return true;
+    var hay = (ev.type + ' ' + ev.direction + ' ' + ev.source + ' ' + ev.payload).toLowerCase();
+    return hay.indexOf(needle) >= 0;
+  }
+
+  // Counts per group over events matching the search text (group and type filters ignored).
+  function groupCounts(list, q) {
+    var counts = {};
+    GROUP_IDS.forEach(function (id) { counts[id] = 0; });
+    (Array.isArray(list) ? list : []).forEach(function (ev) {
+      if (ev && counts[ev.group] !== undefined && searchMatches(ev, q)) counts[ev.group]++;
+    });
+    return counts;
+  }
+
+  function presetGroups(id) {
+    for (var i = 0; i < PRESETS.length; i++) {
+      if (PRESETS[i].id === id) return PRESETS[i].groups.slice();
+    }
+    return null;
+  }
+
+  function presetOf(groups) {
+    var list = Array.isArray(groups) ? groups : [];
+    for (var i = 0; i < PRESETS.length; i++) {
+      var want = PRESETS[i].groups;
+      if (want.length === list.length && want.every(function (id) { return list.indexOf(id) >= 0; })) return PRESETS[i].id;
+    }
+    return '';
+  }
+
+  function filterParams(filter) {
+    var f = filter || {};
+    var out = {};
+    var groups = Array.isArray(f.groups) ? f.groups : GROUP_IDS;
+    if (groups.length < GROUP_IDS.length) {
+      out.groups = GROUP_IDS.filter(function (id) { return groups.indexOf(id) >= 0; }).join(',');
+    }
+    if (f.type) out.type = String(f.type);
+    if (f.q) out.q = String(f.q);
+    return out;
+  }
+
+  // Reads filter state from a URLSearchParams or a plain object. An absent groups
+  // parameter means all groups; an empty one means none.
+  function filterFromParams(params) {
+    var get = function (key) {
+      var v = params && typeof params.get === 'function' ? params.get(key) : (params || {})[key];
+      return v === null || v === undefined ? null : String(v);
+    };
+    var g = get('groups');
+    var groups = g === null ? GROUP_IDS.slice() : GROUP_IDS.filter(function (id) {
+      return g.split(',').map(function (s) { return s.trim(); }).indexOf(id) >= 0;
+    });
+    return { groups: groups, type: get('type') || '', q: get('q') || '' };
+  }
+
+  // Delegation panel rows. delegation.created carries handoff/target/text in item;
+  // gateway writes (delegation.context.append or session.context.append) expose
+  // delegation_item_id, found at top level or under item.
+  function delegationRows(list) {
+    return (Array.isArray(list) ? list : []).filter(function (ev) {
+      return ev && ev.group === 'delegation';
+    }).map(function (ev) {
+      var obj = Captions.parseEventPayload(ev.payload) || {};
+      var item = obj.item && typeof obj.item === 'object' ? obj.item : {};
+      var created = ev.type === 'delegation.created';
+      var row = {
+        seq: ev.seq,
+        at: ev.at,
+        type: ev.type,
+        kind: created ? 'created' : 'write',
+        delivery: ev.delivery,
+        truncated: ev.truncated,
+        handoff: '',
+        target: '',
+        delegationItemId: '',
+        text: ''
+      };
+      if (created) {
+        row.handoff = String(item.handoff_id || '');
+        row.target = String(item.target || '');
+        row.delegationItemId = String(item.id || '');
+        row.text = Captions.delegationText(item.content);
+      } else {
+        row.handoff = String(obj.handoff_id || item.handoff_id || '');
+        row.target = String(obj.target || item.target || '');
+        row.delegationItemId = String(obj.delegation_item_id || item.delegation_item_id || '');
+        row.text = Captions.delegationText(obj.content || item.content);
+      }
+      return row;
+    });
+  }
+
+  function queryString(obj) {
+    var keys = Object.keys(obj);
+    return keys.length ? '&' + keys.map(function (k) { return enc(k) + '=' + enc(obj[k]); }).join('&') : '';
+  }
+
+  function viewerUrl(sessionId, gen, filter) {
+    return '/viewer?session=' + enc(sessionId) + (gen ? '&gen=' + enc(gen) : '') +
+      (filter ? queryString(filterParams(filter)) : '');
   }
 
   // Event store: seq-keyed, sorted, deduplicated. Gaps are reported both by the
@@ -107,11 +280,14 @@
       var payload = ev.payload;
       if (payload === null || payload === undefined) payload = '';
       else if (typeof payload !== 'string') payload = JSON.stringify(payload);
+      var direction = String(ev.direction || '');
+      var cls = classifyEvent({ direction: direction, type: ev.type, payload: payload });
       return {
         seq: toEventSeq(ev.seq),
         at: String(ev.at || ''),
-        direction: String(ev.direction || ''),
-        type: String(ev.type || ''),
+        direction: direction,
+        type: cls.type,
+        group: cls.group,
         source: String(ev.source || ''),
         payload: payload,
         size: toInt(ev.size),
@@ -183,12 +359,10 @@
         return asm.snapshot();
       },
       filtered: function (filter) {
-        filter = filter || {};
-        return api.list().filter(function (ev) {
-          return (!filter.direction || ev.direction === filter.direction) &&
-            (!filter.type || ev.type === filter.type);
-        });
+        return api.list().filter(function (ev) { return eventMatches(ev, filter); });
       },
+      counts: function (q) { return groupCounts(api.list(), q); },
+      delegations: function () { return delegationRows(api.list()); },
       types: function () {
         var seen = {};
         api.list().forEach(function (ev) { if (ev.type) seen[ev.type] = true; });
@@ -208,7 +382,7 @@
   }
 
   function requested() {
-    return typeof window !== 'undefined' && /(^|[?&])view=/.test(window.location.search);
+    return typeof window !== 'undefined' && window.location.pathname === '/viewer';
   }
 
   function start() {
@@ -218,7 +392,10 @@
       conn: $('vwConn'), orb: $('vwOrb'), session: $('vwSession'), zoe: $('vwZoe'), gen: $('vwGen'), status: $('vwStatus'),
       genSelect: $('vwGenSelect'), tabCaptions: $('vwTabCaptions'), tabEvents: $('vwTabEvents'), notice: $('vwNotice'),
       creation: $('vwCreation'), creationBody: $('vwCreationBody'), captionsPane: $('vwCaptionsPane'), captions: $('vwCaptions'),
-      eventsPane: $('vwEventsPane'), events: $('vwEvents'), direction: $('vwDirection'), type: $('vwType'),
+      eventsPane: $('vwEventsPane'), events: $('vwEvents'), type: $('vwType'),
+      groups: $('vwGroups'), search: $('vwSearch'), presets: doc.querySelectorAll('.viewer-presets button'),
+      tabDelegations: $('vwTabDelegations'), delegationCount: $('vwDelegationCount'), delegationBadge: $('vwDelegationBadge'),
+      delegationsPane: $('vwDelegationsPane'), delegations: $('vwDelegations'),
       copy: $('vwCopy'), follow: $('vwFollow'), theme: $('vwTheme'), toast: $('vwToast')
     };
     if (!el.captions) return;
@@ -245,12 +422,12 @@
     }
 
     var params = new URLSearchParams(root.location.search);
-    var sessionId = String(params.get('view') || '').trim();
+    var sessionId = String(params.get('session') || '').trim();
     var requestedGen = parseGeneration(params.get('gen'));
     var view = {
       gens: [], gen: 0, zoeId: '', store: null, es: null, retryTimer: 0, retryDelay: 1000,
       token: 0, active: false, startedAt: '', endedAt: '', conn: '', error: '', capped: false,
-      tab: 'captions', following: true, renderQueued: false, filters: { direction: '', type: '' },
+      tab: 'captions', following: true, renderQueued: false, filters: filterFromParams(params),
       typesKey: null, open: {}
     };
 
@@ -301,8 +478,18 @@
       renderHeader();
       renderNotice();
       renderCreation();
+      renderGroupChips();
+      renderDelegationBadge();
       renderCaptions();
+      renderDelegations();
       renderEvents();
+      syncUrl();
+    }
+
+    function syncUrl() {
+      if (!view.gen) return;
+      var url = viewerUrl(sessionId, view.gen, view.filters);
+      if (url !== root.location.pathname + root.location.search) root.history.replaceState(null, '', url);
     }
 
     function renderHeader() {
@@ -388,24 +575,33 @@
       return row;
     }
 
+    function delegationMarker(row) {
+      var text = 'Delegation ' + (row.kind === 'created' ? 'created' : 'write') + ' · ' + formatTime(row.at) +
+        (row.target ? ' · target ' + row.target : '') + (row.handoff ? ' · handoff ' + row.handoff : '');
+      return make('div', 'viewer-marker', text);
+    }
+
     function renderCaptions() {
       var top = el.captionsPane.scrollTop;
       el.captions.textContent = '';
       if (!view.store) return;
       el.captions.appendChild(boundaryRow('Generation ' + view.gen + (view.startedAt ? ' started ' + formatTime(view.startedAt) : ' started')));
       var items = view.store.captions();
-      if (!items.length) el.captions.appendChild(emptyRow('No captions in this generation yet.'));
+      var markers = view.store.delegations().filter(function (r) { return r.kind === 'created'; });
+      if (!items.length && !markers.length) el.captions.appendChild(emptyRow('No captions in this generation yet.'));
+      var pendingMarkers = markers.slice();
       items.forEach(function (item) {
+        pendingMarkers.forEach(function (m) {
+          if (m.seq <= item.seq) el.captions.appendChild(delegationMarker(m));
+        });
+        pendingMarkers = pendingMarkers.filter(function (m) { return m.seq > item.seq; });
         el.captions.appendChild(captionRow(item, view.store.at(item.seq)));
       });
+      pendingMarkers.forEach(function (m) { el.captions.appendChild(delegationMarker(m)); });
       if (!view.active && view.store.size()) {
         el.captions.appendChild(boundaryRow('Generation ' + view.gen + ' ended' + (view.endedAt ? ' ' + formatTime(view.endedAt) : '')));
       }
       applyScroll(el.captionsPane, top, view.tab === 'captions');
-    }
-
-    function passes(ev, filter) {
-      return (!filter.direction || ev.direction === filter.direction) && (!filter.type || ev.type === filter.type);
     }
 
     function syncTypeOptions() {
@@ -427,10 +623,40 @@
       view.filters.type = el.type.value;
     }
 
+    // Group chips with live counts. Counts respect the search text, not the group toggles,
+    // so a user can see what a toggle would add.
+    function renderGroupChips() {
+      var counts = view.store ? view.store.counts(view.filters.q) : {};
+      el.groups.textContent = '';
+      GROUPS.forEach(function (g) {
+        var on = view.filters.groups.indexOf(g.id) >= 0;
+        var btn = make('button', 'viewer-chip', g.label + ' ');
+        btn.type = 'button';
+        btn.setAttribute('aria-pressed', String(on));
+        btn.setAttribute('data-group', g.id);
+        btn.appendChild(make('span', 'viewer-count', String(counts[g.id] || 0)));
+        el.groups.appendChild(btn);
+      });
+      var preset = presetOf(view.filters.groups);
+      Array.prototype.forEach.call(el.presets, function (b) {
+        b.setAttribute('aria-pressed', String(b.getAttribute('data-preset') === preset));
+      });
+    }
+
+    function renderDelegationBadge() {
+      var rows = view.store ? view.store.delegations() : [];
+      var created = rows.filter(function (r) { return r.kind === 'created'; }).length;
+      el.delegationCount.textContent = String(created);
+      el.delegationBadge.textContent = created + (created === 1 ? ' delegation' : ' delegations');
+      el.delegationBadge.hidden = created === 0;
+      el.tabDelegations.setAttribute('data-count', String(rows.length));
+    }
+
     function eventRow(ev) {
       var row = make('div', 'viewer-event');
       var head = make('div', 'viewer-event-head');
       head.appendChild(make('span', 'viewer-badge dir-' + safeClass(ev.direction), DIRECTION_LABELS[ev.direction] || ev.direction || 'unknown'));
+      head.appendChild(make('span', 'viewer-badge group-' + safeClass(ev.group), groupLabel(ev.group)));
       head.appendChild(make('span', 'viewer-type mono', ev.type || '(no type)'));
       head.appendChild(make('span', 'viewer-meta', formatTime(ev.at)));
       head.appendChild(make('span', 'viewer-meta', '#' + ev.seq));
@@ -458,6 +684,30 @@
       return row;
     }
 
+    function renderDelegations() {
+      var top = el.delegationsPane.scrollTop;
+      el.delegations.textContent = '';
+      if (!view.store) return;
+      var rows = view.store.delegations();
+      if (!rows.length) el.delegations.appendChild(emptyRow('No delegations in this generation.'));
+      rows.forEach(function (r) {
+        var card = make('div', 'viewer-delegation');
+        var head = make('div', 'viewer-event-head');
+        head.appendChild(make('span', 'viewer-badge', r.kind === 'created' ? 'created' : 'gateway write'));
+        head.appendChild(make('span', 'viewer-meta', formatTime(r.at)));
+        head.appendChild(make('span', 'viewer-meta', '#' + r.seq));
+        if (r.target) head.appendChild(make('span', 'viewer-meta', 'target ' + r.target));
+        if (r.handoff) head.appendChild(make('span', 'viewer-meta', 'handoff ' + r.handoff));
+        if (r.delegationItemId) head.appendChild(make('span', 'viewer-meta', 'item ' + r.delegationItemId));
+        if (r.kind === 'write') head.appendChild(make('span', 'viewer-badge', 'delivery: ' + r.delivery));
+        if (r.truncated) head.appendChild(make('span', 'viewer-badge warn', 'truncated'));
+        card.appendChild(head);
+        if (r.text) card.appendChild(make('pre', '', r.text));
+        el.delegations.appendChild(card);
+      });
+      applyScroll(el.delegationsPane, top, view.tab === 'delegations');
+    }
+
     function renderEvents() {
       var top = el.eventsPane.scrollTop;
       el.events.textContent = '';
@@ -472,7 +722,7 @@
       all.forEach(function (ev) {
         if (prev >= 0 && ev.seq - prev > 1) rows.push({ gap: 'Missing seq ' + (prev + 1) + '–' + (ev.seq - 1) + ' (not loaded)' });
         prev = ev.seq;
-        if (passes(ev, view.filters)) rows.push({ ev: ev });
+        if (eventMatches(ev, view.filters)) rows.push({ ev: ev });
       });
       var visible = rows.slice(-MAX_EVENT_ROWS);
       if (visible.length < rows.length) {
@@ -586,7 +836,7 @@
       view.typesKey = null;
       view.filters.type = '';
       el.type.value = '';
-      root.history.replaceState(null, '', viewerUrl(sessionId, view.gen));
+      root.history.replaceState(null, '', viewerUrl(sessionId, view.gen, view.filters));
       setConn('Loading', 'idle');
       renderGenSelect();
       scheduleRender();
@@ -614,8 +864,10 @@
     function setTab(tab) {
       view.tab = tab;
       el.tabCaptions.setAttribute('aria-selected', String(tab === 'captions'));
+      el.tabDelegations.setAttribute('aria-selected', String(tab === 'delegations'));
       el.tabEvents.setAttribute('aria-selected', String(tab === 'events'));
       el.captionsPane.hidden = tab !== 'captions';
+      el.delegationsPane.hidden = tab !== 'delegations';
       el.eventsPane.hidden = tab !== 'events';
       view.following = true;
       el.follow.hidden = true;
@@ -623,7 +875,9 @@
     }
 
     function activePane() {
-      return view.tab === 'events' ? el.eventsPane : el.captionsPane;
+      if (view.tab === 'events') return el.eventsPane;
+      if (view.tab === 'delegations') return el.delegationsPane;
+      return el.captionsPane;
     }
 
     function onPaneScroll(pane) {
@@ -670,9 +924,33 @@
         openGeneration(gen, findGeneration(view.gens, gen));
       });
       el.tabCaptions.addEventListener('click', function () { setTab('captions'); });
+      el.tabDelegations.addEventListener('click', function () { setTab('delegations'); });
       el.tabEvents.addEventListener('click', function () { setTab('events'); });
-      el.direction.addEventListener('change', function () { view.filters.direction = el.direction.value; scheduleRender(); });
+      el.delegationBadge.addEventListener('click', function () { setTab('delegations'); });
       el.type.addEventListener('change', function () { view.filters.type = el.type.value; scheduleRender(); });
+      el.search.value = view.filters.q;
+      var searchTimer = 0;
+      el.search.addEventListener('input', function () {
+        view.filters.q = el.search.value.trim();
+        root.clearTimeout(searchTimer);
+        searchTimer = root.setTimeout(scheduleRender, 120);
+      });
+      el.groups.addEventListener('click', function (e) {
+        var btn = e.target && e.target.closest ? e.target.closest('button[data-group]') : null;
+        if (!btn) return;
+        var id = btn.getAttribute('data-group');
+        var on = view.filters.groups.indexOf(id) >= 0;
+        view.filters.groups = GROUP_IDS.filter(function (g) {
+          return g === id ? !on : view.filters.groups.indexOf(g) >= 0;
+        });
+        scheduleRender();
+      });
+      Array.prototype.forEach.call(el.presets, function (b) {
+        b.addEventListener('click', function () {
+          view.filters.groups = presetGroups(b.getAttribute('data-preset')) || GROUP_IDS.slice();
+          scheduleRender();
+        });
+      });
       el.copy.addEventListener('click', async function () {
         var list = view.store ? view.store.filtered(view.filters) : [];
         var text = JSON.stringify(list.map(function (ev) { return ev.raw; }), null, 2);
@@ -689,6 +967,7 @@
         scheduleRender();
       });
       el.captionsPane.addEventListener('scroll', function () { onPaneScroll(el.captionsPane); }, { passive: true });
+      el.delegationsPane.addEventListener('scroll', function () { onPaneScroll(el.delegationsPane); }, { passive: true });
       el.eventsPane.addEventListener('scroll', function () { onPaneScroll(el.eventsPane); }, { passive: true });
       el.theme.addEventListener('click', function () {
         setTheme(doc.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
@@ -705,7 +984,7 @@
       bind();
       setConn('Loading', 'idle');
       renderHeader();
-      if (!sessionId) return showError('Missing session id. Open /voice?view=<gateway_session_id>.');
+      if (!sessionId) return showError('Missing session id. Open /viewer?session=<gateway_session_id>.');
       if (requestedGen.error) return showError(requestedGen.error);
       try {
         await loadGenerations();
@@ -718,7 +997,6 @@
       root.setInterval(refreshGenerations, REFRESH_MS);
     }
 
-    doc.documentElement.classList.add('view-mode');
     el.follow.hidden = true;
     init();
   }
@@ -734,6 +1012,18 @@
     streamUrl: streamUrl,
     viewerUrl: viewerUrl,
     prettyPayload: prettyPayload,
-    PAGE_SIZE: PAGE_SIZE
+    PAGE_SIZE: PAGE_SIZE,
+    GROUPS: GROUPS.map(function (g) { return { id: g.id, label: g.label }; }),
+    PRESETS: PRESETS.map(function (p) { return { id: p.id, label: p.label, groups: p.groups.slice() }; }),
+    classifyEvent: classifyEvent,
+    groupLabel: groupLabel,
+    eventMatches: eventMatches,
+    searchMatches: searchMatches,
+    groupCounts: groupCounts,
+    presetGroups: presetGroups,
+    presetOf: presetOf,
+    filterParams: filterParams,
+    filterFromParams: filterFromParams,
+    delegationRows: delegationRows
   };
 }));

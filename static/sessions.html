@@ -249,7 +249,7 @@
             '<span class="time-k" title="结束时间">结束</span><span class="time-v">' + escapeHTML(endText) + '</span>' +
           '</div></td>' +
           '<td data-label="操作"><div class="actions">' +
-            '<a class="btn btn-small" href="/voice?view=' + escapeHTML(encodeURIComponent(vsID)) + '">查看</a>' +
+            (item.generation_count > 0 ? '<a class="btn btn-small" href="/viewer?session=' + escapeHTML(encodeURIComponent(vsID)) + '">查看</a>' : '') +
             '<button type="button" class="btn btn-small" data-action="copy" data-id="' + escapeHTML(vsID) + '">复制</button>' +
             '<button type="button" class="btn btn-small btn-danger" data-action="delete" data-id="' + escapeHTML(vsID) + '">删除</button>' +
           '</div></td></tr>';

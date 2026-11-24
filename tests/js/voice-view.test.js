@@ -111,7 +111,8 @@ test('unknown events remain in the raw list and are not dropped', () => {
   assert.equal(s.list().length, 2);
   assert.deepEqual(s.types(), ['mystery.event', 'turn.done']);
   assert.equal(s.filtered({ type: 'mystery.event' }).length, 1);
-  assert.equal(s.filtered({ direction: 'gateway_creation' }).length, 0);
+  assert.equal(s.filtered({ groups: ['session'] }).length, 0);
+  assert.equal(s.filtered({ groups: ['other'] }).length, 1);
 });
 
 test('creation event is exposed with its parsed payload', () => {
@@ -171,6 +172,6 @@ test('URLs encode ids and use the documented paths', () => {
   assert.equal(V.generationsUrl('vs_a/b'), '/api/call-sessions/vs_a%2Fb/generations');
   assert.equal(V.eventsUrl('vs_1', 2, 10, 500), '/api/call-sessions/vs_1/generations/2/events?after=10&limit=500');
   assert.equal(V.streamUrl('vs_1', 2, 7), '/api/call-sessions/vs_1/generations/2/events/stream?after=7');
-  assert.equal(V.viewerUrl('vs_1', 2), '/voice?view=vs_1&gen=2');
-  assert.equal(V.viewerUrl('vs_1', 0), '/voice?view=vs_1');
+  assert.equal(V.viewerUrl('vs_1', 2), '/viewer?session=vs_1&gen=2');
+  assert.equal(V.viewerUrl('vs_1', 0), '/viewer?session=vs_1');
 });
