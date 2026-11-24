@@ -75,3 +75,21 @@ func TestUpstreamDataChannelCloseIsFailure(t *testing.T) {
 		t.Fatal("upstream channel close did not terminate session")
 	}
 }
+
+func TestClientDataChannelCloseWithoutHookIsFailure(t *testing.T) {
+	g := connect(t, newRelay(t, 1))
+	g.session.(*pionSession).bridge.onClientClose = nil
+	reason := make(chan string, 1)
+	g.session.SetCloseHandler(func(s string) { reason <- s })
+	if err := g.events.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-reason:
+		if got != "data_channel_failed" {
+			t.Fatalf("reason = %q", got)
+		}
+	case <-time.After(testWait):
+		t.Fatal("client channel close did not terminate session")
+	}
+}

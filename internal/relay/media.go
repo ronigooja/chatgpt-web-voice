@@ -1220,7 +1220,11 @@ func (b *dataChannelBridge) bindSource(channel *webrtc.DataChannel, destination 
 		case <-b.done:
 			return
 		default:
-			b.onClientClose()
+			if b.onClientClose != nil {
+				b.onClientClose()
+			} else {
+				destination.reportError(fmt.Errorf("%s DataChannel closed", destination.name))
+			}
 		}
 	})
 }
