@@ -23,6 +23,32 @@
     gateway_creation: 'creation'
   };
 
+  var GROUPS = [
+    { id: 'conversation', label: 'Conversation' },
+    { id: 'delegation', label: 'Delegation' },
+    { id: 'instructions', label: 'Instructions & opening' },
+    { id: 'context', label: 'Context writes' },
+    { id: 'client', label: 'Client messages' },
+    { id: 'session', label: 'Session & usage' },
+    { id: 'other', label: 'Other' }
+  ];
+  var GROUP_IDS = GROUPS.map(function (g) { return g.id; });
+  var PRESETS = [
+    { id: 'conversation', label: 'Conversation only', groups: ['conversation'] },
+    { id: 'delegation', label: 'Delegation only', groups: ['delegation'] },
+    { id: 'everything', label: 'Everything', groups: GROUP_IDS }
+  ];
+  var CONVERSATION_TYPES = {
+    'turn.created': true,
+    'turn.delta': true,
+    'turn.text.delta': true,
+    'turn.done': true,
+    'chat_message_delta': true,
+    'output_text.delta': true,
+    'output_audio_transcript.delta': true
+  };
+  var DELEGATION_MARKER = /"delegation_item_id"\s*:/;
+
   function toSeq(value) {
     var n = Number(value);
     return isFinite(n) && n > 0 && Math.floor(n) === n ? n : 0;
@@ -89,8 +115,155 @@
       '/events/stream?after=' + toInt(after);
   }
 
-  function viewerUrl(sessionId, gen) {
-    return '/viewer?session=' + enc(sessionId) + (gen ? '&gen=' + enc(gen) : '');
+  function groupLabel(id) {
+    for (var i = 0; i < GROUPS.length; i++) if (GROUPS[i].id === id) return GROUPS[i].label;
+    return id;
+  }
+
+  // Inner type of a frame. Only data_message carries the real type in its payload.
+  function innerType(type, payload) {
+    if (type !== 'data_message') return type;
+    var obj = Captions.parseEventPayload(payload);
+    return obj && typeof obj.type === 'string' && obj.type && obj.type !== 'data_message' ? obj.type : type;
+  }
+
+  function groupOf(direction, type, payload) {
+    if (direction === 'gateway_creation') return 'instructions';
+    if (type.indexOf('delegation') >= 0) return 'delegation';
+    var contextWrite = type === 'session.context.append' || type === 'session.context.appended';
+    if (contextWrite && DELEGATION_MARKER.test(String(payload || ''))) return 'delegation';
+    if (contextWrite) return 'context';
+    if (direction === 'client_to_upstream') return 'client';
+    if (direction === 'gateway_to_upstream') return 'context';
+    if (CONVERSATION_TYPES[type] || /^(input|output)_transcript\./.test(type)) return 'conversation';
+    if (type.indexOf('session.') === 0) return 'session';
+    return 'other';
+  }
+
+  // Exactly one group per event. Direction-based groups are checked first so that
+  // gateway writes about delegations land in Delegation, not Context writes.
+  function classifyEvent(raw) {
+    var direction = String((raw && raw.direction) || '');
+    var payload = raw && raw.payload !== undefined && raw.payload !== null ? raw.payload : '';
+    if (typeof payload !== 'string') payload = JSON.stringify(payload);
+    var wire = String((raw && raw.type) || '');
+    var type = innerType(wire, payload) || wire;
+    return { type: type, group: groupOf(direction, type, payload) };
+  }
+
+  function eventMatches(ev, filter) {
+    var f = filter || {};
+    if (f.groups && f.groups.indexOf(ev.group) < 0) return false;
+    if (f.type && ev.type !== f.type) return false;
+    return searchMatches(ev, f.q);
+  }
+
+  // Case-insensitive substring match over type, direction, source and payload text.
+  // Payload text is only compared, never parsed for execution.
+  function searchMatches(ev, q) {
+    var needle = String(q || '').trim().toLowerCase();
+    if (!needle) return true;
+    var hay = (ev.type + ' ' + ev.direction + ' ' + ev.source + ' ' + ev.payload).toLowerCase();
+    return hay.indexOf(needle) >= 0;
+  }
+
+  // Counts per group over events matching the search text (group and type filters ignored).
+  function groupCounts(list, q) {
+    var counts = {};
+    GROUP_IDS.forEach(function (id) { counts[id] = 0; });
+    (Array.isArray(list) ? list : []).forEach(function (ev) {
+      if (ev && counts[ev.group] !== undefined && searchMatches(ev, q)) counts[ev.group]++;
+    });
+    return counts;
+  }
+
+  function presetGroups(id) {
+    for (var i = 0; i < PRESETS.length; i++) {
+      if (PRESETS[i].id === id) return PRESETS[i].groups.slice();
+    }
+    return null;
+  }
+
+  function presetOf(groups) {
+    var list = Array.isArray(groups) ? groups : [];
+    for (var i = 0; i < PRESETS.length; i++) {
+      var want = PRESETS[i].groups;
+      if (want.length === list.length && want.every(function (id) { return list.indexOf(id) >= 0; })) return PRESETS[i].id;
+    }
+    return '';
+  }
+
+  function filterParams(filter) {
+    var f = filter || {};
+    var out = {};
+    var groups = Array.isArray(f.groups) ? f.groups : GROUP_IDS;
+    if (groups.length < GROUP_IDS.length) {
+      out.groups = GROUP_IDS.filter(function (id) { return groups.indexOf(id) >= 0; }).join(',');
+    }
+    if (f.type) out.type = String(f.type);
+    if (f.q) out.q = String(f.q);
+    return out;
+  }
+
+  // Reads filter state from a URLSearchParams or a plain object. An absent groups
+  // parameter means all groups; an empty one means none.
+  function filterFromParams(params) {
+    var get = function (key) {
+      var v = params && typeof params.get === 'function' ? params.get(key) : (params || {})[key];
+      return v === null || v === undefined ? null : String(v);
+    };
+    var g = get('groups');
+    var groups = g === null ? GROUP_IDS.slice() : GROUP_IDS.filter(function (id) {
+      return g.split(',').map(function (s) { return s.trim(); }).indexOf(id) >= 0;
+    });
+    return { groups: groups, type: get('type') || '', q: get('q') || '' };
+  }
+
+  // Delegation panel rows. delegation.created carries handoff/target/text in item;
+  // gateway writes (delegation.context.append or session.context.append) expose
+  // delegation_item_id, found at top level or under item.
+  function delegationRows(list) {
+    return (Array.isArray(list) ? list : []).filter(function (ev) {
+      return ev && ev.group === 'delegation';
+    }).map(function (ev) {
+      var obj = Captions.parseEventPayload(ev.payload) || {};
+      var item = obj.item && typeof obj.item === 'object' ? obj.item : {};
+      var created = ev.type === 'delegation.created';
+      var row = {
+        seq: ev.seq,
+        at: ev.at,
+        type: ev.type,
+        kind: created ? 'created' : 'write',
+        delivery: ev.delivery,
+        truncated: ev.truncated,
+        handoff: '',
+        target: '',
+        delegationItemId: '',
+        text: ''
+      };
+      if (created) {
+        row.handoff = String(item.handoff_id || '');
+        row.target = String(item.target || '');
+        row.delegationItemId = String(item.id || '');
+        row.text = Captions.delegationText(item.content);
+      } else {
+        row.handoff = String(obj.handoff_id || item.handoff_id || '');
+        row.target = String(obj.target || item.target || '');
+        row.delegationItemId = String(obj.delegation_item_id || item.delegation_item_id || '');
+        row.text = Captions.delegationText(obj.content || item.content);
+      }
+      return row;
+    });
+  }
+
+  function queryString(obj) {
+    var keys = Object.keys(obj);
+    return keys.length ? '&' + keys.map(function (k) { return enc(k) + '=' + enc(obj[k]); }).join('&') : '';
+  }
+
+  function viewerUrl(sessionId, gen, filter) {
+    return '/viewer?session=' + enc(sessionId) + (gen ? '&gen=' + enc(gen) : '') +
+      (filter ? queryString(filterParams(filter)) : '');
   }
 
   // Event store: seq-keyed, sorted, deduplicated. Gaps are reported both by the
@@ -107,11 +280,14 @@
       var payload = ev.payload;
       if (payload === null || payload === undefined) payload = '';
       else if (typeof payload !== 'string') payload = JSON.stringify(payload);
+      var direction = String(ev.direction || '');
+      var cls = classifyEvent({ direction: direction, type: ev.type, payload: payload });
       return {
         seq: toEventSeq(ev.seq),
         at: String(ev.at || ''),
-        direction: String(ev.direction || ''),
-        type: String(ev.type || ''),
+        direction: direction,
+        type: cls.type,
+        group: cls.group,
         source: String(ev.source || ''),
         payload: payload,
         size: toInt(ev.size),
@@ -183,12 +359,10 @@
         return asm.snapshot();
       },
       filtered: function (filter) {
-        filter = filter || {};
-        return api.list().filter(function (ev) {
-          return (!filter.direction || ev.direction === filter.direction) &&
-            (!filter.type || ev.type === filter.type);
-        });
+        return api.list().filter(function (ev) { return eventMatches(ev, filter); });
       },
+      counts: function (q) { return groupCounts(api.list(), q); },
+      delegations: function () { return delegationRows(api.list()); },
       types: function () {
         var seen = {};
         api.list().forEach(function (ev) { if (ev.type) seen[ev.type] = true; });
@@ -733,6 +907,18 @@
     streamUrl: streamUrl,
     viewerUrl: viewerUrl,
     prettyPayload: prettyPayload,
-    PAGE_SIZE: PAGE_SIZE
+    PAGE_SIZE: PAGE_SIZE,
+    GROUPS: GROUPS.map(function (g) { return { id: g.id, label: g.label }; }),
+    PRESETS: PRESETS.map(function (p) { return { id: p.id, label: p.label, groups: p.groups.slice() }; }),
+    classifyEvent: classifyEvent,
+    groupLabel: groupLabel,
+    eventMatches: eventMatches,
+    searchMatches: searchMatches,
+    groupCounts: groupCounts,
+    presetGroups: presetGroups,
+    presetOf: presetOf,
+    filterParams: filterParams,
+    filterFromParams: filterFromParams,
+    delegationRows: delegationRows
   };
 }));

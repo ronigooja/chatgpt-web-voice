@@ -111,7 +111,8 @@ test('unknown events remain in the raw list and are not dropped', () => {
   assert.equal(s.list().length, 2);
   assert.deepEqual(s.types(), ['mystery.event', 'turn.done']);
   assert.equal(s.filtered({ type: 'mystery.event' }).length, 1);
-  assert.equal(s.filtered({ direction: 'gateway_creation' }).length, 0);
+  assert.equal(s.filtered({ groups: ['session'] }).length, 0);
+  assert.equal(s.filtered({ groups: ['other'] }).length, 1);
 });
 
 test('creation event is exposed with its parsed payload', () => {
