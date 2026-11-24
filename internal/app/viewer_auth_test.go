@@ -87,6 +87,7 @@ func TestViewerAuthenticationIsolation(t *testing.T) {
 	}
 	for _, path := range []string{"/sessions", "/viewer"} {
 		r := httptest.NewRequest("GET", path, nil)
+		r.Header.Set("Accept", "text/html")
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)
 		if w.Code != http.StatusSeeOther {

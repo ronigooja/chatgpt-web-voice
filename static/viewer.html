@@ -13,8 +13,7 @@
     } catch (e) { document.documentElement.setAttribute('data-theme', 'light'); }
   </script>
   <style>
-    .viewer-page { position: relative; display: flex; flex-direction: column; min-height: 75vh; }
-    .viewer-pane { min-height: 200px; }
+    .viewer-page { position: relative; display: flex; flex-direction: column; height: calc(100dvh - 72px); min-height: 0; padding-bottom: 18px; }
     .caption-log-line { display: flex; gap: 12px; margin-bottom: 20px; }
     .caption-log-line.user { flex-direction: row-reverse; }
     .message-avatar { border-radius: 50%; background: var(--green-soft); color: var(--green-dark); padding: 6px 10px; height: fit-content; }
