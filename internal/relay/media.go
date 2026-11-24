@@ -1316,8 +1316,12 @@ func (p *dataChannelPipe) run() {
 	}
 }
 
+func mustWaitWritable(amount uint64, messageSize int) bool {
+	return amount != 0 && amount+uint64(messageSize) > mediaDataBufferedMaxSize
+}
+
 func (p *dataChannelPipe) waitWritable(destination *webrtc.DataChannel, messageSize int) bool {
-	for destination.BufferedAmount()+uint64(messageSize) > mediaDataBufferedMaxSize {
+	for mustWaitWritable(destination.BufferedAmount(), messageSize) {
 		select {
 		case <-p.writable:
 		case <-p.done:
