@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 )
@@ -101,7 +103,60 @@ func (s *Store) countAudio(e *entry, direction, source, typ string, raw []byte) 
 	}
 }
 
-// Shape keys are allowlisted so arbitrary JSON keys cannot leak content.
+var shapeKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]{0,39}$`)
+var shapeUUIDPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// shapeCharset emits only a class, never string contents.
+func shapeCharset(s string) string {
+	if !utf8.ValidString(s) {
+		return "mixed"
+	}
+	if len(s) == 0 {
+		return "ascii"
+	}
+	hex, b64, ascii := true, true, true
+	for _, r := range s {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			hex = false
+		}
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '+' || r == '/' || r == '=' || r == '-' || r == '_') {
+			b64 = false
+		}
+		if r < 32 || r > 126 {
+			ascii = false
+		}
+	}
+	if hex {
+		return "hex"
+	}
+	if b64 {
+		return "base64"
+	}
+	if ascii {
+		return "ascii"
+	}
+	for _, r := range s {
+		if r < 32 || r == 127 {
+			return "mixed"
+		}
+	}
+	return "utf8"
+}
+
+func safeShapeKey(key string) string {
+	if !shapeKeyPattern.MatchString(key) || shapeUUIDPattern.MatchString(key) {
+		return "<key>"
+	}
+	if len(key) >= 24 && shapeCharset(key) == "hex" {
+		return "<key>"
+	}
+	if len(key) > 24 && shapeCharset(key) == "base64" {
+		return "<key>"
+	}
+	return key
+}
+
+// Shape samples retain safe keys and value types, lengths and charset classes only.
 func audioShape(raw []byte) []string {
 	if len(raw) > 64<<10 {
 		return []string{"<oversized>:object"}
@@ -111,7 +166,6 @@ func audioShape(raw []byte) []string {
 		return []string{"<malformed>:object"}
 	}
 	paths := []string{}
-	known := map[string]bool{"type": true, "data": true, "audio": true, "delta": true, "event": true, "payload": true}
 	var walk func(any, string, int)
 	walk = func(v any, path string, depth int) {
 		if len(paths) >= 128 || depth > 7 {
@@ -119,8 +173,8 @@ func audioShape(raw []byte) []string {
 		}
 		switch x := v.(type) {
 		case string:
-			paths = append(paths, path+"=string(len="+strconv.Itoa(len(x))+")")
-			if path == "data" && len(x) <= frameBytes {
+			paths = append(paths, path+"=string(len="+strconv.Itoa(len(x))+",charset="+shapeCharset(x)+")")
+			if (path == "data" || strings.HasSuffix(path, ".data")) && len(x) <= frameBytes {
 				var inner any
 				if json.Unmarshal([]byte(x), &inner) == nil {
 					walk(inner, "data.<json>", depth+1)
@@ -134,10 +188,7 @@ func audioShape(raw []byte) []string {
 			}
 			sort.Strings(keys)
 			for _, k := range keys {
-				safe := k
-				if !known[k] {
-					safe = "<key>"
-				}
+				safe := safeShapeKey(k)
 				p := safe
 				if path != "" {
 					p = path + "." + safe
@@ -145,7 +196,7 @@ func audioShape(raw []byte) []string {
 				walk(x[k], p, depth+1)
 			}
 		case []any:
-			paths = append(paths, path+"=array")
+			paths = append(paths, path+"=array(count="+strconv.Itoa(len(x))+")")
 			for _, child := range x {
 				walk(child, path+".[]", depth+1)
 			}
