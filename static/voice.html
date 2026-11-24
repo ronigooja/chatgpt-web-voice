@@ -1581,6 +1581,7 @@
   </dialog>
   <audio id="remoteAudio" autoplay playsinline webkit-playsinline></audio>
 
+<script src="/static/captions.js"></script>
 <script>
 (function () {
   'use strict';
@@ -3837,85 +3838,15 @@
   }
 
   function extractTextParts(parts) {
-    if (!Array.isArray(parts)) return '';
-    return parts.map(function (part) {
-      if (typeof part === 'string') return part;
-      if (!part || typeof part !== 'object') return '';
-      if (typeof part.text === 'string') return part.text;
-      if (typeof part.content === 'string') return part.content;
-      if (part.content && typeof part.content.text === 'string') return part.content.text;
-      if (typeof part.transcript === 'string') return part.transcript;
-      return '';
-    }).filter(Boolean).join('\n').trim();
+    return window.ZoeCaptions.extractTextParts(parts);
   }
 
   function applyCaptionDelta(state, delta) {
-    var previous = state && typeof state === 'object' ? state : {};
-    var next = {
-      role: previous.role === 'assistant' || previous.role === 'user' ? previous.role : '',
-      messageId: String(previous.messageId || ''),
-      text: String(previous.text || '')
-    };
-    if (!delta || typeof delta !== 'object') return next;
-
-    var message = delta.v && delta.v.message;
-    if (message && typeof message === 'object') {
-      var parts = message.content && Array.isArray(message.content.parts) ? message.content.parts : [];
-      var role = (message.author && message.author.role) || '';
-      if (role !== 'assistant' && role !== 'user') {
-        for (var partIndex = 0; partIndex < parts.length; partIndex++) {
-          var part = parts[partIndex];
-          if (!part || typeof part !== 'object' || part.content_type !== 'audio_transcription') continue;
-          if (part.direction === 'in') role = 'user';
-          if (part.direction === 'out') role = 'assistant';
-          break;
-        }
-      }
-      if (role !== 'assistant' && role !== 'user') return next;
-      var text = parts.map(function (part) {
-        if (typeof part === 'string') return part;
-        if (!part || typeof part !== 'object') return '';
-        if (typeof part.text === 'string') return part.text;
-        if (typeof part.content === 'string') return part.content;
-        if (typeof part.transcript === 'string') return part.transcript;
-        return '';
-      }).filter(Boolean).join('\n').trim();
-      return {
-        role: role,
-        messageId: message.id ? String(message.id) : next.messageId,
-        text: text
-      };
-    }
-
-    if (!Array.isArray(delta.v) || !next.role) return next;
-    var appended = '';
-    for (var operationIndex = 0; operationIndex < delta.v.length; operationIndex++) {
-      var operation = delta.v[operationIndex];
-      if (!operation || operation.o !== 'append') continue;
-      if (!/^\/message\/content\/parts\/\d+\/text$/.test(String(operation.p || ''))) continue;
-      appended += String(operation.v || '');
-    }
-    if (appended) next.text += appended;
-    return next;
+    return window.ZoeCaptions.applyCaptionDelta(state, delta);
   }
 
   function extractTranscriptText(obj, payload) {
-    var source = payload || obj || {};
-    var candidates = [
-      obj && obj.transcript,
-      obj && obj.text,
-      obj && obj.delta,
-      source && source.transcript,
-      source && source.text,
-      source && source.delta,
-      source && source.item && source.item.transcript,
-      source && source.item && source.item.content && extractTextParts(source.item.content.parts),
-      source && source.message && source.message.content && extractTextParts(source.message.content.parts)
-    ];
-    for (var i = 0; i < candidates.length; i++) {
-      if (typeof candidates[i] === 'string' && candidates[i].trim()) return candidates[i].trim();
-    }
-    return '';
+    return window.ZoeCaptions.extractTranscriptText(obj, payload);
   }
 
   function rememberDcText(role, text) {
