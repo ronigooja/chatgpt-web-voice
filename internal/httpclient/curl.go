@@ -365,15 +365,15 @@ func readCurlResponseHeader(reader *bufio.Reader) (status int, text string, head
 			continue
 		}
 		if !strings.HasPrefix(strings.ToUpper(line), "HTTP/") {
-			return 0, "", nil, fmt.Errorf("unexpected response prefix: %q", line)
+			return 0, "", nil, fmt.Errorf("unexpected response prefix (line bytes: %d)", len(line))
 		}
 		parts := strings.Fields(line)
 		if len(parts) < 2 {
-			return 0, "", nil, fmt.Errorf("bad status line: %q", line)
+			return 0, "", nil, fmt.Errorf("bad status line (line bytes: %d)", len(line))
 		}
 		code, err := strconv.Atoi(parts[1])
 		if err != nil {
-			return 0, "", nil, err
+			return 0, "", nil, fmt.Errorf("invalid response status (line bytes: %d)", len(line))
 		}
 		statusText := strings.TrimSpace(strings.TrimPrefix(line, parts[0]+" "+parts[1]))
 		header := make(http.Header)

@@ -125,7 +125,7 @@ func (m *Manager) Require(next http.Handler) http.Handler {
 		if ok {
 			// Cookie sessions need CSRF protection on state-changing requests.
 			if method == "session" && isUnsafeMethod(r.Method) && !m.validCSRF(r) {
-				logging.FromContext(r.Context()).Warn("csrf_rejected", "remote_addr", r.RemoteAddr, "path", r.URL.Path)
+				logging.FromContext(r.Context()).Warn("csrf_rejected", "remote_addr", r.RemoteAddr)
 				writeAuthError(w, http.StatusForbidden, "csrf token missing or invalid")
 				return
 			}

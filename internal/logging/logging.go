@@ -7,7 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"runtime/debug"
+	"runtime"
 	"strings"
 	"time"
 
@@ -82,7 +82,7 @@ func HTTPMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 		if clientVoice {
 			id = uuid.NewString()
 		} else {
-			id, path, method, userAgent = requestID(r), truncate(r.URL.Path, 2048), r.Method, truncate(r.UserAgent(), 512)
+			id, path, method, userAgent = requestID(r), sanitize(r.URL.Path, 200), sanitize(r.Method, 32), sanitize(r.UserAgent(), 120)
 		}
 		requestID := id
 		w.Header().Set("X-Request-ID", requestID)
@@ -103,8 +103,8 @@ func HTTPMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 					requestLogger.Error("http_panic")
 				} else {
 					requestLogger.Error("http_panic",
-						"panic", fmt.Sprint(recovered),
-						"stack", string(debug.Stack()),
+						"panic_type", fmt.Sprintf("%T", recovered),
+						"stack", stackFrames(),
 					)
 				}
 				if recorder.status == 0 {
@@ -117,6 +117,7 @@ func HTTPMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 				status = http.StatusOK
 			}
 			attrs := []any{
+				"route_pattern", sanitize(r.Pattern, 200),
 				"status", status,
 				"response_bytes", recorder.bytes,
 				"duration_ms", float64(time.Since(started).Microseconds()) / 1000,
@@ -146,7 +147,7 @@ func RequestID(ctx context.Context) string {
 func requestID(r *http.Request) string {
 	incoming := strings.TrimSpace(r.Header.Get("X-Request-ID"))
 	if validRequestID(incoming) {
-		return incoming
+		return sanitize(incoming, 120)
 	}
 	return uuid.NewString()
 }
@@ -176,4 +177,34 @@ func truncate(value string, limit int) string {
 		return value
 	}
 	return value[:limit]
+}
+
+func sanitize(s string, limit int) string {
+	var b strings.Builder
+	for _, r := range s {
+		if b.Len() >= limit {
+			break
+		}
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("/_.-~", r) {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
+}
+
+func stackFrames() string {
+	pcs := make([]uintptr, 64)
+	n := runtime.Callers(3, pcs)
+	frames := runtime.CallersFrames(pcs[:n])
+	var b strings.Builder
+	for {
+		frame, more := frames.Next()
+		fmt.Fprintf(&b, "%s %s:%d\n", frame.Function, frame.File, frame.Line)
+		if !more {
+			break
+		}
+	}
+	return b.String()
 }
