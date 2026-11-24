@@ -103,7 +103,7 @@ func (s *Store) countAudio(e *entry, direction, source, typ string, raw []byte) 
 
 // Shape keys are allowlisted so arbitrary JSON keys cannot leak content.
 func audioShape(raw []byte) []string {
-	if len(raw) > frameBytes {
+	if len(raw) > 64<<10 {
 		return []string{"<oversized>:object"}
 	}
 	var v any
@@ -210,7 +210,7 @@ func (s *Store) AppendFrame(k Key, direction, source, delivery string, data []by
 		max = s.cfg.AudioRingSize
 		name = "audio"
 	}
-	if max <= 0 && len(data) <= oversizeBytes {
+	if max <= 0 {
 		return
 	}
 	n := len(data)
@@ -232,9 +232,7 @@ func (s *Store) AppendFrame(k Key, direction, source, delivery string, data []by
 	if e == nil || !e.meta.Active {
 		return
 	}
-	if max > 0 {
-		s.addFrame(&e.rings[index], f, max, ringBytes)
-	}
+	s.addFrame(&e.rings[index], f, max, ringBytes)
 	if f.Oversize {
 		f.Ring = "oversize"
 		s.addFrame(&e.rings[2], f, 3, 3*frameBytes*2)
