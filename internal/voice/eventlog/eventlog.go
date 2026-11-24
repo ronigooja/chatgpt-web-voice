@@ -24,7 +24,7 @@ type Config struct {
 }
 
 func Defaults() Config {
-	return Config{MaxEvents: 2000, MaxBytes: 4 << 20, GlobalBytes: 64 << 20, EventBytes: 64 << 10, TTL: 6 * time.Hour, FrameRingSize: 200, AudioRingSize: 300}
+	return Config{MaxEvents: 2000, MaxBytes: 4 << 20, GlobalBytes: 64 << 20, EventBytes: 64 << 10, TTL: 6 * time.Hour, FrameRingSize: 1000, AudioRingSize: 300}
 }
 
 type Key struct {

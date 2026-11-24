@@ -2,12 +2,82 @@ package logging
 
 import (
 	"bytes"
+	"errors"
+	"io"
+	"log"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+type countingWriter struct {
+	*httptest.ResponseRecorder
+	headers  int
+	flushErr error
+}
+
+func (w *countingWriter) WriteHeader(status int) {
+	w.headers++
+	w.ResponseRecorder.WriteHeader(status)
+}
+
+func (w *countingWriter) FlushError() error { return w.flushErr }
+
+func TestResponseRecorderFlushBeforeWrite(t *testing.T) {
+	underlying := &countingWriter{ResponseRecorder: httptest.NewRecorder()}
+	w := &responseRecorder{ResponseWriter: underlying}
+	if err := http.NewResponseController(w).Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if w.status != http.StatusOK || underlying.headers != 1 {
+		t.Fatalf("status = %d, WriteHeader calls = %d", w.status, underlying.headers)
+	}
+	if _, err := w.Write([]byte("data")); err != nil {
+		t.Fatal(err)
+	}
+	if underlying.headers != 1 {
+		t.Fatalf("WriteHeader calls after write = %d", underlying.headers)
+	}
+	want := errors.New("flush failed")
+	underlying.flushErr = want
+	if err := http.NewResponseController(w).Flush(); !errors.Is(err, want) {
+		t.Fatalf("flush error = %v, want %v", err, want)
+	}
+}
+
+func TestHTTPMiddlewareSSEFlushBeforeWrite(t *testing.T) {
+	var serverLog bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	handler := HTTPMiddleware(logger, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			t.Errorf("flush: %v", err)
+			return
+		}
+		if _, err := io.WriteString(w, "data: hello\n\n"); err != nil {
+			t.Errorf("write: %v", err)
+		}
+	}))
+	server := httptest.NewUnstartedServer(handler)
+	server.Config.ErrorLog = log.New(&serverLog, "", 0)
+	server.Start()
+	resp, err := server.Client().Get(server.URL)
+	if err != nil {
+		server.Close()
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	server.Close()
+	if err != nil || resp.StatusCode != http.StatusOK || string(body) != "data: hello\n\n" {
+		t.Fatalf("status = %d, body = %q, error = %v", resp.StatusCode, body, err)
+	}
+	if strings.Contains(serverLog.String(), "superfluous") {
+		t.Fatalf("server error log: %s", serverLog.String())
+	}
+}
 
 func TestHTTPMiddlewareAddsRequestIDAndAccessLog(t *testing.T) {
 	var output bytes.Buffer
