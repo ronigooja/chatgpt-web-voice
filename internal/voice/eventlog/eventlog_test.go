@@ -57,6 +57,28 @@ func TestEstimatedAccounting(t *testing.T) {
 	}
 }
 
+func TestAudioNotStored(t *testing.T) {
+	s := New(Config{MaxEvents: 1})
+	k := Key{"a", 1}
+	s.Start(k, "")
+	frames := []string{`{"type":"session.input_audio.append","data":"abc"}`, `{"type":"data_message","data":"{\"type\":\"session.output_audio.delta\"}"}`, `{"type":"data_message","data":{"type":"session.input_audio.append"}}`}
+	var size int
+	for _, frame := range frames {
+		size += len(frame)
+		s.Append(k, "client_to_upstream", "test", "queued", []byte(frame), false)
+	}
+	x, _ := s.Snapshot(k, 0, 10)
+	if x.AudioEvents != 3 || x.AudioBytes != uint64(size) || x.NewestSeq != 0 || len(x.Events) != 0 || x.Dropped != 0 {
+		t.Fatalf("snapshot: %+v", x)
+	}
+	if s.bytes != generationOverhead {
+		t.Fatalf("audio consumed capacity: %d", s.bytes)
+	}
+	if g := s.List("a"); len(g) != 1 || g[0].AudioEvents != 3 || g[0].AudioBytes != uint64(size) {
+		t.Fatalf("generations: %+v", g)
+	}
+}
+
 func TestExpiry(t *testing.T) {
 	s := New(Config{TTL: time.Nanosecond})
 	k := Key{"a", 1}

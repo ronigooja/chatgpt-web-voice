@@ -48,6 +48,8 @@ type Generation struct {
 	EventCount   int        `json:"event_count"`
 	NewestSeq    uint64     `json:"newest_seq"`
 	Dropped      uint64     `json:"dropped"`
+	AudioEvents  uint64     `json:"audio_events"`
+	AudioBytes   uint64     `json:"audio_bytes"`
 }
 
 type Snapshot struct {
@@ -57,6 +59,8 @@ type Snapshot struct {
 	OldestSeq    uint64  `json:"oldest_seq"`
 	NewestSeq    uint64  `json:"newest_seq"`
 	Dropped      uint64  `json:"dropped"`
+	AudioEvents  uint64  `json:"audio_events"`
+	AudioBytes   uint64  `json:"audio_bytes"`
 	Gap          bool    `json:"gap"`
 	Active       bool    `json:"active"`
 	Events       []Event `json:"events"`
@@ -128,15 +132,42 @@ func (s *Store) End(k Key) {
 // Append never waits for subscribers. Payload bytes are copied into the store.
 func (s *Store) Append(k Key, direction, source, delivery string, payload []byte, binary bool) {
 	typ := "text"
+	audio := false
 	if binary {
 		typ = "binary"
 	} else {
 		var v struct {
-			Type string `json:"type"`
+			Type string          `json:"type"`
+			Data json.RawMessage `json:"data"`
 		}
 		if json.Unmarshal(payload, &v) == nil && v.Type != "" {
 			typ = v.Type
+			inner := v.Type
+			if len(v.Data) > 0 {
+				var raw string
+				data := []byte(v.Data)
+				if json.Unmarshal(v.Data, &raw) == nil {
+					data = []byte(raw)
+				}
+				var nested struct {
+					Type string `json:"type"`
+				}
+				if json.Unmarshal(data, &nested) == nil && nested.Type != "" {
+					inner = nested.Type
+				}
+			}
+			audio = inner == "session.input_audio.append" || inner == "session.output_audio.delta"
 		}
+	}
+	if audio {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if e := s.entries[k]; e != nil && e.meta.Active {
+			e.meta.AudioEvents++
+			e.meta.AudioBytes += uint64(len(payload))
+			notify(e)
+		}
+		return
 	}
 	size := len(payload)
 	limit := s.cfg.EventBytes
@@ -258,7 +289,7 @@ func (s *Store) snapshot(k Key, after uint64, limit int) (Snapshot, bool) {
 	if e == nil {
 		return Snapshot{}, false
 	}
-	out := Snapshot{SessionID: k.SessionID, Generation: k.Generation, ZoeSessionID: e.meta.ZoeSessionID, NewestSeq: e.meta.NewestSeq, Dropped: e.meta.Dropped, Active: e.meta.Active, Events: []Event{}}
+	out := Snapshot{SessionID: k.SessionID, Generation: k.Generation, ZoeSessionID: e.meta.ZoeSessionID, NewestSeq: e.meta.NewestSeq, Dropped: e.meta.Dropped, AudioEvents: e.meta.AudioEvents, AudioBytes: e.meta.AudioBytes, Active: e.meta.Active, Events: []Event{}}
 	if len(e.events) > 0 {
 		out.OldestSeq = e.events[0].Seq
 	} else {
