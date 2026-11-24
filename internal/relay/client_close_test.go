@@ -61,6 +61,14 @@ func TestClientDataChannelCloseIsNormal(t *testing.T) {
 
 func TestUpstreamDataChannelCloseIsFailure(t *testing.T) {
 	g := connect(t, newRelay(t, 1))
+	if err := g.events.SendText("ready"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-g.upstream.events:
+	case <-time.After(testWait):
+		t.Fatal("upstream channel did not become ready")
+	}
 	reason := make(chan string, 1)
 	g.session.SetCloseHandler(func(s string) { reason <- s })
 	if err := g.upstreamEvents.Close(); err != nil {
