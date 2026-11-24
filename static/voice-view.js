@@ -1120,7 +1120,7 @@
       head.appendChild(typeCell);
       head.appendChild(make('span', 'vw-size', r.source || ''));
       head.appendChild(make('span', 'vw-delivery', shown.delivery));
-      if (shown.encoding) head.appendChild(make('span', 'vw-tag enc', shown.encoding));
+      head.appendChild(make('span', shown.encoding ? 'vw-tag enc' : '', shown.encoding || ''));
       head.appendChild(make('span', 'vw-seq', '#' + r.seq));
       wrap.appendChild(head);
       var body = make('div', 'vw-payload');

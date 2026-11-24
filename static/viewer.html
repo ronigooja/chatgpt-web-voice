@@ -47,7 +47,7 @@
     .vw-select:disabled { opacity: .6; }
     .vw-audio-wrap { position: relative; }
     .vw-audio-btn { color: var(--muted); }
-    .vw-pop { position: absolute; top: calc(100% + 6px); left: 0; z-index: 30; width: min(440px, 88vw); max-height: 60vh; overflow: auto; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--surface-solid); box-shadow: var(--shadow); }
+    .vw-pop { position: absolute; top: calc(100% + 6px); right: 0; z-index: 30; width: min(440px, 88vw); max-height: 60vh; overflow: auto; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--surface-solid); box-shadow: var(--shadow); }
 
     /* Notices */
     .vw-notice { display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; border: 1px solid var(--amber); border-left-width: 4px; border-radius: 10px; background: var(--amber-soft); color: var(--ink); font-size: 12.5px; }
@@ -124,6 +124,7 @@
     .vw-timeline { padding: 2px 0 8px; font-size: 12px; }
     .vw-event { border-bottom: 1px solid var(--line); }
     .vw-row { display: grid; grid-template-columns: 62px 16px minmax(0, 1fr) 64px 70px 42px; column-gap: 8px; align-items: center; min-height: 26px; padding: 3px 12px; cursor: pointer; }
+    #vwFrames .vw-row { grid-template-columns: 62px 16px minmax(0, 1fr) 64px 70px 52px 42px; }
     .vw-row:hover { background: var(--row-hover); }
     .vw-row:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--green); }
     .vw-arrow { text-align: center; font-weight: 700; }
@@ -172,6 +173,8 @@
       .vw-menu-wrap { margin-left: auto; }
       .vw-row { grid-template-columns: 58px 14px minmax(0, 1fr) 44px 42px; }
       .vw-row .vw-delivery { display: none; }
+      #vwFrames .vw-row { grid-template-columns: 58px 14px minmax(0, 1fr) 44px 52px 42px; }
+      .vw-pop { left: 0; right: auto; }
       .vw-turn, .vw-marker { grid-template-columns: 58px 62px minmax(0, 1fr); column-gap: 8px; }
       .vw-marker { grid-template-columns: 58px minmax(0, 1fr); }
     }
