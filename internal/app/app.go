@@ -24,6 +24,7 @@ import (
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/secretbox"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/store"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/voice"
+	"github.com/dyhhhhhh/chatgpt-web-voice/internal/voice/eventlog"
 )
 
 // Run loads configuration, wires dependencies, and serves until interrupted.
@@ -127,7 +128,11 @@ func Run() error {
 	if err := db.RecoverResultReceipts(); err != nil {
 		return fmt.Errorf("recover result receipts: %w", err)
 	}
-	voiceService := voice.New(cfg, accountPool, logger).WithCallSessions(callSessionStore).WithMediaEvidence(mediaEvidenceStore).WithCreationOutcomes(db).WithResultReceipts(db)
+	var events *eventlog.Store
+	if cfg.VoiceEventViewerEnabled {
+		events = eventlog.New(eventlog.Defaults())
+	}
+	voiceService := voice.New(cfg, accountPool, logger).WithEventLog(events).WithCallSessions(callSessionStore).WithMediaEvidence(mediaEvidenceStore).WithCreationOutcomes(db).WithResultReceipts(db)
 	if cfg.RelayEnabled {
 		mediaRelay, err := relay.New(relay.Config{
 			OversizeCaptureDir:          cfg.VoiceOversizeCaptureDir,

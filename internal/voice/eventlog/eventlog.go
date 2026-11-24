@@ -2,6 +2,7 @@
 package eventlog
 
 import (
+	"bytes"
 	"encoding/json"
 	"sort"
 	"sync"
@@ -40,30 +41,32 @@ type Event struct {
 }
 
 type Generation struct {
-	Generation   int64      `json:"generation"`
-	ZoeSessionID string     `json:"zoe_session_id"`
-	StartedAt    time.Time  `json:"started_at"`
-	EndedAt      *time.Time `json:"ended_at"`
-	Active       bool       `json:"active"`
-	EventCount   int        `json:"event_count"`
-	NewestSeq    uint64     `json:"newest_seq"`
-	Dropped      uint64     `json:"dropped"`
-	AudioEvents  uint64     `json:"audio_events"`
-	AudioBytes   uint64     `json:"audio_bytes"`
+	Generation    int64      `json:"generation"`
+	ZoeSessionID  string     `json:"zoe_session_id"`
+	ZoeGeneration int64      `json:"zoe_generation"`
+	StartedAt     time.Time  `json:"started_at"`
+	EndedAt       *time.Time `json:"ended_at"`
+	Active        bool       `json:"active"`
+	EventCount    int        `json:"event_count"`
+	NewestSeq     uint64     `json:"newest_seq"`
+	Dropped       uint64     `json:"dropped"`
+	AudioEvents   uint64     `json:"audio_events"`
+	AudioBytes    uint64     `json:"audio_bytes"`
 }
 
 type Snapshot struct {
-	SessionID    string  `json:"session_id"`
-	Generation   int64   `json:"generation"`
-	ZoeSessionID string  `json:"zoe_session_id"`
-	OldestSeq    uint64  `json:"oldest_seq"`
-	NewestSeq    uint64  `json:"newest_seq"`
-	Dropped      uint64  `json:"dropped"`
-	AudioEvents  uint64  `json:"audio_events"`
-	AudioBytes   uint64  `json:"audio_bytes"`
-	Gap          bool    `json:"gap"`
-	Active       bool    `json:"active"`
-	Events       []Event `json:"events"`
+	SessionID     string  `json:"session_id"`
+	Generation    int64   `json:"generation"`
+	ZoeSessionID  string  `json:"zoe_session_id"`
+	ZoeGeneration int64   `json:"zoe_generation"`
+	OldestSeq     uint64  `json:"oldest_seq"`
+	NewestSeq     uint64  `json:"newest_seq"`
+	Dropped       uint64  `json:"dropped"`
+	AudioEvents   uint64  `json:"audio_events"`
+	AudioBytes    uint64  `json:"audio_bytes"`
+	Gap           bool    `json:"gap"`
+	Active        bool    `json:"active"`
+	Events        []Event `json:"events"`
 }
 
 type entry struct {
@@ -103,22 +106,33 @@ func New(c Config) *Store {
 	return &Store{cfg: c, entries: make(map[Key]*entry)}
 }
 
-func (s *Store) Start(k Key, zoeID string) {
+func (s *Store) Start(k Key, zoeID string, zoeGeneration ...int64) {
+	if s == nil {
+		return
+	}
+	var zg int64
+	if len(zoeGeneration) > 0 {
+		zg = zoeGeneration[0]
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.expire(time.Now())
 	if e := s.entries[k]; e != nil {
 		if zoeID != "" {
 			e.meta.ZoeSessionID = zoeID
+			e.meta.ZoeGeneration = zg
 		}
 		return
 	}
-	s.entries[k] = &entry{meta: Generation{Generation: k.Generation, ZoeSessionID: zoeID, StartedAt: time.Now().UTC(), Active: true}, subs: make(map[chan struct{}]struct{})}
+	s.entries[k] = &entry{meta: Generation{Generation: k.Generation, ZoeSessionID: zoeID, ZoeGeneration: zg, StartedAt: time.Now().UTC(), Active: true}, subs: make(map[chan struct{}]struct{})}
 	s.bytes += generationOverhead
 	s.enforceGlobal()
 }
 
 func (s *Store) End(k Key) {
+	if s == nil {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if e := s.entries[k]; e != nil && e.meta.Active {
@@ -131,11 +145,31 @@ func (s *Store) End(k Key) {
 
 // Append never waits for subscribers. Payload bytes are copied into the store.
 func (s *Store) Append(k Key, direction, source, delivery string, payload []byte, binary bool) {
+	if s == nil {
+		return
+	}
+	// Do not retain oversized JSON: its type may appear after the cap, so it
+	// cannot safely be distinguished from audio using bounded work.
+	if !binary && len(payload) > s.cfg.EventBytes && bytes.HasPrefix(bytes.TrimLeft(payload[:s.cfg.EventBytes], " \t\r\n"), []byte("{")) {
+		prefix := payload[:s.cfg.EventBytes]
+		s.mu.Lock()
+		if e := s.entries[k]; e != nil && e.meta.Active {
+			if bytes.Contains(prefix, []byte("session.input_audio.append")) || bytes.Contains(prefix, []byte("session.output_audio.delta")) {
+				e.meta.AudioEvents++
+				e.meta.AudioBytes += uint64(len(payload))
+			} else {
+				e.meta.Dropped++
+			}
+			notify(e)
+		}
+		s.mu.Unlock()
+		return
+	}
 	typ := "text"
 	audio := false
 	if binary {
 		typ = "binary"
-	} else {
+	} else if len(payload) <= s.cfg.EventBytes {
 		var v struct {
 			Type string          `json:"type"`
 			Data json.RawMessage `json:"data"`
@@ -289,7 +323,7 @@ func (s *Store) snapshot(k Key, after uint64, limit int) (Snapshot, bool) {
 	if e == nil {
 		return Snapshot{}, false
 	}
-	out := Snapshot{SessionID: k.SessionID, Generation: k.Generation, ZoeSessionID: e.meta.ZoeSessionID, NewestSeq: e.meta.NewestSeq, Dropped: e.meta.Dropped, AudioEvents: e.meta.AudioEvents, AudioBytes: e.meta.AudioBytes, Active: e.meta.Active, Events: []Event{}}
+	out := Snapshot{SessionID: k.SessionID, Generation: k.Generation, ZoeSessionID: e.meta.ZoeSessionID, ZoeGeneration: e.meta.ZoeGeneration, NewestSeq: e.meta.NewestSeq, Dropped: e.meta.Dropped, AudioEvents: e.meta.AudioEvents, AudioBytes: e.meta.AudioBytes, Active: e.meta.Active, Events: []Event{}}
 	if len(e.events) > 0 {
 		out.OldestSeq = e.events[0].Seq
 	} else {

@@ -112,7 +112,13 @@ func (s *pionSession) SendResultText(text string) (bool, error) {
 	default:
 		return false, errSwapNotReady
 	}
-	return true, l.channel.SendText(payload)
+	err = l.channel.SendText(payload)
+	delivery := "sent"
+	if err != nil {
+		delivery = "unknown"
+	}
+	s.capture("gateway_to_upstream", "result_datachannel", delivery, []byte(payload), false)
+	return true, err
 }
 
 func (s *pionSession) SendPendingText(text string) error {
@@ -129,7 +135,13 @@ func (s *pionSession) SendPendingText(text string) error {
 	if err != nil {
 		return err
 	}
-	return l.channel.SendText(payload)
+	err = l.channel.SendText(payload)
+	delivery := "sent"
+	if err != nil {
+		delivery = "unknown"
+	}
+	s.capture("gateway_to_upstream", "pending_datachannel", delivery, []byte(payload), false)
+	return err
 }
 
 // userTextEvent builds the same envelope the web client sends for typed text:
