@@ -425,16 +425,21 @@
   }
 
   // One compact timeline row. Only display fields; the payload is never parsed here.
+  // Creation rows show "creation" plus an Instructions tag; rawType keeps the wire type visible.
   function compactEventRow(ev) {
     var e = ev || {};
     var direction = String(e.direction || '');
+    var rawType = String(e.type || '(no type)');
+    var creation = direction === 'gateway_creation';
     return {
       seq: toEventSeq(e.seq),
       time: formatClock(e.at),
       arrow: lookup(DIRECTION_ARROWS, direction, '?'),
       direction: direction,
       dirLabel: lookup(DIRECTION_LABELS, direction, direction || 'unknown'),
-      type: String(e.type || '(no type)'),
+      type: creation ? 'creation' : rawType,
+      rawType: rawType,
+      tag: creation ? 'Instructions' : '',
       size: formatBytes(e.size),
       delivery: String(e.delivery || 'unknown'),
       group: String(e.group || 'other'),
@@ -1048,13 +1053,15 @@
       head.setAttribute('role', 'button');
       head.tabIndex = 0;
       head.setAttribute('aria-expanded', 'false');
-      head.title = r.group + ' · ' + r.dirLabel;
+      head.title = r.group + ' · ' + r.dirLabel + (r.tag ? ' · type ' + r.rawType : '');
       head.appendChild(make('span', 'vw-time', r.time));
       var arrow = make('span', 'vw-arrow dir-' + safeClass(r.direction), r.arrow);
       arrow.title = r.dirLabel;
       arrow.setAttribute('aria-label', r.dirLabel);
       head.appendChild(arrow);
-      head.appendChild(make('span', 'vw-type', r.type));
+      var typeCell = make('span', 'vw-type', r.type);
+      if (r.tag) typeCell.appendChild(make('span', 'vw-tag', r.tag));
+      head.appendChild(typeCell);
       head.appendChild(make('span', 'vw-size', r.size));
       head.appendChild(make('span', 'vw-delivery', r.delivery));
       head.appendChild(make('span', 'vw-seq', '#' + r.seq));
@@ -1065,8 +1072,8 @@
       var filled = false;
       var fill = function () {
         filled = true;
-        body.appendChild(make('div', 'vw-payload-meta', [groupLabel(ev.group), ev.at, ev.source, 'delivery ' + ev.delivery].filter(Boolean).join(' · ')));
-        body.appendChild(make('pre', 'vw-pre', prettyPayload(ev.payload)));
+        body.appendChild(make('div', 'vw-payload-meta', [groupLabel(ev.group), r.tag ? 'type ' + r.rawType : '', ev.at, ev.source, 'delivery ' + ev.delivery].filter(Boolean).join(' · ')));
+        body.appendChild(make('pre', 'vw-pre vw-event-pre', prettyPayload(ev.payload)));
         if (ev.truncated) body.appendChild(make('div', 'vw-payload-meta warn', '[payload truncated by gateway]'));
       };
       var setOpen = function (open) {
