@@ -381,6 +381,261 @@
     return api;
   }
 
+  var DIRECTION_ARROWS = {
+    upstream_to_client: '←',
+    client_to_upstream: '→',
+    gateway_to_upstream: '⇒',
+    gateway_creation: '•'
+  };
+  var RING_NAMES = ['all', 'conversation', 'audio', 'oversize'];
+
+  function lookup(map, key, fallback) {
+    return Object.prototype.hasOwnProperty.call(map, key) ? map[key] : fallback;
+  }
+
+  function pad2(n) { return n < 10 ? '0' + n : String(n); }
+
+  // Local HH:MM:SS, or '' when the timestamp is missing or invalid.
+  function formatClock(value) {
+    if (!value) return '';
+    var d = new Date(value);
+    if (isNaN(d.getTime())) return '';
+    return pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+  }
+
+  function formatBytes(n) {
+    var b = toInt(n);
+    if (b < 1024) return b + ' B';
+    if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+    return (b / 1048576).toFixed(1) + ' MB';
+  }
+
+  // Keeps the start and end of a long id so it stays recognisable on one line.
+  function middleEllipsis(text, max) {
+    var s = String(text || '');
+    var limit = toInt(max) > 8 ? toInt(max) : 24;
+    if (s.length <= limit) return s;
+    var head = Math.ceil((limit - 1) / 2);
+    var tail = limit - 1 - head;
+    return s.slice(0, head) + '…' + s.slice(s.length - tail);
+  }
+
+  // One compact timeline row. Only display fields; the payload is never parsed here.
+  function compactEventRow(ev) {
+    var e = ev || {};
+    var direction = String(e.direction || '');
+    return {
+      seq: toEventSeq(e.seq),
+      time: formatClock(e.at),
+      arrow: lookup(DIRECTION_ARROWS, direction, '?'),
+      direction: direction,
+      dirLabel: lookup(DIRECTION_LABELS, direction, direction || 'unknown'),
+      type: String(e.type || '(no type)'),
+      size: formatBytes(e.size),
+      delivery: String(e.delivery || 'unknown'),
+      group: String(e.group || 'other'),
+      delegation: e.group === 'delegation',
+      truncated: e.truncated === true
+    };
+  }
+
+  // One transcript line per turn. Pending turns are still streaming.
+  function transcriptLine(item, at) {
+    var role = item && item.role === 'assistant' ? 'assistant' : 'user';
+    return {
+      time: formatClock(at),
+      role: role,
+      roleLabel: role === 'assistant' ? 'Assistant' : 'User',
+      text: String((item && item.text) || ''),
+      pending: !(item && item.final)
+    };
+  }
+
+  // The single definition of delegation counts. Every delegation count in the UI comes from here:
+  // "created" is the number of delegation.created events; "writes" are the other group members
+  // (delegation.context.append, and session.context.append* that carry delegation_item_id).
+  function delegationCounts(list, q) {
+    var out = { total: 0, created: 0, writes: 0 };
+    (Array.isArray(list) ? list : []).forEach(function (ev) {
+      if (!ev || ev.group !== 'delegation' || !searchMatches(ev, q)) return;
+      out.total++;
+      if (ev.type === 'delegation.created') out.created++; else out.writes++;
+    });
+    return out;
+  }
+
+  function delegationTooltip(c) {
+    return c.total + ' event' + (c.total === 1 ? '' : 's') + ': ' + c.created + ' created, ' +
+      c.writes + ' context write' + (c.writes === 1 ? '' : 's');
+  }
+
+  function filterIsActive(filter) {
+    var f = filter || {};
+    var groups = Array.isArray(f.groups) ? f.groups : GROUP_IDS;
+    var allGroups = GROUP_IDS.every(function (id) { return groups.indexOf(id) >= 0; });
+    return !allGroups || !!f.type || !!String(f.q || '').trim();
+  }
+
+  function clearedFilter() {
+    return { groups: GROUP_IDS.slice(), type: '', q: '' };
+  }
+
+  function filterSummary(shown, total, filter) {
+    if (!filterIsActive(filter)) return '';
+    return 'Filtered: ' + shown + ' of ' + total + ' event' + (total === 1 ? '' : 's');
+  }
+
+  // Creation facts. Structured payloads get counts; anything else is shown as raw text.
+  function creationDetails(c) {
+    if (!c) return null;
+    var obj = c.parsed && typeof c.parsed === 'object' && !Array.isArray(c.parsed) ? c.parsed : null;
+    var out = {
+      parsed: !!obj,
+      hasInstructions: false,
+      instructionChars: 0,
+      hasItems: false,
+      items: 0,
+      itemChars: 0,
+      rawChars: String(c.text || '').length,
+      truncated: c.truncated === true,
+      body: ''
+    };
+    var lines = [];
+    if (obj && obj.instructions !== undefined) {
+      var text = typeof obj.instructions === 'string' ? obj.instructions : JSON.stringify(obj.instructions, null, 2);
+      out.hasInstructions = true;
+      out.instructionChars = text.length;
+      lines.push('instructions:\n' + text);
+    }
+    if (obj && obj.initial_items !== undefined) {
+      var itemsText = JSON.stringify(obj.initial_items, null, 2);
+      out.hasItems = true;
+      out.items = Array.isArray(obj.initial_items) ? obj.initial_items.length : 0;
+      out.itemChars = itemsText.length;
+      lines.push('initial_items:\n' + itemsText);
+    }
+    if (!lines.length) lines.push(prettyPayload(c.text));
+    out.body = lines.join('\n\n');
+    if (out.truncated) out.body += '\n\n[payload truncated by gateway]';
+    return out;
+  }
+
+  function creationSummary(d) {
+    if (!d) return '';
+    if (!d.parsed) return 'Creation · ' + d.rawChars + ' chars (unstructured)';
+    var parts = [];
+    if (d.hasInstructions) parts.push('instructions ' + d.instructionChars + ' chars');
+    if (d.hasItems) parts.push(d.items + ' initial item' + (d.items === 1 ? '' : 's') + ' · ' + d.itemChars + ' chars');
+    return 'Creation · ' + (parts.join(' · ') || 'no instructions or items');
+  }
+
+  // Warnings for an incomplete, truncated or capped log. Empty when the log is complete.
+  function storeWarnings(store, capped) {
+    var lines = [];
+    if (!store) return lines;
+    if (store.incomplete()) {
+      var gaps = store.gaps();
+      lines.push('Incomplete log: this view is NOT a complete record.');
+      if (store.dropped() > 0) lines.push(store.dropped() + ' event(s) were dropped by the gateway.');
+      gaps.reported.forEach(function (g) { lines.push('Gap reported for seq ' + g.from + '–' + g.to + '.'); });
+      if (gaps.missing.length) {
+        var sample = gaps.missing.slice(0, 3).map(function (g) { return g.from + '–' + g.to; }).join(', ');
+        lines.push(gaps.missing.length + ' missing seq range(s) between loaded events: ' + sample + (gaps.missing.length > 3 ? ', …' : '') + '.');
+      }
+    }
+    var truncated = store.truncatedUpstream();
+    if (truncated > 0) lines.push(truncated + ' upstream event(s) were truncated; their captions may be missing.');
+    if (capped) lines.push('Loading stopped early; events beyond the loaded range are not shown.');
+    return lines;
+  }
+
+  function framesUrl(sessionId, gen, ring) {
+    var r = RING_NAMES.indexOf(ring) >= 0 ? ring : 'all';
+    return '/api/call-sessions/' + enc(sessionId) + '/generations/' + enc(gen) + '/frames?ring=' + enc(r);
+  }
+
+  function ringStats(data) {
+    var rings = data && data.rings && typeof data.rings === 'object' ? data.rings : {};
+    return Object.keys(rings).sort().map(function (name) {
+      var r = rings[name] && typeof rings[name] === 'object' ? rings[name] : {};
+      return { name: name, frames: toInt(r.size_frames), bytes: toInt(r.size_bytes), dropped: toInt(r.dropped) };
+    });
+  }
+
+  function frameRow(f) {
+    var o = f && typeof f === 'object' ? f : {};
+    var encoding = String(o.encoding || '');
+    var direction = String(o.direction || '');
+    return {
+      seq: toInt(o.seq),
+      time: formatClock(o.at),
+      arrow: lookup(DIRECTION_ARROWS, direction, '?'),
+      direction: direction,
+      source: String(o.source || ''),
+      ring: String(o.ring || ''),
+      oversize: o.oversize === true,
+      length: toInt(o.length),
+      delivery: String(o.delivery || 'unknown'),
+      truncated: o.truncated === true,
+      encoding: encoding,
+      base64: encoding.toLowerCase() === 'base64'
+    };
+  }
+
+  // Base64 payloads are returned exactly as received; they are never decoded here.
+  function framePayloadText(row, payload) {
+    if (row.base64) return String(payload === null || payload === undefined ? '' : payload);
+    return prettyPayload(payload);
+  }
+
+  function frameNote(row) {
+    var parts = ['length ' + row.length];
+    if (row.base64) parts.push('base64, shown as received, not decoded');
+    if (row.truncated) parts.push('truncated by gateway');
+    return parts.join(' · ');
+  }
+
+  // Audio facts from a generation summary. Returns null when the generation has no audio fields at all.
+  function audioFacts(item) {
+    if (!item || typeof item !== 'object') return null;
+    var keys = ['audio_events', 'audio_bytes', 'audio', 'audio_samples'];
+    if (!keys.some(function (k) { return k in item; })) return null;
+    var facts = Array.isArray(item.audio) ? item.audio : [];
+    var samples = Array.isArray(item.audio_samples) ? item.audio_samples : [];
+    return {
+      events: toInt(item.audio_events),
+      bytes: toInt(item.audio_bytes),
+      facts: facts.filter(function (f) { return f && typeof f === 'object'; }).map(function (f) {
+        return {
+          direction: String(f.direction || ''),
+          source: String(f.source || ''),
+          type: String(f.type || ''),
+          events: toInt(f.events),
+          bytes: toInt(f.bytes),
+          maxBytes: toInt(f.max_bytes)
+        };
+      }),
+      samples: samples.filter(function (s) { return s && typeof s === 'object'; }).map(function (s) {
+        return {
+          direction: String(s.direction || ''),
+          type: String(s.type || ''),
+          byteLength: toInt(s.byte_length),
+          paths: Array.isArray(s.paths) ? s.paths.map(function (p) { return String(p); }) : []
+        };
+      })
+    };
+  }
+
+  function audioFactLine(f) {
+    var head = [f.direction, f.source, f.type].filter(Boolean).join(' · ');
+    return head + ': ' + f.events + ' event' + (f.events === 1 ? '' : 's') + ', ' + formatBytes(f.bytes) +
+      (f.maxBytes ? ' (max ' + formatBytes(f.maxBytes) + ')' : '');
+  }
+
+  function audioSampleLine(s) {
+    return [s.direction, s.type].filter(Boolean).join(' · ') + ' · ' + formatBytes(s.byteLength);
+  }
+
   function requested() {
     return typeof window !== 'undefined' && window.location.pathname === '/viewer';
   }
@@ -1024,6 +1279,27 @@
     presetOf: presetOf,
     filterParams: filterParams,
     filterFromParams: filterFromParams,
-    delegationRows: delegationRows
+    delegationRows: delegationRows,
+    formatClock: formatClock,
+    formatBytes: formatBytes,
+    middleEllipsis: middleEllipsis,
+    compactEventRow: compactEventRow,
+    transcriptLine: transcriptLine,
+    delegationCounts: delegationCounts,
+    delegationTooltip: delegationTooltip,
+    filterIsActive: filterIsActive,
+    clearedFilter: clearedFilter,
+    filterSummary: filterSummary,
+    creationDetails: creationDetails,
+    creationSummary: creationSummary,
+    storeWarnings: storeWarnings,
+    framesUrl: framesUrl,
+    ringStats: ringStats,
+    frameRow: frameRow,
+    framePayloadText: framePayloadText,
+    frameNote: frameNote,
+    audioFacts: audioFacts,
+    audioFactLine: audioFactLine,
+    audioSampleLine: audioSampleLine
   };
 }));
