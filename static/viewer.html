@@ -65,6 +65,10 @@
     .vw-creation-title { font-weight: 700; color: var(--ink); }
     .vw-creation-body { padding: 0 12px 10px; }
     .vw-creation-tools { display: flex; justify-content: flex-end; margin-bottom: 6px; }
+    .vw-group-h { padding: 6px 12px 3px; color: var(--dim); font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+    .vw-tag.enc { border-color: var(--line-strong); color: var(--muted); font-family: var(--font-mono); font-size: 10px; }
+    .vw-notice.compact { flex-direction: row; align-items: center; padding: 4px 10px; font-size: 12px; border-left-width: 3px; }
+    .vw-creation-body .vw-pre { max-height: min(30vh, 260px); }
     .vw-pre { margin: 0; padding: 8px 10px; max-height: 200px; overflow: auto; border-radius: 8px; background: var(--surface-2); color: var(--ink); font-family: var(--font-mono); font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
 
     /* Toolbar */
@@ -259,7 +263,7 @@
           <button type="button" id="vwFramesRefresh" class="vw-btn">Refresh</button>
         </div>
         <details id="vwFramesAudio" class="vw-audio-block" hidden>
-          <summary>Audio</summary>
+          <summary>Audio facts</summary>
           <div id="vwFramesAudioBody" class="vw-audio-body"></div>
         </details>
         <div id="vwFramesScroll" class="vw-scroll"><div id="vwFrames" class="vw-timeline"></div></div>

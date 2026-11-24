@@ -88,7 +88,7 @@
       var hit = list.filter(function (g) { return toSeq(g.generation) === requested; })[0];
       return hit ? { gen: requested, item: hit } : { error: 'Generation ' + requested + ' was not found for this session.' };
     }
-    var active = list.filter(function (g) { return g.active === true; });
+    var active = list.filter(summaryIsActive);
     var pool = active.length ? active : list;
     var pick = pool.reduce(function (best, g) { return toSeq(g.generation) > toSeq(best.generation) ? g : best; });
     return { gen: toSeq(pick.generation), item: pick };
@@ -340,6 +340,10 @@
         return { reported: reported.slice(), missing: missing };
       },
       dropped: function () { return serverDropped; },
+      hasGap: function () {
+        var g = api.gaps();
+        return serverGap || g.reported.length > 0 || g.missing.length > 0;
+      },
       incomplete: function () {
         var g = api.gaps();
         return serverGap || serverDropped > 0 || g.reported.length > 0 || g.missing.length > 0;
@@ -636,6 +640,57 @@
     return [s.direction, s.type].filter(Boolean).join(' · ') + ' · ' + formatBytes(s.byteLength);
   }
 
+  // A generation counts as active only while its summary says so and it has no ended_at.
+  function summaryIsActive(g) {
+    return !!g && g.active === true && !g.ended_at;
+  }
+
+  // Picker state. The open generation follows the same live flag as the status pill.
+  function generationStateLabel(g, isOpen, liveNow) {
+    var active = isOpen ? liveNow === true : summaryIsActive(g);
+    return active ? 'active' : 'ended';
+  }
+
+  var RING_ORDER = ['conversation', 'audio', 'oversize'];
+
+  // Frames grouped by ring in a fixed display order; unknown rings follow, sorted by name.
+  function frameGroups(frames) {
+    var byRing = {};
+    (Array.isArray(frames) ? frames : []).forEach(function (f) {
+      var name = frameRow(f).ring || 'unknown';
+      if (!byRing[name]) byRing[name] = [];
+      byRing[name].push(f);
+    });
+    var names = Object.keys(byRing).sort(function (a, b) {
+      var ia = RING_ORDER.indexOf(a);
+      var ib = RING_ORDER.indexOf(b);
+      if (ia >= 0 && ib >= 0) return ia - ib;
+      if (ia >= 0) return -1;
+      if (ib >= 0) return 1;
+      return a < b ? -1 : (a > b ? 1 : 0);
+    });
+    return names.map(function (name) { return { ring: name, frames: byRing[name] }; });
+  }
+
+  // Delivery and encoding are separate facts. Encoding is shown as a tag, never in the delivery column.
+  function frameDisplay(row) {
+    return { delivery: row.delivery || 'unknown', encoding: row.encoding || '', base64: row.base64 === true };
+  }
+
+  // Full banner only for a real gap or an error. Dropped events alone get one compact line.
+  function noticeFor(store, capped, error) {
+    if (error) return { kind: 'error', full: true, lines: [error].concat(storeWarnings(store, capped)) };
+    if (store && store.hasGap()) return { kind: 'warn', full: true, lines: storeWarnings(store, capped) };
+    var parts = [];
+    var dropped = store ? store.dropped() : 0;
+    var truncated = store ? store.truncatedUpstream() : 0;
+    if (dropped > 0) parts.push('Incomplete log: ' + dropped + ' event(s) dropped by the gateway');
+    if (truncated > 0) parts.push(truncated + ' upstream event(s) truncated');
+    if (capped) parts.push('loading stopped early');
+    if (!parts.length) return { kind: 'none', full: false, lines: [] };
+    return { kind: 'warn', full: false, lines: [parts.join(' · ') + '.'] };
+  }
+
   function requested() {
     return typeof window !== 'undefined' && window.location.pathname === '/viewer';
   }
@@ -793,19 +848,22 @@
       el.dropped.className = 'vw-stat' + (dropped > 0 ? ' warn' : '');
       var lastAt = last ? formatClock(last.at) : '';
       el.lastEvent.textContent = 'Last event ' + (lastAt || '—');
-      el.gapPill.hidden = !(view.store && view.store.incomplete());
+      el.gapPill.hidden = !(view.store && view.store.hasGap());
     }
 
     function renderNotice() {
-      var lines = [];
-      if (view.error) lines.push(view.error);
-      lines = lines.concat(storeWarnings(view.store, view.capped));
+      var n = noticeFor(view.store, view.capped, view.error);
       el.notice.textContent = '';
-      el.notice.hidden = !lines.length;
-      if (!lines.length) return;
-      el.notice.setAttribute('data-kind', view.error ? 'error' : 'warn');
-      el.notice.appendChild(make('div', 'vw-notice-title', lines[0]));
-      lines.slice(1).forEach(function (line) { el.notice.appendChild(make('div', 'vw-notice-line', line)); });
+      el.notice.hidden = n.kind === 'none';
+      el.notice.className = 'vw-notice' + (n.full ? '' : ' compact');
+      el.notice.setAttribute('data-kind', n.kind === 'error' ? 'error' : 'warn');
+      if (!n.lines.length) return;
+      if (n.full) {
+        el.notice.appendChild(make('div', 'vw-notice-title', n.lines[0]));
+        n.lines.slice(1).forEach(function (line) { el.notice.appendChild(make('div', 'vw-notice-line', line)); });
+      } else {
+        el.notice.appendChild(make('div', 'vw-notice-line', n.lines[0]));
+      }
     }
 
     function renderCreation() {
@@ -1057,9 +1115,12 @@
       var arrow = make('span', 'vw-arrow dir-' + safeClass(r.direction), r.arrow);
       arrow.title = r.direction;
       head.appendChild(arrow);
-      head.appendChild(make('span', 'vw-type', r.ring + (r.oversize ? ' · oversize' : '')));
-      head.appendChild(make('span', 'vw-size', formatBytes(r.length)));
-      head.appendChild(make('span', 'vw-delivery', r.base64 ? 'base64' : r.delivery));
+      var shown = frameDisplay(r);
+      var typeCell = make('span', 'vw-type', (r.oversize ? 'oversize · ' : '') + formatBytes(r.length));
+      head.appendChild(typeCell);
+      head.appendChild(make('span', 'vw-size', r.source || ''));
+      head.appendChild(make('span', 'vw-delivery', shown.delivery));
+      if (shown.encoding) head.appendChild(make('span', 'vw-tag enc', shown.encoding));
       head.appendChild(make('span', 'vw-seq', '#' + r.seq));
       wrap.appendChild(head);
       var body = make('div', 'vw-payload');
@@ -1098,7 +1159,11 @@
       if (!f.data) return;
       var list = Array.isArray(f.data.frames) ? f.data.frames : [];
       if (!list.length) el.frames.appendChild(emptyRow('No frames in this ring.'));
-      list.slice(-MAX_EVENT_ROWS).forEach(function (raw) { el.frames.appendChild(frameEntry(raw)); });
+      frameGroups(list.slice(-MAX_EVENT_ROWS)).forEach(function (group) {
+        var heading = make('div', 'vw-group-h', group.ring.charAt(0).toUpperCase() + group.ring.slice(1) + ' · ' + plural(group.frames.length, 'frame'));
+        el.frames.appendChild(heading);
+        group.frames.forEach(function (raw) { el.frames.appendChild(frameEntry(raw)); });
+      });
     }
 
     async function loadFrames() {
@@ -1126,7 +1191,9 @@
     function renderGenSelect() {
       el.genSelect.textContent = '';
       view.gens.forEach(function (g) {
-        var opt = make('option', '', 'Gen ' + g.generation + (g.active ? ' · active' : ' · ended') + ' · ' + plural(toInt(g.event_count), 'event'));
+        var isOpen = Number(g.generation) === view.gen;
+        var state = generationStateLabel(g, isOpen, view.active);
+        var opt = make('option', '', 'Gen ' + g.generation + ' · ' + state + ' · ' + plural(toInt(g.event_count), 'event'));
         opt.value = String(g.generation);
         if (Number(g.generation) === view.gen) opt.selected = true;
         el.genSelect.appendChild(opt);
@@ -1477,6 +1544,11 @@
     filterParams: filterParams,
     filterFromParams: filterFromParams,
     delegationRows: delegationRows,
+    summaryIsActive: summaryIsActive,
+    generationStateLabel: generationStateLabel,
+    frameGroups: frameGroups,
+    frameDisplay: frameDisplay,
+    noticeFor: noticeFor,
     formatClock: formatClock,
     formatBytes: formatBytes,
     middleEllipsis: middleEllipsis,

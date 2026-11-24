@@ -222,6 +222,80 @@ test('audio facts are absent for old generations and readable for new ones', () 
   assert.equal(V.audioSampleLine(facts.samples[0]), 'upstream_to_client · output_audio.delta · 1.0 KB');
 });
 
+test('a generation with ended_at is never active, even when the summary says active', () => {
+  assert.equal(V.summaryIsActive({ active: true, ended_at: '' }), true);
+  assert.equal(V.summaryIsActive({ active: true, ended_at: '2026-11-18T10:00:30Z' }), false);
+  assert.equal(V.summaryIsActive({ active: false, ended_at: '' }), false);
+  assert.equal(V.summaryIsActive(null), false);
+});
+
+test('picker state follows the live flag for the open generation and the summary for the others', () => {
+  const open = { generation: 2, active: true, ended_at: '' };
+  assert.equal(V.generationStateLabel(open, true, true), 'active');
+  assert.equal(V.generationStateLabel(open, true, false), 'ended');
+  assert.equal(V.generationStateLabel({ generation: 1, active: true, ended_at: '' }, false, false), 'active');
+  assert.equal(V.generationStateLabel({ generation: 1, active: false, ended_at: '2026-11-18T10:00:10Z' }, false, true), 'ended');
+});
+
+test('frames are grouped by ring in a fixed order with unknown rings last', () => {
+  const groups = V.frameGroups([
+    { seq: 1, ring: 'audio' },
+    { seq: 2, ring: 'conversation' },
+    { seq: 3, ring: 'zeta' },
+    { seq: 4, ring: 'audio' },
+    { seq: 5, ring: 'oversize' }
+  ]);
+  assert.deepEqual(groups.map(g => g.ring), ['conversation', 'audio', 'oversize', 'zeta']);
+  assert.deepEqual(groups[1].frames.map(f => f.seq), [1, 4]);
+  assert.deepEqual(V.frameGroups(undefined), []);
+});
+
+test('frame delivery and encoding are separate: base64 is an encoding tag, not a delivery value', () => {
+  const row = V.frameRow({ seq: 1, ring: 'audio', delivery: 'sent', encoding: 'base64', length: 4096 });
+  assert.deepEqual(V.frameDisplay(row), { delivery: 'sent', encoding: 'base64', base64: true });
+  const text = V.frameRow({ seq: 2, ring: 'conversation', delivery: 'observed', encoding: 'utf8' });
+  assert.deepEqual(V.frameDisplay(text), { delivery: 'observed', encoding: 'utf8', base64: false });
+  assert.equal(V.frameDisplay(V.frameRow({ seq: 3 })).delivery, 'unknown');
+});
+
+test('dropped events without a gap get one compact line; a real gap gets the full banner', () => {
+  const dropOnly = V.createStore();
+  dropOnly.add([ev(1), ev(2), ev(3)]);
+  dropOnly.setServerFlags(false, 2);
+  const compact = V.noticeFor(dropOnly, false, '');
+  assert.equal(compact.full, false);
+  assert.equal(compact.lines.length, 1);
+  assert.equal(compact.lines[0], 'Incomplete log: 2 event(s) dropped by the gateway.');
+  assert.equal(dropOnly.hasGap(), false);
+
+  const gap = V.createStore();
+  gap.add([ev(1), ev(2), ev(5)]);
+  gap.setServerFlags(false, 2);
+  const full = V.noticeFor(gap, false, '');
+  assert.equal(full.full, true);
+  assert.equal(full.kind, 'warn');
+  assert.equal(gap.hasGap(), true);
+  assert.equal(full.lines[0], 'Incomplete log: this view is NOT a complete record.');
+});
+
+test('a clean log shows no notice and an error is always the full banner', () => {
+  const clean = V.createStore();
+  clean.add([ev(1), ev(2)]);
+  assert.equal(V.noticeFor(clean, false, '').kind, 'none');
+  const err = V.noticeFor(clean, false, 'Session not found.');
+  assert.equal(err.kind, 'error');
+  assert.equal(err.full, true);
+  assert.equal(err.lines[0], 'Session not found.');
+});
+
+test('the real backend numbers events from seq 1; seq 0 is accepted but not required', () => {
+  const s = V.createStore();
+  s.add([ev(1), ev(2), ev(3)]);
+  assert.equal(s.gaps().missing.length, 0);
+  assert.equal(s.incomplete(), false);
+  assert.equal(s.maxSeq(), 3);
+});
+
 test('audio facts tolerate partial shapes', () => {
   const facts = V.audioFacts({ audio_events: 'x', audio: 'not a list' });
   assert.equal(facts.events, 0);
