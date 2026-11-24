@@ -32,6 +32,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/dyhhhhhh/chatgpt-web-voice/internal/voice/eventlog"
 	"io"
 	"log/slog"
 	"net"
@@ -160,6 +161,24 @@ type pionSession struct {
 	observerMu   sync.RWMutex
 	observer     func([]byte)
 	shapeSampler *eventShapeSampler
+	captureMu    sync.RWMutex
+	captureStore *eventlog.Store
+	captureKey   eventlog.Key
+}
+
+// SetEventLog binds the relay to its durable media identity.
+func (s *pionSession) SetEventLog(store *eventlog.Store, key eventlog.Key) {
+	s.captureMu.Lock()
+	s.captureStore, s.captureKey = store, key
+	s.captureMu.Unlock()
+}
+
+func (s *pionSession) capture(direction, source, delivery string, data []byte, binary bool) {
+	s.captureMu.RLock()
+	defer s.captureMu.RUnlock()
+	if s.captureStore != nil {
+		s.captureStore.Append(s.captureKey, direction, source, delivery, data, binary)
+	}
 }
 
 // SetEventObserver implements Session.
@@ -193,6 +212,11 @@ func (s *pionSession) InjectSidebandEvent(data []byte) error {
 		s.shapeSampler.observe(data, "sideband", "b-to-a")
 	}
 	err := s.bridge.sendDownstream(data, "avas_sideband")
+	delivery := "queued"
+	if err != nil {
+		delivery = "rejected"
+	}
+	s.capture("upstream_to_client", "avas_sideband", delivery, data, false)
 	// Observe even when downstream delivery fails, but return that delivery error.
 	s.observeEvent(data)
 	return err
@@ -202,7 +226,13 @@ func (s *pionSession) SendUpstreamEvent(data []byte) error {
 	if s == nil || s.bridge == nil {
 		return errors.New("relay event bridge unavailable")
 	}
-	return s.bridge.sendUpstream(data)
+	err := s.bridge.sendUpstream(data)
+	delivery := "queued"
+	if err != nil {
+		delivery = "rejected"
+	}
+	s.capture("gateway_to_upstream", "datachannel", delivery, data, false)
+	return err
 }
 
 func (s *pionSession) observeEvent(data []byte) {
@@ -250,6 +280,7 @@ type dataChannelBridge struct {
 	observeMu    sync.RWMutex
 	observe      func([]byte)
 	shapeObserve func([]byte, string, string)
+	capture      func(string, string, string, []byte, bool)
 }
 
 func (b *dataChannelBridge) sendDownstream(data []byte, source string) error {
@@ -405,6 +436,7 @@ func (r *PionRelay) NewSession(ctx context.Context, clientOffer string, route Ro
 	}, session.markActiveChannelOpen)
 	session.bridge.upToDown.capture = &oversizeCapture{dir: r.oversizeCaptureDir, mediaID: id, logger: session.logger}
 	session.bridge.setObserver(session.observeEvent)
+	session.bridge.capture = session.capture
 	if session.shapeSampler != nil {
 		session.bridge.setShapeObserver(session.shapeSampler.observe)
 	}
@@ -721,6 +753,11 @@ func (s *pionSession) CloseWithReason(reason string) error {
 		first = true
 		s.logger.Info("relay session closing", "reason", reason)
 		close(s.done)
+		s.captureMu.RLock()
+		if s.captureStore != nil {
+			s.captureStore.End(s.captureKey)
+		}
+		s.captureMu.RUnlock()
 
 		s.legMu.Lock()
 		active, pending := s.active, s.pending
@@ -1098,6 +1135,9 @@ func (b *dataChannelBridge) bindUpstreamSource(channel *webrtc.DataChannel) {
 			return
 		}
 		payload := append([]byte(nil), message.Data...)
+		if b.capture != nil {
+			b.capture("upstream_to_client", "datachannel", "queued", payload, !message.IsString)
+		}
 		if message.IsString {
 			b.observeMu.RLock()
 			observe := b.observe
@@ -1166,7 +1206,13 @@ func (b *dataChannelBridge) bindSource(channel *webrtc.DataChannel, destination 
 		}
 		select {
 		case destination.queue <- dataChannelMessage{data: payload, isString: message.IsString, source: "client_datachannel"}:
+			if b.capture != nil {
+				b.capture("client_to_upstream", "datachannel", "queued", payload, !message.IsString)
+			}
 		case <-b.done:
+			if b.capture != nil {
+				b.capture("client_to_upstream", "datachannel", "rejected", payload, !message.IsString)
+			}
 		}
 	})
 	channel.OnError(func(err error) {

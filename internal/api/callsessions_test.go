@@ -13,6 +13,7 @@ import (
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/callsessions"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/secretbox"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/store"
+	"github.com/dyhhhhhh/chatgpt-web-voice/internal/voice/eventlog"
 )
 
 func TestCallSessionsAdminAPI(t *testing.T) {
@@ -69,7 +70,9 @@ func TestCallSessionsAdminAPI(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
-	New(Dependencies{Accounts: accountPool, APIKeys: keyStore, CallSessions: records}).Register(mux)
+	events := eventlog.New(eventlog.Defaults())
+	events.Start(eventlog.Key{SessionID: "vs_admin_row", Generation: 1}, "")
+	New(Dependencies{Accounts: accountPool, APIKeys: keyStore, CallSessions: records, Events: events}).Register(mux)
 
 	list := performJSONRequest(t, mux, http.MethodGet, "/api/call-sessions", nil)
 	if list.Code != http.StatusOK {
@@ -89,6 +92,9 @@ func TestCallSessionsAdminAPI(t *testing.T) {
 	foundAdmin, foundKey := false, false
 	for _, row := range body.Sessions {
 		if row["voice_session_id"] == "vs_admin_row" {
+			if row["generation_count"] != float64(1) {
+				t.Fatalf("generation count: %v", row["generation_count"])
+			}
 			foundAdmin = true
 			if row["caller_label"] != "admin" {
 				t.Fatalf("admin label=%v", row["caller_label"])
@@ -98,6 +104,9 @@ func TestCallSessionsAdminAPI(t *testing.T) {
 			}
 		}
 		if row["voice_session_id"] == "vs_key_row" {
+			if row["generation_count"] != float64(0) {
+				t.Fatalf("generation count: %v", row["generation_count"])
+			}
 			foundKey = true
 			if row["caller_label"] != "billing bot" {
 				t.Fatalf("key label=%v", row["caller_label"])

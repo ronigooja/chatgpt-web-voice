@@ -116,6 +116,8 @@ type Config struct {
 
 	// VoiceOversizeCaptureDir enables private oversize relay captures when nonempty.
 	VoiceOversizeCaptureDir          string
+	VoiceEventViewerEnabled          bool
+	VoiceViewerReadKey               string
 	VoiceEventShapeSampling          bool
 	VoiceEventShapeSamplingMaxFrames int
 	ZoeFinalTurnDebugText            bool
@@ -255,6 +257,8 @@ func Load() Config {
 		RelayPublicIP:    env("VOICE_RELAY_PUBLIC_IP", ""),
 
 		VoiceOversizeCaptureDir:          env("VOICE_OVERSIZE_CAPTURE_DIR", ""),
+		VoiceEventViewerEnabled:          envBool("VOICE_EVENT_VIEWER_ENABLED", true),
+		VoiceViewerReadKey:               envRaw("VOICE_VIEWER_READ_KEY", ""),
 		VoiceEventShapeSampling:          envBool("VOICE_EVENT_SHAPE_SAMPLING", false),
 		VoiceEventShapeSamplingMaxFrames: envInt("VOICE_EVENT_SHAPE_SAMPLING_MAX_FRAMES", 400),
 		ZoeURL:                           env("VOICE_ZOE_URL", ""),

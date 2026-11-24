@@ -32,6 +32,7 @@ import (
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/relay"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/store"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/tokenutil"
+	"github.com/dyhhhhhh/chatgpt-web-voice/internal/voice/eventlog"
 )
 
 const (
@@ -150,6 +151,7 @@ type avasSidebandWriter struct {
 	onClose  func()
 	done     chan struct{}
 	closeErr error
+	capture  func([]byte, string)
 }
 
 func (w *avasSidebandWriter) setOnClose(fn func()) {
@@ -178,13 +180,25 @@ func (w *avasSidebandWriter) sendAttempt(data []byte) (bool, error) {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	delivery := "rejected"
+	defer func() {
+		if w.capture != nil {
+			w.capture(data, delivery)
+		}
+	}()
 	if w.closed {
 		return false, errors.New("avas sideband closed")
 	}
 	if err := w.conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		return false, err
 	}
-	return true, w.conn.WriteMessage(websocket.TextMessage, data)
+	err := w.conn.WriteMessage(websocket.TextMessage, data)
+	if err == nil {
+		delivery = "sent"
+	} else {
+		delivery = "unknown"
+	}
+	return true, err
 }
 
 func (w *avasSidebandWriter) close() {
@@ -223,6 +237,7 @@ func (w *avasSidebandWriter) closeAndWait() bool {
 
 // Service is the ChatGPT web voice gateway.
 type Service struct {
+	events      *eventlog.Store
 	cfg         config.Config
 	httpOptions httpclient.Options
 	pool        AccountRepository
@@ -257,6 +272,8 @@ type Service struct {
 	ownedStopping bool
 	ownedDials    sync.WaitGroup
 }
+
+func (s *Service) WithEventLog(events *eventlog.Store) *Service { s.events = events; return s }
 
 // New creates a voice service.
 func New(cfg config.Config, pool AccountRepository, logger *slog.Logger) *Service {
@@ -583,6 +600,9 @@ func (s *Service) bindVoiceSessionMedia(owner, sessionID, token string, account 
 // records the local termination observation, then drops the binding if it still
 // points at this media (a binding already re-pointed at newer media is kept).
 func (s *Service) onMediaClosed(owner, sessionID string, media relay.Session, mediaID mediaevidence.Identity, reason string) {
+	if mediaID.MediaGeneration > 0 {
+		s.events.End(eventlog.Key{SessionID: sessionID, Generation: mediaID.MediaGeneration})
+	}
 	s.finalizeMedia(media, mediaID, reason)
 	s.mu.Lock()
 	item, ok := s.bindings[sessionID]
@@ -1429,6 +1449,14 @@ func buildAVASSession(voice string, upstream UpstreamContext) avasSessionPayload
 	return p
 }
 
+func avasCreationEvent(p avasSessionPayload) []byte {
+	data, _ := json.Marshal(struct {
+		Instructions string           `json:"instructions"`
+		InitialItems []map[string]any `json:"initial_items"`
+	}{p.Instructions, p.InitialItems})
+	return data
+}
+
 func (p *avasSessionPayload) addOpeningContext(c OpeningContext) {
 	for _, item := range c.Items {
 		p.InitialItems = append(p.InitialItems, map[string]any{"type": "message", "role": item.Role, "content": []any{map[string]any{"type": "input_text", "text": item.Text}}})
@@ -2056,11 +2084,15 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 		var avasCancel context.CancelFunc
 		var observerReady chan struct{}
 		var mediaID mediaevidence.Identity
+		var creationPayload []byte
 		var cleanupOnce sync.Once
 		var finalizeOnce sync.Once
 		ownedAmbiguous, sidebandUnclean := false, false
 		finalize := func(reason string) {
 			finalizeOnce.Do(func() {
+				if mediaID.MediaGeneration > 0 {
+					s.events.End(eventlog.Key{SessionID: targetSessionID, Generation: mediaID.MediaGeneration})
+				}
 				if req.owned != nil && (ownedAmbiguous || sidebandUnclean) {
 					if _, err := s.evidence.Close(mediaID, mediaevidence.Components{}, reason); err != nil {
 						s.logger.Error("owned_call_cleanup_quarantine_failed")
@@ -2175,6 +2207,9 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 					return nil, err
 				}
 				avasPayload.addOpeningContext(req.OpeningContext)
+			}
+			if s.events != nil {
+				creationPayload = avasCreationEvent(avasPayload)
 			}
 			resourcesStarted = true
 			ownedAmbiguous = true
@@ -2335,6 +2370,31 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 				closeMediaOnFailure("evidence_register_failed")
 				s.logger.Error("media_evidence_register_failed", "voice_session_id", targetSessionID, "error", genErr)
 				return nil, &ServiceError{Message: "media evidence unavailable", StatusCode: 503}
+			}
+		}
+
+		if media != nil && mediaID.MediaGeneration > 0 && s.events != nil {
+			key := eventlog.Key{SessionID: targetSessionID, Generation: mediaID.MediaGeneration}
+			var zoeID string
+			var zoeGeneration int64
+			if req.owned != nil {
+				zoeID, zoeGeneration = req.owned.zoeID, req.owned.generation
+			}
+			s.events.Start(key, zoeID, zoeGeneration)
+			if capture, ok := media.(interface {
+				SetEventLog(*eventlog.Store, eventlog.Key)
+			}); ok {
+				capture.SetEventLog(s.events, key)
+			}
+			if creationPayload != nil {
+				s.events.Append(key, "gateway_creation", "avas", "accepted", creationPayload, false)
+			}
+			if avasSideband != nil {
+				avasSideband.mu.Lock()
+				avasSideband.capture = func(data []byte, delivery string) {
+					s.events.Append(key, "gateway_to_upstream", "avas_sideband", delivery, data, false)
+				}
+				avasSideband.mu.Unlock()
 			}
 		}
 

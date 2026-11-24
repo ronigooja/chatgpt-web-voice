@@ -70,6 +70,7 @@ func (s *Server) listCallSessions(w http.ResponseWriter, r *http.Request) {
 			"updated_at":                 item.UpdatedAt,
 			"last_seen_at":               item.LastSeenAt,
 			"released_at":                item.ReleasedAt,
+			"generation_count":           s.generationCount(item.VoiceSessionID),
 		}
 		if item.CallerKind == callsessions.CallerAPIKey && item.APIKeyID > 0 && s.apiKeys != nil {
 			if key, err := s.lookupAPIKey(item.APIKeyID); err == nil {
