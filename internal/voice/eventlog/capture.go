@@ -9,8 +9,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
- "runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,17 +34,17 @@ type audioSegment struct {
 	bytes uint32
 }
 type audioWriter struct {
-	cfg    Config
-	queue  chan audioMessage
-	done   chan struct{}
-	now    func() time.Time
-	closed atomic.Bool
+	cfg      Config
+	queue    chan audioMessage
+	done     chan struct{}
+	now      func() time.Time
+	closed   atomic.Bool
 	inflight atomic.Int64
-	stop chan struct{}
-	wake chan struct{}
+	stop     chan struct{}
+	wake     chan struct{}
 	stopOnce sync.Once
-	ended sync.Map
-	drops sync.Map
+	ended    sync.Map
+	drops    sync.Map
 }
 
 func newAudioWriter(c Config) *audioWriter {
@@ -59,26 +59,49 @@ func (s *Store) CaptureAudio(k Key, data []byte) {
 		return
 	}
 	w := s.capture
- if w.closed.Load() { return }
- w.inflight.Add(1)
- defer w.inflight.Add(-1)
- if w.closed.Load() { return }
- if _, ended := w.ended.Load(k); ended { return }
- if len(w.queue) == cap(w.queue) { v,_:=w.drops.LoadOrStore(k,&atomic.Uint64{}); v.(*atomic.Uint64).Add(1); return }
- select {
- case w.queue <- audioMessage{key:k, data:append([]byte(nil),data...), at:w.now().UTC()}:
- default: v,_:=w.drops.LoadOrStore(k,&atomic.Uint64{}); v.(*atomic.Uint64).Add(1)
- }
+	if w.closed.Load() {
+		return
+	}
+	w.inflight.Add(1)
+	defer w.inflight.Add(-1)
+	if w.closed.Load() {
+		return
+	}
+	if _, ended := w.ended.Load(k); ended {
+		return
+	}
+	if len(w.queue) == cap(w.queue) {
+		v, _ := w.drops.LoadOrStore(k, &atomic.Uint64{})
+		v.(*atomic.Uint64).Add(1)
+		return
+	}
+	select {
+	case w.queue <- audioMessage{key: k, data: append([]byte(nil), data...), at: w.now().UTC()}:
+	default:
+		v, _ := w.drops.LoadOrStore(k, &atomic.Uint64{})
+		v.(*atomic.Uint64).Add(1)
+	}
 }
 func (w *audioWriter) end(k Key) {
- w.ended.Store(k,struct{}{})
- select { case w.wake <- struct{}{}: default: }
+	w.ended.Store(k, struct{}{})
+	select {
+	case w.wake <- struct{}{}:
+	default:
+	}
 }
 func (s *Store) Close() {
- if s == nil || s.capture == nil { return }
- w:=s.capture
- w.stopOnce.Do(func(){ w.closed.Store(true); for w.inflight.Load()!=0 { runtime.Gosched() }; close(w.stop) })
- <-w.done
+	if s == nil || s.capture == nil {
+		return
+	}
+	w := s.capture
+	w.stopOnce.Do(func() {
+		w.closed.Store(true)
+		for w.inflight.Load() != 0 {
+			runtime.Gosched()
+		}
+		close(w.stop)
+	})
+	<-w.done
 }
 
 func sanitizedSession(id string) (string, bool) {
@@ -125,7 +148,7 @@ func decodeAudio(raw []byte) (string, []byte, error) {
 	return dir, data, err
 }
 func shouldRotate(seg *audioSegment, at time.Time, duration time.Duration, size int) bool {
- return at.Sub(seg.start) >= duration || uint64(seg.bytes)+uint64(size) > maxSegmentBytes
+	return at.Sub(seg.start) >= duration || uint64(seg.bytes)+uint64(size) > maxSegmentBytes
 }
 func wavHeader(n uint32) []byte {
 	b := make([]byte, 44)
@@ -164,8 +187,15 @@ func (w *audioWriter) run() {
 		delete(segments, k)
 		w.retain(segments)
 	}
- process := func(m audioMessage) {
-  defer func(){ if _,ok:=w.ended.Load(m.key); ok { select { case w.wake <- struct{}{}: default: } } }()
+	process := func(m audioMessage) {
+		defer func() {
+			if _, ok := w.ended.Load(m.key); ok {
+				select {
+				case w.wake <- struct{}{}:
+				default:
+				}
+			}
+		}()
 		if disabled[m.key] {
 			return
 		}
@@ -173,7 +203,12 @@ func (w *audioWriter) run() {
 		if err != nil || direction == "" || len(pcm) == 0 {
 			return
 		}
-        if len(pcm) > maxSegmentBytes { disabled[m.key]=true; slog.Warn("audio_capture_write_failed", "class", "frame_too_large"); finish(m.key); return }
+		if len(pcm) > maxSegmentBytes {
+			disabled[m.key] = true
+			slog.Warn("audio_capture_write_failed", "class", "frame_too_large")
+			finish(m.key)
+			return
+		}
 		id, ok := sanitizedSession(m.key.SessionID)
 		if !ok {
 			disabled[m.key] = true
@@ -218,17 +253,39 @@ func (w *audioWriter) run() {
 			disabled[m.key] = true
 			finish(m.key)
 		}
- }
- drain := func() { n:=len(w.queue); for i:=0; i<n; i++ { process(<-w.queue) } }
- finishEnded := func() { w.ended.Range(func(key, _ any) bool { k:=key.(Key); if _,ok:=segments[k]; ok { finish(k) }; return true }) }
- for {
-  select {
-  case m:= <-w.queue: process(m)
-  case <-w.wake: drain(); finishEnded()
-  case <-w.stop: drain(); finishEnded(); for k:=range segments { finish(k) }; goto done
-  }
- }
- done:
+	}
+	drain := func() {
+		n := len(w.queue)
+		for i := 0; i < n; i++ {
+			process(<-w.queue)
+		}
+	}
+	finishEnded := func() {
+		w.ended.Range(func(key, _ any) bool {
+			k := key.(Key)
+			if _, ok := segments[k]; ok {
+				finish(k)
+			}
+			return true
+		})
+	}
+	for {
+		select {
+		case m := <-w.queue:
+			process(m)
+		case <-w.wake:
+			drain()
+			finishEnded()
+		case <-w.stop:
+			drain()
+			finishEnded()
+			for k := range segments {
+				finish(k)
+			}
+			goto done
+		}
+	}
+done:
 	w.drops.Range(func(key, value any) bool {
 		slog.Warn("audio_capture_queue_full", "dropped", value.(*atomic.Uint64).Load())
 		return true

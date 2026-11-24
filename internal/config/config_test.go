@@ -357,9 +357,14 @@ func TestAudioCaptureDefaults(t *testing.T) {
 }
 
 func TestAudioCaptureSegmentMaximum(t *testing.T) {
- t.Setenv("VOICE_AUDIO_CAPTURE", "true")
- t.Setenv("VOICE_AUDIO_CAPTURE_SEGMENT_SECONDS", "3601")
- if err:=Load().Validate(); err==nil || !strings.Contains(err.Error(),"VOICE_AUDIO_CAPTURE_SEGMENT_SECONDS") { t.Fatal("segment maximum not rejected") }
- t.Setenv("VOICE_AUDIO_CAPTURE", "false")
- c:=Load(); if c.VoiceAudioCaptureSegmentSeconds!=3601 { t.Fatal("unexpected configuration") }
+	t.Setenv("VOICE_AUDIO_CAPTURE", "true")
+	t.Setenv("VOICE_AUDIO_CAPTURE_SEGMENT_SECONDS", "3601")
+	if err := Load().Validate(); err == nil || !strings.Contains(err.Error(), "VOICE_AUDIO_CAPTURE_SEGMENT_SECONDS") {
+		t.Fatal("segment maximum not rejected")
+	}
+	t.Setenv("VOICE_AUDIO_CAPTURE", "false")
+	c := Load()
+	if c.VoiceAudioCaptureSegmentSeconds != 3601 {
+		t.Fatal("unexpected configuration")
+	}
 }

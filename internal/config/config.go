@@ -283,7 +283,9 @@ func (c Config) Validate() error {
 	if c.VoiceAudioCaptureMaxBytes <= 0 && (c.VoiceAudioCapture || os.Getenv("VOICE_AUDIO_CAPTURE_MAX_BYTES") != "") {
 		return fmt.Errorf("VOICE_AUDIO_CAPTURE_MAX_BYTES must be positive")
 	}
-	if c.VoiceAudioCapture && c.VoiceAudioCaptureSegmentSeconds > 3600 { return fmt.Errorf("VOICE_AUDIO_CAPTURE_SEGMENT_SECONDS must not exceed 3600") }
+	if c.VoiceAudioCapture && c.VoiceAudioCaptureSegmentSeconds > 3600 {
+		return fmt.Errorf("VOICE_AUDIO_CAPTURE_SEGMENT_SECONDS must not exceed 3600")
+	}
 	if c.VoiceAudioCaptureSegmentSeconds <= 0 && (c.VoiceAudioCapture || os.Getenv("VOICE_AUDIO_CAPTURE_SEGMENT_SECONDS") != "") {
 		return fmt.Errorf("VOICE_AUDIO_CAPTURE_SEGMENT_SECONDS must be positive")
 	}

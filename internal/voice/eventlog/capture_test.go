@@ -138,34 +138,92 @@ func TestCaptureWriteFailureDoesNotEscape(t *testing.T) {
 }
 
 func TestCaptureEndDoesNotBlockFullQueue(t *testing.T) {
- w:=&audioWriter{queue:make(chan audioMessage,1),wake:make(chan struct{},1),now:time.Now}; w.queue<-audioMessage{}
- done:=make(chan struct{}); go func(){w.end(Key{"s",1}); close(done)}()
- select {case <-done: case <-time.After(time.Second): t.Fatal("end blocked")}
+	w := &audioWriter{queue: make(chan audioMessage, 1), wake: make(chan struct{}, 1), now: time.Now}
+	w.queue <- audioMessage{}
+	done := make(chan struct{})
+	go func() { w.end(Key{"s", 1}); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("end blocked")
+	}
 }
 func TestRetentionProtectsOpenFile(t *testing.T) {
- dir:=t.TempDir(); older:=filepath.Join(dir,"old.wav"); opened:=filepath.Join(dir,"open.wav")
- if err:=os.WriteFile(older,make([]byte,60),0600); err!=nil { t.Fatal(err) }; if err:=os.WriteFile(opened,make([]byte,60),0600); err!=nil { t.Fatal(err) }
- old:=time.Now().Add(-time.Hour); if err:=os.Chtimes(older,old,old); err!=nil { t.Fatal(err) }
- w:=&audioWriter{cfg:Config{AudioCaptureDir:dir,AudioCaptureMaxBytes:60}}
- w.retain(map[Key]map[string]*audioSegment{{"s",1}:{"in":{path:opened}}})
- if _,err:=os.Stat(older); !os.IsNotExist(err) { t.Fatal("old finished file retained") }; if _,err:=os.Stat(opened); err!=nil { t.Fatal("open file removed") }
+	dir := t.TempDir()
+	older := filepath.Join(dir, "old.wav")
+	opened := filepath.Join(dir, "open.wav")
+	if err := os.WriteFile(older, make([]byte, 60), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(opened, make([]byte, 60), 0600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(older, old, old); err != nil {
+		t.Fatal(err)
+	}
+	w := &audioWriter{cfg: Config{AudioCaptureDir: dir, AudioCaptureMaxBytes: 60}}
+	w.retain(map[Key]map[string]*audioSegment{{"s", 1}: {"in": {path: opened}}})
+	if _, err := os.Stat(older); !os.IsNotExist(err) {
+		t.Fatal("old finished file retained")
+	}
+	if _, err := os.Stat(opened); err != nil {
+		t.Fatal("open file removed")
+	}
 }
 func TestWriteErrorDisablesOnlyThatCall(t *testing.T) {
- dir:=t.TempDir(); c:=Defaults(); c.AudioCapture=true; c.AudioCaptureDir=dir; c.AudioCaptureMaxBytes=1<<20; c.AudioCaptureSegment=time.Minute
- if err:=os.WriteFile(filepath.Join(dir,"bad"),[]byte("x"),0600); err!=nil { t.Fatal(err) }
- s:=New(c); bad:=Key{"bad",1}; good:=Key{"good",1}; s.Start(bad,""); s.Start(good,"")
- frame:=[]byte(`{"type":"session.input_audio.append","audio":"AQIDBA=="}`)
- s.CaptureAudio(bad,frame)
- // A FIFO barrier confirms the failing write was processed before fixing the path.
- barrier:=Key{"barrier",1}; s.CaptureAudio(barrier,frame); s.End(barrier)
- // Closing drains the queue; use the writer wake and a segment on disk as an observable barrier.
- deadline:=time.Now().Add(time.Second*5); for { files,_:=filepath.Glob(filepath.Join(dir,"barrier","gen1","*.wav")); if len(files)>0 { break }; if time.Now().After(deadline) { t.Fatal("writer did not process barrier") }; time.Sleep(time.Millisecond) }
- if err:=os.Remove(filepath.Join(dir,"bad")); err!=nil { t.Fatal(err) }
- s.CaptureAudio(bad,frame); s.CaptureAudio(good,frame); s.Close()
- files,_:=filepath.Glob(filepath.Join(dir,"bad","gen1","*.wav")); if len(files)!=0 { t.Fatal("failed call resumed capture") }; files,_=filepath.Glob(filepath.Join(dir,"good","gen1","*.wav")); if len(files)!=1 { t.Fatal("new call did not capture") }
+	dir := t.TempDir()
+	c := Defaults()
+	c.AudioCapture = true
+	c.AudioCaptureDir = dir
+	c.AudioCaptureMaxBytes = 1 << 20
+	c.AudioCaptureSegment = time.Minute
+	if err := os.WriteFile(filepath.Join(dir, "bad"), []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := New(c)
+	bad := Key{"bad", 1}
+	good := Key{"good", 1}
+	s.Start(bad, "")
+	s.Start(good, "")
+	frame := []byte(`{"type":"session.input_audio.append","audio":"AQIDBA=="}`)
+	s.CaptureAudio(bad, frame)
+	// A FIFO barrier confirms the failing write was processed before fixing the path.
+	barrier := Key{"barrier", 1}
+	s.CaptureAudio(barrier, frame)
+	s.End(barrier)
+	// Closing drains the queue; use the writer wake and a segment on disk as an observable barrier.
+	deadline := time.Now().Add(time.Second * 5)
+	for {
+		files, _ := filepath.Glob(filepath.Join(dir, "barrier", "gen1", "*.wav"))
+		if len(files) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("writer did not process barrier")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := os.Remove(filepath.Join(dir, "bad")); err != nil {
+		t.Fatal(err)
+	}
+	s.CaptureAudio(bad, frame)
+	s.CaptureAudio(good, frame)
+	s.Close()
+	files, _ := filepath.Glob(filepath.Join(dir, "bad", "gen1", "*.wav"))
+	if len(files) != 0 {
+		t.Fatal("failed call resumed capture")
+	}
+	files, _ = filepath.Glob(filepath.Join(dir, "good", "gen1", "*.wav"))
+	if len(files) != 1 {
+		t.Fatal("new call did not capture")
+	}
 }
 
 func TestCaptureByteLimitRotation(t *testing.T) {
- at:=time.Now(); s:=&audioSegment{start:at,bytes:maxSegmentBytes-4}
- if shouldRotate(s,at,time.Hour,4) || !shouldRotate(s,at,time.Hour,5) { t.Fatal("incorrect byte rotation boundary") }
+	at := time.Now()
+	s := &audioSegment{start: at, bytes: maxSegmentBytes - 4}
+	if shouldRotate(s, at, time.Hour, 4) || !shouldRotate(s, at, time.Hour, 5) {
+		t.Fatal("incorrect byte rotation boundary")
+	}
 }
