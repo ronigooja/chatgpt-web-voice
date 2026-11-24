@@ -10,7 +10,6 @@
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <script>
     (function () {
-      if (/(^|[?&])view=/.test(window.location.search)) document.documentElement.classList.add('view-mode');
       try {
         var key = 'chatgpt_web_voice_theme_v1';
         var theme = localStorage.getItem(key);
@@ -1378,50 +1377,6 @@
       body.app-shell .header-left > .icon-button { display: inline-grid; }
       body.app-shell .mobile-only { display: inline-grid; }
     }
-    /* Read-only upstream viewer (?view=). Shares the caption look; hides call controls. */
-    html.view-mode .workspace,
-    html.view-mode #remoteAudio,
-    html.view-mode dialog,
-    html.view-mode #settingsBackdrop { display: none !important; }
-    html.view-mode body.app-shell { overflow: hidden; }
-    .viewer-page { display: none; position: relative; }
-    html.view-mode .viewer-page { display: flex; flex-direction: column; height: 100dvh; min-height: 0; }
-    .viewer-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 18px; border-bottom: 1px solid var(--app-line); color: var(--app-muted); font-size: 12px; }
-    .viewer-bar .viewer-kv { display: inline-flex; gap: 5px; align-items: baseline; min-width: 0; }
-    .viewer-bar .viewer-k { color: var(--app-dim); text-transform: uppercase; letter-spacing: .08em; font-size: 10px; font-weight: 700; }
-    .viewer-bar .viewer-v { color: var(--app-ink); font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11px; overflow-wrap: anywhere; }
-    .viewer-bar select, .viewer-bar input[type="search"], .viewer-filters select, .viewer-filters button, .viewer-tabs button {
-      min-height: 30px; padding: 4px 9px; border: 1px solid var(--app-line-strong); border-radius: 8px;
-      color: var(--app-ink); background: var(--control-bg); font: inherit; font-size: 12px;
-    }
-    .viewer-tabs { display: flex; gap: 6px; padding: 10px 18px 0; }
-    .viewer-tabs button[aria-selected="true"] { background: var(--app-hover-strong); }
-    .viewer-filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 18px; }
-    .viewer-pane { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 18px; }
-    .viewer-pane[hidden] { display: none; }
-    .viewer-notice { margin: 10px 18px 0; padding: 10px 12px; border: 1px solid var(--settings-danger-border); border-radius: 10px; background: var(--settings-danger-bg); color: var(--settings-danger-ink); font-size: 12px; white-space: pre-line; }
-    .viewer-notice[hidden] { display: none; }
-    .viewer-notice[data-kind="warn"] { color: var(--app-ink); }
-    .viewer-creation { margin: 10px 18px 0; border: 1px solid var(--app-line); border-radius: 10px; background: var(--app-hover-soft); font-size: 12px; }
-    .viewer-creation[hidden] { display: none; }
-    .viewer-creation summary { padding: 8px 12px; color: var(--app-muted); cursor: pointer; }
-    .viewer-creation pre { margin: 0; padding: 0 12px 12px; max-height: 260px; overflow: auto; white-space: pre-wrap; color: var(--app-ink); font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11px; }
-    .viewer-boundary { margin: 14px 0; padding-top: 8px; border-top: 1px dashed var(--app-line-strong); color: var(--app-dim); font-size: 11px; text-align: center; }
-    .viewer-gap { margin: 8px 0; padding: 6px 10px; border-radius: 8px; background: var(--settings-danger-bg); color: var(--settings-danger-ink); font-size: 12px; }
-    .viewer-event { padding: 8px 10px; margin-bottom: 6px; border: 1px solid var(--app-line); border-radius: 10px; font-size: 12px; }
-    .viewer-event-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
-    .viewer-badge { padding: 1px 7px; border-radius: 999px; border: 1px solid var(--app-line-strong); color: var(--app-muted); font-size: 11px; }
-    .viewer-badge.warn { color: var(--settings-danger-ink); border-color: var(--settings-danger-border); }
-    .viewer-badge.dir-upstream_to_client { color: var(--app-green-bright); }
-    .viewer-badge.dir-gateway_creation { color: var(--app-muted); }
-    .viewer-type { color: var(--app-ink); font-weight: 600; }
-    .viewer-meta { color: var(--app-dim); font-size: 11px; }
-    .viewer-payload { margin-top: 6px; }
-    .viewer-payload summary { color: var(--app-muted); cursor: pointer; font-size: 11px; }
-    .viewer-pre { margin: 6px 0 0; max-height: 360px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--app-ink); font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11px; }
-    .viewer-follow { position: absolute; right: 22px; bottom: 16px; }
-    .viewer-follow[hidden] { display: none; }
-    html.view-mode .caption-log-line.pending .caption-log-content::after { content: " …"; color: var(--app-dim); }
     @media (max-width: 600px) {
       body.app-shell .conversation-header { min-height: 58px; padding: 10px 14px; }
       body.app-shell .chat-inner,
@@ -1625,64 +1580,7 @@
     </form>
   </dialog>
   <audio id="remoteAudio" autoplay playsinline webkit-playsinline></audio>
-  <main id="viewerPage" class="viewer-page" aria-label="Upstream context viewer">
-    <header class="conversation-header">
-      <div class="header-left">
-        <div>
-          <div class="session-title">Upstream context viewer</div>
-          <div class="session-status">
-            <span id="vwOrb" class="orb idle" aria-hidden="true"></span>
-            <span id="vwConn">Loading</span>
-            <span class="status-divider" aria-hidden="true">·</span>
-            <span>read-only</span>
-          </div>
-        </div>
-      </div>
-      <div class="header-actions">
-        <button type="button" id="vwTheme" class="header-chip" aria-label="Toggle theme">Dark</button>
-      </div>
-    </header>
-    <div class="viewer-bar">
-      <span class="viewer-kv"><span class="viewer-k">Session</span><span id="vwSession" class="viewer-v">—</span></span>
-      <span class="viewer-kv"><span class="viewer-k">Zoe</span><span id="vwZoe" class="viewer-v">—</span></span>
-      <span class="viewer-kv"><span class="viewer-k">Gen</span><span id="vwGen" class="viewer-v">—</span></span>
-      <label class="viewer-kv"><span class="viewer-k">Generation</span>
-        <select id="vwGenSelect" aria-label="Generation"></select>
-      </label>
-      <span id="vwStatus" class="viewer-v">—</span>
-    </div>
-    <div id="vwNotice" class="viewer-notice" role="alert" hidden></div>
-    <details id="vwCreation" class="viewer-creation" hidden>
-      <summary>Creation (instructions and initial items)</summary>
-      <pre id="vwCreationBody"></pre>
-    </details>
-    <div class="viewer-tabs" role="tablist">
-      <button type="button" id="vwTabCaptions" role="tab" aria-selected="true">Captions</button>
-      <button type="button" id="vwTabEvents" role="tab" aria-selected="false">Events</button>
-    </div>
-    <div class="viewer-filters">
-      <select id="vwDirection" aria-label="Filter by direction">
-        <option value="">All directions</option>
-        <option value="upstream_to_client">upstream → client</option>
-        <option value="client_to_upstream">client → upstream</option>
-        <option value="gateway_to_upstream">gateway → upstream</option>
-        <option value="gateway_creation">creation</option>
-      </select>
-      <select id="vwType" aria-label="Filter by type"><option value="">All types</option></select>
-      <button type="button" id="vwCopy">Copy visible JSON</button>
-    </div>
-    <section id="vwCaptionsPane" class="viewer-pane" role="tabpanel" aria-label="Captions">
-      <div id="vwCaptions" class="transcript-list" aria-live="off"></div>
-    </section>
-    <section id="vwEventsPane" class="viewer-pane" role="tabpanel" aria-label="Events" hidden>
-      <div id="vwEvents"></div>
-    </section>
-    <button type="button" id="vwFollow" class="btn-ghost viewer-follow">Jump to latest</button>
-    <div id="vwToast" class="header-toast" role="status" aria-live="polite"></div>
-  </main>
 
-<script src="/static/captions.js"></script>
-<script src="/static/voice-view.js"></script>
 <script>
 (function () {
   'use strict';
@@ -3939,15 +3837,85 @@
   }
 
   function extractTextParts(parts) {
-    return window.ZoeCaptions.extractTextParts(parts);
+    if (!Array.isArray(parts)) return '';
+    return parts.map(function (part) {
+      if (typeof part === 'string') return part;
+      if (!part || typeof part !== 'object') return '';
+      if (typeof part.text === 'string') return part.text;
+      if (typeof part.content === 'string') return part.content;
+      if (part.content && typeof part.content.text === 'string') return part.content.text;
+      if (typeof part.transcript === 'string') return part.transcript;
+      return '';
+    }).filter(Boolean).join('\n').trim();
   }
 
   function applyCaptionDelta(state, delta) {
-    return window.ZoeCaptions.applyCaptionDelta(state, delta);
+    var previous = state && typeof state === 'object' ? state : {};
+    var next = {
+      role: previous.role === 'assistant' || previous.role === 'user' ? previous.role : '',
+      messageId: String(previous.messageId || ''),
+      text: String(previous.text || '')
+    };
+    if (!delta || typeof delta !== 'object') return next;
+
+    var message = delta.v && delta.v.message;
+    if (message && typeof message === 'object') {
+      var parts = message.content && Array.isArray(message.content.parts) ? message.content.parts : [];
+      var role = (message.author && message.author.role) || '';
+      if (role !== 'assistant' && role !== 'user') {
+        for (var partIndex = 0; partIndex < parts.length; partIndex++) {
+          var part = parts[partIndex];
+          if (!part || typeof part !== 'object' || part.content_type !== 'audio_transcription') continue;
+          if (part.direction === 'in') role = 'user';
+          if (part.direction === 'out') role = 'assistant';
+          break;
+        }
+      }
+      if (role !== 'assistant' && role !== 'user') return next;
+      var text = parts.map(function (part) {
+        if (typeof part === 'string') return part;
+        if (!part || typeof part !== 'object') return '';
+        if (typeof part.text === 'string') return part.text;
+        if (typeof part.content === 'string') return part.content;
+        if (typeof part.transcript === 'string') return part.transcript;
+        return '';
+      }).filter(Boolean).join('\n').trim();
+      return {
+        role: role,
+        messageId: message.id ? String(message.id) : next.messageId,
+        text: text
+      };
+    }
+
+    if (!Array.isArray(delta.v) || !next.role) return next;
+    var appended = '';
+    for (var operationIndex = 0; operationIndex < delta.v.length; operationIndex++) {
+      var operation = delta.v[operationIndex];
+      if (!operation || operation.o !== 'append') continue;
+      if (!/^\/message\/content\/parts\/\d+\/text$/.test(String(operation.p || ''))) continue;
+      appended += String(operation.v || '');
+    }
+    if (appended) next.text += appended;
+    return next;
   }
 
   function extractTranscriptText(obj, payload) {
-    return window.ZoeCaptions.extractTranscriptText(obj, payload);
+    var source = payload || obj || {};
+    var candidates = [
+      obj && obj.transcript,
+      obj && obj.text,
+      obj && obj.delta,
+      source && source.transcript,
+      source && source.text,
+      source && source.delta,
+      source && source.item && source.item.transcript,
+      source && source.item && source.item.content && extractTextParts(source.item.content.parts),
+      source && source.message && source.message.content && extractTextParts(source.message.content.parts)
+    ];
+    for (var i = 0; i < candidates.length; i++) {
+      if (typeof candidates[i] === 'string' && candidates[i].trim()) return candidates[i].trim();
+    }
+    return '';
   }
 
   function rememberDcText(role, text) {
@@ -5194,11 +5162,6 @@
   }
 
   try {
-    // Read-only view mode: no mic, device, dial, config or conversation-store code runs.
-    if (window.ZoeViewer && window.ZoeViewer.requested()) {
-      window.ZoeViewer.start();
-      return;
-    }
     bind();
     loadGatewayVoiceConfig().catch(function () {});
   }

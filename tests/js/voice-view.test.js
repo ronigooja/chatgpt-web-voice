@@ -171,6 +171,6 @@ test('URLs encode ids and use the documented paths', () => {
   assert.equal(V.generationsUrl('vs_a/b'), '/api/call-sessions/vs_a%2Fb/generations');
   assert.equal(V.eventsUrl('vs_1', 2, 10, 500), '/api/call-sessions/vs_1/generations/2/events?after=10&limit=500');
   assert.equal(V.streamUrl('vs_1', 2, 7), '/api/call-sessions/vs_1/generations/2/events/stream?after=7');
-  assert.equal(V.viewerUrl('vs_1', 2), '/voice?view=vs_1&gen=2');
-  assert.equal(V.viewerUrl('vs_1', 0), '/voice?view=vs_1');
+  assert.equal(V.viewerUrl('vs_1', 2), '/viewer?session=vs_1&gen=2');
+  assert.equal(V.viewerUrl('vs_1', 0), '/viewer?session=vs_1');
 });

@@ -80,7 +80,7 @@ bash ./scripts/dev.sh
 | 路径 | 说明 |
 |---|---|
 | `/voice` | 内置语音工作台 |
-| `/voice?view=<gateway_session_id>&gen=<n>` | Read-only upstream context viewer: captions, raw events, creation block, gap notices. `gen` is optional (default: active generation). Never uses the microphone or dials. |
+| `/viewer?session=<gateway_session_id>&gen=<n>` | Read-only upstream context viewer: captions, raw events, creation block, gap notices. `gen` is optional (default: active generation). Never uses the microphone or dials. |
 | `/accounts` | ChatGPT Web 账号池 |
 | `/keys` | 下游 API Key（完整密钥只显示一次） |
 | `/sessions` | 网关语音会话元数据（无聊天正文） |

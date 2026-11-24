@@ -6,7 +6,7 @@
 }(typeof window !== 'undefined' ? window : this, function (Captions, root) {
   'use strict';
 
-  // Read-only upstream context viewer, opened as /voice?view=<gateway_session_id>&gen=<n>.
+  // Read-only upstream context viewer, opened as /viewer?session=<gateway_session_id>&gen=<n>.
   // Never calls the dial, microphone, device or conversation-store code in voice.html.
   // Events are kept per seq, so duplicates and out-of-order arrivals are harmless.
 
@@ -52,7 +52,7 @@
   function parseGeneration(value) {
     if (value === null || value === undefined || String(value).trim() === '') return { value: 0 };
     var n = toSeq(String(value).trim());
-    return n ? { value: n } : { error: 'Invalid generation parameter. Use /voice?view=<session>&gen=<positive integer>.' };
+    return n ? { value: n } : { error: 'Invalid generation parameter. Use /viewer?session=<session>&gen=<positive integer>.' };
   }
 
   function chooseGeneration(gens, requested) {
@@ -90,7 +90,7 @@
   }
 
   function viewerUrl(sessionId, gen) {
-    return '/voice?view=' + enc(sessionId) + (gen ? '&gen=' + enc(gen) : '');
+    return '/viewer?session=' + enc(sessionId) + (gen ? '&gen=' + enc(gen) : '');
   }
 
   // Event store: seq-keyed, sorted, deduplicated. Gaps are reported both by the
@@ -208,7 +208,7 @@
   }
 
   function requested() {
-    return typeof window !== 'undefined' && /(^|[?&])view=/.test(window.location.search);
+    return typeof window !== 'undefined' && window.location.pathname === '/viewer';
   }
 
   function start() {
@@ -245,7 +245,7 @@
     }
 
     var params = new URLSearchParams(root.location.search);
-    var sessionId = String(params.get('view') || '').trim();
+    var sessionId = String(params.get('session') || '').trim();
     var requestedGen = parseGeneration(params.get('gen'));
     var view = {
       gens: [], gen: 0, zoeId: '', store: null, es: null, retryTimer: 0, retryDelay: 1000,
@@ -705,7 +705,7 @@
       bind();
       setConn('Loading', 'idle');
       renderHeader();
-      if (!sessionId) return showError('Missing session id. Open /voice?view=<gateway_session_id>.');
+      if (!sessionId) return showError('Missing session id. Open /viewer?session=<gateway_session_id>.');
       if (requestedGen.error) return showError(requestedGen.error);
       try {
         await loadGenerations();
@@ -718,7 +718,6 @@
       root.setInterval(refreshGenerations, REFRESH_MS);
     }
 
-    doc.documentElement.classList.add('view-mode');
     el.follow.hidden = true;
     init();
   }

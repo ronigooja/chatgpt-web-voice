@@ -23,6 +23,9 @@ func TestRegisterStaticRoutesUsesCleanURLs(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(staticDir, "sessions.html"), []byte("sessions page"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(staticDir, "viewer.html"), []byte("viewer page"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(staticDir, "app.css"), []byte("/* design system */"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -33,6 +36,8 @@ func TestRegisterStaticRoutesUsesCleanURLs(t *testing.T) {
 
 	for path, wantBody := range map[string]string{
 		"/voice":          "voice page",
+		"/voice?view=old": "voice page",
+		"/viewer":         "viewer page",
 		"/accounts":       "accounts page",
 		"/keys":           "keys page",
 		"/sessions":       "sessions page",
