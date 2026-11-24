@@ -193,7 +193,7 @@
 <body class="viewer-body">
   <header class="topbar">
     <a class="brand" href="/sessions"><span class="brand-mark">SS</span><span class="brand-title">Upstream viewer</span></a>
-    <div class="top-actions"><span id="vwOrb" class="orb idle" aria-hidden="true"></span><span id="vwConn">Loading</span><button type="button" id="vwDelegationBadge" class="vw-badge" hidden>0 delegations</button><button type="button" id="vwTheme" class="header-chip" aria-label="Toggle theme">Dark</button><a class="nav-link" href="/sessions">Sessions</a><a class="nav-link" href="/voice">Voice</a></div>
+    <div class="top-actions"><button type="button" id="vwDelegationBadge" class="vw-badge" hidden>0 delegations</button><button type="button" id="vwTheme" class="header-chip" aria-label="Toggle theme">Dark</button><a class="nav-link" href="/sessions">Sessions</a><a class="nav-link" href="/voice">Voice</a></div>
   </header>
   <main id="viewerPage" class="viewer-page" aria-label="Upstream context viewer">
     <div class="vw-status" role="region" aria-label="Session status">
@@ -203,9 +203,8 @@
       <span class="vw-field"><span class="vw-k">Zoe</span><button type="button" id="vwZoe" class="vw-id" aria-label="Copy Zoe session id">—</button></span>
       <label class="vw-field"><span class="vw-k">Generation</span><select id="vwGenSelect" class="vw-select" aria-label="Generation"></select></label>
       <span id="vwEventCount" class="vw-stat">0 events</span>
-      <span id="vwDropped" class="vw-stat">Dropped 0</span>
       <span id="vwLastEvent" class="vw-stat">Last event —</span>
-      <span id="vwGapPill" class="vw-pill gap" hidden>Incomplete log</span>
+      <span id="vwGapPill" class="vw-pill gap" hidden>Incomplete</span>
       <span id="vwAudioWrap" class="vw-audio-wrap" hidden>
         <button type="button" id="vwAudioBtn" class="vw-btn vw-audio-btn" aria-expanded="false" aria-controls="vwAudioPop">Audio · <span id="vwAudioSummary"></span></button>
         <div id="vwAudioPop" class="vw-pop" hidden></div>

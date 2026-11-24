@@ -296,6 +296,21 @@ test('the real backend numbers events from seq 1; seq 0 is accepted but not requ
   assert.equal(s.maxSeq(), 3);
 });
 
+test('picker label uses the live count and state for the open generation', () => {
+  const g = { generation: 2, active: false, ended_at: '2026-11-18T10:00:30Z', event_count: 25 };
+  assert.equal(V.generationOptionLabel(g, { open: true, active: true, count: 27 }), 'Gen 2 · active · 27 events');
+  assert.equal(V.generationOptionLabel(g, { open: true, active: false, count: 27 }), 'Gen 2 · ended · 27 events');
+  assert.equal(V.generationOptionLabel(g, { open: true, active: true, count: 1 }), 'Gen 2 · active · 1 event');
+});
+
+test('picker label for a closed generation uses the summary count and ended_at', () => {
+  const ended = { generation: 1, active: true, ended_at: '2026-11-18T10:00:10Z', event_count: 6 };
+  assert.equal(V.generationOptionLabel(ended, null), 'Gen 1 · ended · 6 events');
+  const running = { generation: 3, active: true, ended_at: '', event_count: 0 };
+  assert.equal(V.generationOptionLabel(running, null), 'Gen 3 · active · 0 events');
+  assert.equal(V.generationOptionLabel({ generation: 4 }, null), 'Gen 4 · ended · 0 events');
+});
+
 test('audio facts tolerate partial shapes', () => {
   const facts = V.audioFacts({ audio_events: 'x', audio: 'not a list' });
   assert.equal(facts.events, 0);

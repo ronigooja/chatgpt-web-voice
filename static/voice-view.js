@@ -651,6 +651,14 @@
     return active ? 'active' : 'ended';
   }
 
+  // Picker option text. For the open generation both the count and the state come from the live
+  // store and flag, so the picker and the status bar cannot disagree.
+  function generationOptionLabel(g, live) {
+    var state = live && live.open ? (live.active ? 'active' : 'ended') : (summaryIsActive(g) ? 'active' : 'ended');
+    var count = live && live.open ? live.count : toInt(g.event_count);
+    return 'Gen ' + g.generation + ' · ' + state + ' · ' + count + ' event' + (count === 1 ? '' : 's');
+  }
+
   var RING_ORDER = ['conversation', 'audio', 'oversize'];
 
   // Frames grouped by ring in a fixed display order; unknown rings follow, sorted by name.
@@ -699,9 +707,9 @@
     var doc = root.document;
     var $ = function (id) { return doc.getElementById(id); };
     var el = {
-      conn: $('vwConn'), orb: $('vwOrb'), theme: $('vwTheme'), delegationBadge: $('vwDelegationBadge'),
+      theme: $('vwTheme'), delegationBadge: $('vwDelegationBadge'),
       statusPill: $('vwStatusPill'), session: $('vwSession'), zoe: $('vwZoe'), genSelect: $('vwGenSelect'),
-      eventCount: $('vwEventCount'), dropped: $('vwDropped'), lastEvent: $('vwLastEvent'), gapPill: $('vwGapPill'),
+      eventCount: $('vwEventCount'), lastEvent: $('vwLastEvent'), gapPill: $('vwGapPill'),
       audioWrap: $('vwAudioWrap'), audioBtn: $('vwAudioBtn'), audioSummary: $('vwAudioSummary'), audioPop: $('vwAudioPop'),
       notice: $('vwNotice'), creation: $('vwCreation'), creationSummary: $('vwCreationSummary'),
       creationBody: $('vwCreationBody'), creationCopy: $('vwCreationCopy'),
@@ -750,14 +758,14 @@
       return mq ? mq.matches : true;
     }
 
-    function setConn(label, kind) {
-      el.conn.textContent = label;
-      el.orb.className = 'orb ' + (kind || 'idle');
+    // Connection state lives in view.conn; the status pill is its only visible rendering.
+    function setConn(label) {
+      view.conn = label;
+      renderStatus();
     }
 
     function showError(message) {
       view.error = String(message || 'Unknown error');
-      setConn('Error', 'error');
       renderAll();
     }
 
@@ -794,6 +802,7 @@
 
     function renderAll() {
       renderLayout();
+      renderGenSelect();
       renderStatus();
       renderNotice();
       renderCreation();
@@ -828,27 +837,34 @@
       el.tabFrames.setAttribute('aria-selected', String(frames));
     }
 
+    // One state label drives the status pill and the picker: Live while the open generation streams,
+    // Ended once it is closed, and the connection state (Connecting, Reconnecting) while it is open.
+    function stateLabel() {
+      if (view.error) return { text: 'Error', kind: 'error' };
+      if (!view.gen) return { text: 'Loading', kind: 'neutral' };
+      if (view.active) return { text: view.conn && view.conn !== 'Live' ? view.conn : 'Live', kind: 'live' };
+      return { text: 'Ended', kind: 'neutral' };
+    }
+
     function renderStatus() {
       var list = view.store ? view.store.list() : [];
       var last = list.length ? list[list.length - 1] : null;
-      var kind = 'neutral';
-      var label = 'Loading';
-      if (view.error) { label = 'Error'; kind = 'error'; } else if (view.gen && view.active) { label = 'Live'; kind = 'live'; } else if (view.gen) { label = 'Ended'; }
-      el.statusPill.textContent = label;
-      el.statusPill.className = 'vw-pill ' + kind;
+      var state = stateLabel();
+      el.statusPill.textContent = state.text;
+      el.statusPill.className = 'vw-pill ' + state.kind;
       el.session.textContent = middleEllipsis(sessionId, 30) || '—';
       el.session.title = sessionId;
       el.session.disabled = !sessionId;
       el.zoe.textContent = middleEllipsis(view.zoeId, 30) || '—';
       el.zoe.title = view.zoeId;
       el.zoe.disabled = !view.zoeId;
-      el.eventCount.textContent = view.store ? plural(view.store.size(), 'event') : '0 events';
+      var count = view.store ? view.store.size() : 0;
+      el.eventCount.textContent = plural(count, 'event');
       var dropped = view.store ? view.store.dropped() : 0;
-      el.dropped.textContent = 'Dropped ' + dropped;
-      el.dropped.className = 'vw-stat' + (dropped > 0 ? ' warn' : '');
+      el.gapPill.textContent = 'Incomplete' + (dropped > 0 ? ' · ' + dropped + ' dropped' : '');
+      el.gapPill.hidden = !(dropped > 0 || (view.store && view.store.hasGap()));
       var lastAt = last ? formatClock(last.at) : '';
       el.lastEvent.textContent = 'Last event ' + (lastAt || '—');
-      el.gapPill.hidden = !(view.store && view.store.hasGap());
     }
 
     function renderNotice() {
@@ -1192,8 +1208,8 @@
       el.genSelect.textContent = '';
       view.gens.forEach(function (g) {
         var isOpen = Number(g.generation) === view.gen;
-        var state = generationStateLabel(g, isOpen, view.active);
-        var opt = make('option', '', 'Gen ' + g.generation + ' · ' + state + ' · ' + plural(toInt(g.event_count), 'event'));
+        var live = isOpen ? { open: true, active: view.active, count: view.store ? view.store.size() : 0 } : null;
+        var opt = make('option', '', generationOptionLabel(g, live));
         opt.value = String(g.generation);
         if (Number(g.generation) === view.gen) opt.selected = true;
         el.genSelect.appendChild(opt);
@@ -1236,7 +1252,7 @@
       es.onopen = function () {
         if (es !== view.es) return;
         view.retryDelay = 1000;
-        setConn('Live', 'listening');
+        setConn('Live');
       };
       es.addEventListener('event', function (ev) {
         if (es !== view.es) return;
@@ -1256,14 +1272,14 @@
         view.active = false;
         if (!view.endedAt) view.endedAt = new Date().toISOString();
         stopStream();
-        setConn('Ended', 'idle');
+        setConn('Ended');
         scheduleRender();
       });
       es.onerror = function () {
         if (es !== view.es) return;
         stopStream();
         if (token !== view.token || !view.active) return;
-        setConn('Reconnecting', 'idle');
+        setConn('Reconnecting');
         var delay = view.retryDelay;
         view.retryDelay = Math.min(view.retryDelay * 2, RETRY_MAX_MS);
         view.retryTimer = root.setTimeout(function () { startStream(token); }, delay);
@@ -1293,17 +1309,17 @@
       view.frames.data = null;
       view.frames.open = {};
       root.history.replaceState(null, '', viewerUrl(sessionId, view.gen, view.filters));
-      setConn('Loading', 'idle');
+      setConn('Loading');
       renderGenSelect();
       scheduleRender();
       if (view.tab === 'frames') loadFrames();
       loadSnapshot(token).then(function (ok) {
         if (!ok || token !== view.token) return;
         if (view.active) {
-          setConn('Connecting', 'idle');
+          setConn('Connecting');
           startStream(token);
         } else {
-          setConn('Ended', 'idle');
+          setConn('Ended');
         }
         scheduleRender();
       }).catch(function (e) {
@@ -1502,7 +1518,7 @@
     async function init() {
       doc.title = 'Upstream viewer · ' + (sessionId || 'no session');
       bind();
-      setConn('Loading', 'idle');
+      setConn('Loading');
       renderAll();
       if (!sessionId) return showError('Missing session id. Open /viewer?session=<gateway_session_id>.');
       if (requestedGen.error) return showError(requestedGen.error);
@@ -1546,6 +1562,7 @@
     delegationRows: delegationRows,
     summaryIsActive: summaryIsActive,
     generationStateLabel: generationStateLabel,
+    generationOptionLabel: generationOptionLabel,
     frameGroups: frameGroups,
     frameDisplay: frameDisplay,
     noticeFor: noticeFor,
