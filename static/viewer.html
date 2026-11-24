@@ -65,7 +65,7 @@
     .vw-creation-title { font-weight: 700; color: var(--ink); }
     .vw-creation-body { padding: 0 12px 10px; }
     .vw-creation-tools { display: flex; justify-content: flex-end; margin-bottom: 6px; }
-    .vw-pre { margin: 0; padding: 8px 10px; max-height: 320px; overflow: auto; border-radius: 8px; background: var(--surface-2); color: var(--ink); font-family: var(--font-mono); font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .vw-pre { margin: 0; padding: 8px 10px; max-height: 200px; overflow: auto; border-radius: 8px; background: var(--surface-2); color: var(--ink); font-family: var(--font-mono); font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
 
     /* Toolbar */
     .vw-toolbar { position: relative; z-index: 20; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
@@ -170,6 +170,10 @@
       .vw-row .vw-delivery { display: none; }
       .vw-turn, .vw-marker { grid-template-columns: 58px 62px minmax(0, 1fr); column-gap: 8px; }
       .vw-marker { grid-template-columns: 58px minmax(0, 1fr); }
+    }
+    @media (max-width: 999px) {
+      .viewer-body .top-actions { flex-wrap: nowrap; gap: 6px; overflow: hidden; }
+      .viewer-body .vw-badge { font-size: 11.5px; padding: 2px 8px; }
     }
     @media (max-width: 620px) {
       .viewer-body .header-chip { display: inline-flex; }

@@ -145,16 +145,16 @@ test('creation details count instructions and initial items without reading them
   assert.equal(d.instructionChars, 'Be brief.'.length);
   assert.equal(d.items, 3);
   assert.ok(d.body.indexOf('instructions:\nBe brief.') === 0);
-  assert.equal(V.creationSummary(d), 'Creation · instructions 9 chars · 3 initial items · ' + d.itemChars + ' chars');
+  assert.equal(V.creationSummary(d), 'instructions 9 chars · 3 initial items · ' + d.itemChars + ' chars');
 });
 
 test('creation summary handles one item, no items and unstructured payloads', () => {
   const one = V.creationDetails({ parsed: { instructions: 'x', initial_items: [{}] }, text: '' });
   assert.match(V.creationSummary(one), /1 initial item ·/);
   const none = V.creationDetails({ parsed: {}, text: '{}' });
-  assert.equal(V.creationSummary(none), 'Creation · no instructions or items');
+  assert.equal(V.creationSummary(none), 'no instructions or items');
   const raw = V.creationDetails({ parsed: null, text: 'plain text here', truncated: true });
-  assert.equal(V.creationSummary(raw), 'Creation · 15 chars (unstructured)');
+  assert.equal(V.creationSummary(raw), '15 chars (unstructured)');
   assert.match(raw.body, /\[payload truncated by gateway\]$/);
   assert.equal(V.creationDetails(null), null);
   assert.equal(V.creationSummary(null), '');

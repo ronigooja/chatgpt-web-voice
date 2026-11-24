@@ -522,11 +522,11 @@
 
   function creationSummary(d) {
     if (!d) return '';
-    if (!d.parsed) return 'Creation · ' + d.rawChars + ' chars (unstructured)';
+    if (!d.parsed) return d.rawChars + ' chars (unstructured)';
     var parts = [];
     if (d.hasInstructions) parts.push('instructions ' + d.instructionChars + ' chars');
     if (d.hasItems) parts.push(d.items + ' initial item' + (d.items === 1 ? '' : 's') + ' · ' + d.itemChars + ' chars');
-    return 'Creation · ' + (parts.join(' · ') || 'no instructions or items');
+    return parts.join(' · ') || 'no instructions or items';
   }
 
   // Warnings for an incomplete, truncated or capped log. Empty when the log is complete.
