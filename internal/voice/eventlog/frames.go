@@ -127,10 +127,10 @@ func shapeCharset(s string) string {
 		}
 	}
 	if hex {
-		return "hex"
+		return "hexchars"
 	}
 	if b64 {
-		return "base64"
+		return "b64chars"
 	}
 	if ascii {
 		return "ascii"
@@ -147,10 +147,10 @@ func safeShapeKey(key string) string {
 	if !shapeKeyPattern.MatchString(key) || shapeUUIDPattern.MatchString(key) {
 		return "<key>"
 	}
-	if len(key) >= 24 && shapeCharset(key) == "hex" {
+	if len(key) >= 24 && shapeCharset(key) == "hexchars" {
 		return "<key>"
 	}
-	if len(key) > 24 && shapeCharset(key) == "base64" {
+	if len(key) > 24 && shapeCharset(key) == "b64chars" {
 		return "<key>"
 	}
 	return key

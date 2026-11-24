@@ -4,7 +4,9 @@ Gateway logs carry metadata only, never conversation content, request or respons
 bodies, credentials, or tokens at any level. Conversation content is available
 in the in-memory `/viewer` event viewer. Event-shape sampling records types,
 safe structural key names, lengths and counts, not payload values. Audio shape
-samples also retain safe key names and charset classes, never values. Client
+samples also retain safe key names and charset classes (`hexchars`, `b64chars`,
+`ascii`, `utf8`, or `mixed`), never values. Charset is a character-class hint,
+not proof of an encoding. Client
 voice access logs omit caller-supplied IDs, paths and user agents.
 
 The viewer retains sensitive raw data-channel frames in memory only. Separate
