@@ -79,6 +79,51 @@ func TestAudioNotStored(t *testing.T) {
 	}
 }
 
+func TestEventTypes(t *testing.T) {
+	cases := []struct {
+		name, payload, typ, wrapper string
+		binary                      bool
+	}{
+		{"wrapped object", `{"type":"data_message","data":{"type":"turn.delta"}}`, "turn.delta", "data_message", false},
+		{"wrapped string", `{"type":"data_message","data":"{\"type\":\"output_transcript.added\"}"}`, "output_transcript.added", "data_message", false},
+		{"delegation", `{"type":"data_message","data":{"type":"delegation.created"}}`, "delegation.created", "data_message", false},
+		{"direct", `{"type":"session.context.append","data":{"type":"other"}}`, "session.context.append", "", false},
+		{"text", `not json`, "text", "", false},
+		{"binary", `{"type":"data_message"}`, "binary", "", true},
+		{"missing inner type", `{"type":"data_message","data":{}}`, "data_message", "", false},
+		{"same inner type", `{"type":"data_message","data":{"type":"data_message"}}`, "data_message", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New(Config{})
+			k := Key{"a", 1}
+			s.Start(k, "")
+			s.Append(k, "d", "s", "queued", []byte(tc.payload), tc.binary)
+			snap, _ := s.Snapshot(k, 0, 10)
+			if len(snap.Events) != 1 || snap.Events[0].Type != tc.typ || snap.Events[0].Wrapper != tc.wrapper || snap.Events[0].Payload != tc.payload {
+				t.Fatalf("snapshot: %+v", snap)
+			}
+			if got, want := s.bytes, generationOverhead+eventSize(snap.Events[0]); got != want {
+				t.Fatalf("accounting: got %d, want %d", got, want)
+			}
+		})
+	}
+}
+
+func TestOversizeJSON(t *testing.T) {
+	s := New(Config{EventBytes: 64})
+	k := Key{"a", 1}
+	s.Start(k, "")
+	dropped := `{"type":"data_message","data":"` + strings.Repeat("x", 100) + `"}`
+	audio := `{"type":"session.output_audio.delta","data":"` + strings.Repeat("x", 100) + `"}`
+	s.Append(k, "", "", "", []byte(dropped), false)
+	s.Append(k, "", "", "", []byte(audio), false)
+	x, _ := s.Snapshot(k, 0, 10)
+	if x.Dropped != 1 || x.AudioEvents != 1 || x.AudioBytes != uint64(len(audio)) || x.NewestSeq != 0 || len(x.Events) != 0 {
+		t.Fatalf("snapshot: %+v", x)
+	}
+}
+
 func TestExpiry(t *testing.T) {
 	s := New(Config{TTL: time.Nanosecond})
 	k := Key{"a", 1}
