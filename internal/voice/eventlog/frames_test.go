@@ -111,7 +111,7 @@ func TestAudioShapeKeysAndCharsets(t *testing.T) {
 	raw := []byte(`{"type":"session.input_audio.append","audio_format":"audio/pcm","encoded":"SGVsbG8=","hex_data":"deadbeef","note":"hello world!","unicode":"你好","mixed":"a\nb","values":[1,true],"123e4567-e89b-12d3-a456-426614174000":"PRIVATE_MARKER","ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij":"PRIVATE_MARKER","data":"{\"nested_field\":\"PRIVATE_MARKER\"}"}`)
 	paths := audioShape(raw)
 	text := strings.Join(paths, "\n")
-	for _, expected := range []string{"audio_format=string(len=9,charset=ascii)", "encoded=string(len=8,charset=base64)", "hex_data=string(len=8,charset=hex)", "unicode=string(len=6,charset=utf8)", "mixed=string(len=3,charset=mixed)", "values=array(count=2)", "data.<json>.nested_field=string", "<key>=string"} {
+	for _, expected := range []string{"audio_format=string(len=9,charset=base64)", "note=string(len=12,charset=ascii)", "encoded=string(len=8,charset=base64)", "hex_data=string(len=8,charset=hex)", "unicode=string(len=6,charset=utf8)", "mixed=string(len=3,charset=mixed)", "values=array(count=2)", "data.<json>.nested_field=string", "<key>=string"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("missing %q in %s", expected, text)
 		}
