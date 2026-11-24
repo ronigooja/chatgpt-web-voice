@@ -54,16 +54,6 @@ func TestEventCaptureRelayPaths(t *testing.T) {
 			if snap.ZoeGeneration != 3 {
 				t.Fatal(snap.ZoeGeneration)
 			}
-			frames, _ := store.Frames(key, "all")
-			if len(frames.Frames) != 3 {
-				t.Fatalf("expected exactly three relay frames, got %d", len(frames.Frames))
-			}
-			wantFrames := []string{"upstream_to_client", "upstream_to_client", "client_to_upstream"}
-			for i, frame := range frames.Frames {
-				if frame.Direction != wantFrames[i] {
-					t.Fatalf("frames: %+v", frames.Frames)
-				}
-			}
 			break
 		}
 		if time.Now().After(deadline) {

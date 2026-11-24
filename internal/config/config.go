@@ -280,10 +280,10 @@ func normalizeVoiceRoute(raw string) string {
 
 // Validate rejects configurations that would leave protected content exposed.
 func (c Config) Validate() error {
-	if c.VoiceAudioCaptureMaxBytes <= 0 {
+	if c.VoiceAudioCaptureMaxBytes <= 0 && (c.VoiceAudioCapture || os.Getenv("VOICE_AUDIO_CAPTURE_MAX_BYTES") != "") {
 		return fmt.Errorf("VOICE_AUDIO_CAPTURE_MAX_BYTES must be positive")
 	}
-	if c.VoiceAudioCaptureSegmentSeconds <= 0 {
+	if c.VoiceAudioCaptureSegmentSeconds <= 0 && (c.VoiceAudioCapture || os.Getenv("VOICE_AUDIO_CAPTURE_SEGMENT_SECONDS") != "") {
 		return fmt.Errorf("VOICE_AUDIO_CAPTURE_SEGMENT_SECONDS must be positive")
 	}
 	token, err := c.ZoeTranscriptToken()

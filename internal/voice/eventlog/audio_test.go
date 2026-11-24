@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestAudioFactsByDirectionSourceAndType(t *testing.T) {
