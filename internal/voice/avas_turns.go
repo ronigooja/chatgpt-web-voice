@@ -83,8 +83,13 @@ func (s *Service) observeAVASCallEvent(session string, media relay.Session, call
 		go s.closeTracked(media, call.owned.id, "upstream_voice_end")
 		return
 	}
-	if e.Type == "turn.done" && s.cfg.ZoeFinalTurnDebugText && call.owned == nil {
-		s.logger.Debug("zoe_debug_message", "event", "turn.done", "role", e.Turn.Role, "text", turnText(e.Turn.Transcript))
+	if e.Type == "turn.done" && call.owned == nil {
+		text := turnText(e.Turn.Transcript)
+		role := "other"
+		if e.Turn.Role == "user" || e.Turn.Role == "assistant" {
+			role = e.Turn.Role
+		}
+		s.logger.Debug("zoe_debug_message", "event", "turn.done", "role", role, "turn_id_present", e.Turn.ID != "", "byte_length", len(text), "rune_length", utf8.RuneCountInString(text))
 	}
 	var id, userTurnID string
 	switch {
@@ -93,8 +98,9 @@ func (s *Service) observeAVASCallEvent(session string, media relay.Session, call
 	case e.Type == "delegation.created" && e.Item.Target == "client" && strings.TrimSpace(delegationText(e.Item.Content)) != "" &&
 		e.Item.ID != "" && utf8.RuneCountInString(e.Item.ID) <= 256:
 		id = e.Item.ID
-		if s.cfg.ZoeFinalTurnDebugText && call.owned == nil {
-			s.logger.Debug("zoe_debug_message", "event", "delegation.created", "target", "client", "text", delegationText(e.Item.Content))
+		if call.owned == nil {
+			text := delegationText(e.Item.Content)
+			s.logger.Debug("zoe_debug_message", "event", "delegation.created", "target", "client", "byte_length", len(text), "rune_length", utf8.RuneCountInString(text))
 		}
 	default:
 		return

@@ -822,18 +822,18 @@ func TestAVASCreateAcceptedSDPThenSidebandFailurePersistsUnknownNotNeverEstablis
 	}
 }
 
-func TestAVASCreateDebugRejectionLogsBodyOnlyWhenSwitchEnabled(t *testing.T) {
+func TestCreateDebugRejectionLogsMetadataOnly(t *testing.T) {
 	for _, route := range []string{"avas", "wm"} {
 		for _, tc := range []struct {
 			name    string
 			enabled bool
 			want    bool
 			level   slog.Level
-		}{{"on", true, true, slog.LevelDebug}, {"off", false, false, slog.LevelDebug}, {"info", true, false, slog.LevelInfo}} {
+		}{{"debug", true, true, slog.LevelDebug}, {"info", false, false, slog.LevelInfo}} {
 			t.Run(route+"/"+tc.name, func(t *testing.T) {
 				var logs strings.Builder
 				logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: tc.level}))
-				body := "debug-body-prefix" + strings.Repeat("界", 5000) + "END"
+				body := "SECRET-CONTENT-MARKER-1234" + strings.Repeat("界", 5000) + "END"
 				db, err := store.Open(filepath.Join(t.TempDir(), "voice.db"))
 				if err != nil {
 					t.Fatal(err)
@@ -860,17 +860,17 @@ func TestAVASCreateDebugRejectionLogsBodyOnlyWhenSwitchEnabled(t *testing.T) {
 					}
 				}))
 				defer server.Close()
-				svc := New(config.Config{SkipSSLVerify: true, UpstreamTransport: config.TransportGo, MaxAccountAttempts: 1, VoiceUpstreamRoute: route, ZoeFinalTurnDebugText: tc.enabled}, pool, logger)
+				svc := New(config.Config{SkipSSLVerify: true, UpstreamTransport: config.TransportGo, MaxAccountAttempts: 1, VoiceUpstreamRoute: route}, pool, logger)
 				svc.avasURL = server.URL + "/calls"
 				svc.realtimeURL = server.URL + "/realtime/wm"
 				if _, err := svc.CreateSession(CreateSessionRequest{Owner: "api_key:1", OfferSDP: readTestdata(t, "wm_offer.sdp")}); err == nil {
 					t.Fatal("expected upstream rejection")
 				}
-				if strings.Contains(logs.String(), "debug-body-prefix") != tc.want {
-					t.Fatalf("logs=%q", logs.String())
+				if strings.Contains(logs.String(), "SECRET-CONTENT-MARKER-1234") || strings.Contains(logs.String(), body) {
+					t.Fatalf("body leaked: %q", logs.String())
 				}
-				if tc.want && !strings.Contains(logs.String(), body) {
-					t.Fatal("upstream body was truncated")
+				if strings.Contains(logs.String(), "upstream_body_bytes") != tc.want {
+					t.Fatalf("logs=%q", logs.String())
 				}
 			})
 		}

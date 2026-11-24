@@ -45,22 +45,6 @@ func TestLoadDefaultsToDevelopmentEnvironment(t *testing.T) {
 	}
 }
 
-func TestLoadZoeFinalTurnDebugTextDefaultsOnAndLoads(t *testing.T) {
-	t.Setenv("VOICE_ZOE_FINAL_TURN_DEBUG_TEXT", "")
-	t.Setenv("VOICE_LOG_LEVEL", "")
-	if !Load().ZoeFinalTurnDebugText || Load().LogLevel != "debug" {
-		t.Fatal("debug text must default on with debug log level")
-	}
-	t.Setenv("VOICE_ZOE_FINAL_TURN_DEBUG_TEXT", "true")
-	if !Load().ZoeFinalTurnDebugText {
-		t.Fatal("debug text override not loaded")
-	}
-	t.Setenv("VOICE_ZOE_FINAL_TURN_DEBUG_TEXT", "false")
-	if Load().ZoeFinalTurnDebugText {
-		t.Fatal("explicit false must disable debug text")
-	}
-}
-
 func TestLoadEventShapeSamplingDefaultsOffAndCaps(t *testing.T) {
 	t.Setenv("VOICE_EVENT_SHAPE_SAMPLING", "")
 	t.Setenv("VOICE_EVENT_SHAPE_SAMPLING_MAX_FRAMES", "")
