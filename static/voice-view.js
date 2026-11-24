@@ -1172,12 +1172,14 @@
     function renderFrames() {
       var f = view.frames;
       el.frames.textContent = '';
+      el.framesStats.textContent = '';
       if (f.loading) el.framesStats.textContent = 'Loading frames…';
       else if (f.data) {
-        el.framesStats.textContent = ringStats(f.data).map(function (r) {
-          return r.name + ': ' + plural(r.frames, 'frame') + ' · ' + formatBytes(r.bytes) + (r.dropped ? ' · dropped ' + r.dropped : '');
-        }).join('   ');
-      } else el.framesStats.textContent = '';
+        ringStats(f.data).forEach(function (r) {
+          el.framesStats.appendChild(make('span', 'vw-frame-pill',
+            r.name + ': ' + plural(r.frames, 'frame') + ' · ' + formatBytes(r.bytes) + (r.dropped ? ' · dropped ' + r.dropped : '')));
+        });
+      }
       if (f.error) { el.frames.appendChild(emptyRow(f.error)); return; }
       if (!f.data) return;
       var list = Array.isArray(f.data.frames) ? f.data.frames : [];
