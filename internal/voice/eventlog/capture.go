@@ -43,8 +43,11 @@ type audioWriter struct {
 	stop     chan struct{}
 	wake     chan struct{}
 	stopOnce sync.Once
+	mu       sync.Mutex
 	ended    sync.Map
 	drops    sync.Map
+	recent   map[Key]struct{}
+	order    []Key
 }
 
 func newAudioWriter(c Config) *audioWriter {
@@ -67,7 +70,12 @@ func (s *Store) CaptureAudio(k Key, data []byte) {
 	if w.closed.Load() {
 		return
 	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if _, ended := w.ended.Load(k); ended {
+		return
+	}
+	if _, ended := w.recent[k]; ended {
 		return
 	}
 	if len(w.queue) == cap(w.queue) {
@@ -83,7 +91,9 @@ func (s *Store) CaptureAudio(k Key, data []byte) {
 	}
 }
 func (w *audioWriter) end(k Key) {
+	w.mu.Lock()
 	w.ended.Store(k, struct{}{})
+	w.mu.Unlock()
 	select {
 	case w.wake <- struct{}{}:
 	default:
@@ -178,14 +188,30 @@ func (w *audioWriter) run() {
 	defer close(w.done)
 	segments := map[Key]map[string]*audioSegment{}
 	disabled := map[Key]bool{}
+	var total int64
+	if w.cfg.AudioCaptureMaxBytes > 0 {
+		total = w.scanRetention(nil, false)
+	}
+	retain := func() {
+		if w.cfg.AudioCaptureMaxBytes > 0 && total > w.cfg.AudioCaptureMaxBytes {
+			total = w.scanRetention(segments, true)
+		}
+	}
+	finishOne := func(seg *audioSegment) error {
+		err := finishSegment(seg)
+		if info, statErr := os.Stat(seg.path); statErr == nil {
+			total += info.Size()
+		}
+		return err
+	}
 	finish := func(k Key) {
 		for _, seg := range segments[k] {
-			if err := finishSegment(seg); err != nil {
+			if err := finishOne(seg); err != nil {
 				slog.Warn("audio_capture_write_failed", "class", "io")
 			}
 		}
 		delete(segments, k)
-		w.retain(segments)
+		retain()
 	}
 	process := func(m audioMessage) {
 		defer func() {
@@ -220,10 +246,10 @@ func (w *audioWriter) run() {
 		}
 		seg := segments[m.key][direction]
 		if seg != nil && shouldRotate(seg, m.at, w.cfg.AudioCaptureSegment, len(pcm)) {
-			err = finishSegment(seg)
+			err = finishOne(seg)
 			delete(segments[m.key], direction)
 			seg = nil
-			w.retain(segments)
+			retain()
 		}
 		if err == nil && seg == nil {
 			dir := filepath.Join(w.cfg.AudioCaptureDir, id, fmt.Sprintf("gen%d", m.key.Generation))
@@ -263,9 +289,39 @@ func (w *audioWriter) run() {
 	finishEnded := func() {
 		w.ended.Range(func(key, _ any) bool {
 			k := key.(Key)
+			w.mu.Lock()
+			if len(w.queue) != 0 {
+				w.mu.Unlock()
+				select {
+				case w.wake <- struct{}{}:
+				default:
+				}
+				return true
+			}
+			w.mu.Unlock()
 			if _, ok := segments[k]; ok {
 				finish(k)
 			}
+			w.mu.Lock()
+			delete(disabled, k)
+			if value, ok := w.drops.LoadAndDelete(k); ok {
+				slog.Warn("audio_capture_queue_full", "dropped", value.(*atomic.Uint64).Load())
+			}
+			w.ended.Delete(k)
+			// Remember the latest 1024 ended calls; older tombstones are evicted.
+			if w.recent == nil {
+				w.recent = make(map[Key]struct{})
+			}
+			if _, ok := w.recent[k]; !ok {
+				if len(w.order) == 1024 {
+					delete(w.recent, w.order[0])
+					copy(w.order, w.order[1:])
+					w.order = w.order[:1023]
+				}
+				w.order = append(w.order, k)
+				w.recent[k] = struct{}{}
+			}
+			w.mu.Unlock()
 			return true
 		})
 	}
@@ -291,9 +347,9 @@ done:
 		return true
 	})
 }
-func (w *audioWriter) retain(open map[Key]map[string]*audioSegment) {
+func (w *audioWriter) scanRetention(open map[Key]map[string]*audioSegment, remove bool) int64 {
 	if w.cfg.AudioCaptureMaxBytes <= 0 {
-		return
+		return 0
 	}
 	opened := map[string]bool{}
 	for _, dirs := range open {
@@ -316,19 +372,20 @@ func (w *audioWriter) retain(open map[Key]map[string]*audioSegment) {
 		if err != nil || !info.Mode().IsRegular() {
 			return nil
 		}
-		total += info.Size()
 		if !opened[path] {
+			total += info.Size()
 			files = append(files, file{path, info.Size(), info.ModTime()})
 		}
 		return nil
 	})
 	sort.Slice(files, func(i, j int) bool { return files[i].mod.Before(files[j].mod) })
 	for _, f := range files {
-		if total <= w.cfg.AudioCaptureMaxBytes {
+		if !remove || total <= w.cfg.AudioCaptureMaxBytes {
 			break
 		}
 		if os.Remove(f.path) == nil {
 			total -= f.size
 		}
 	}
+	return total
 }

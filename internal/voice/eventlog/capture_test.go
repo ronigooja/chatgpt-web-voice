@@ -2,6 +2,7 @@ package eventlog
 
 import (
 	"encoding/binary"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -162,13 +163,80 @@ func TestRetentionProtectsOpenFile(t *testing.T) {
 	if err := os.Chtimes(older, old, old); err != nil {
 		t.Fatal(err)
 	}
-	w := &audioWriter{cfg: Config{AudioCaptureDir: dir, AudioCaptureMaxBytes: 60}}
-	w.retain(map[Key]map[string]*audioSegment{{"s", 1}: {"in": {path: opened}}})
+	w := &audioWriter{cfg: Config{AudioCaptureDir: dir, AudioCaptureMaxBytes: 59}}
+	w.scanRetention(map[Key]map[string]*audioSegment{{"s", 1}: {"in": {path: opened}}}, true)
 	if _, err := os.Stat(older); !os.IsNotExist(err) {
 		t.Fatal("old finished file retained")
 	}
 	if _, err := os.Stat(opened); err != nil {
 		t.Fatal("open file removed")
+	}
+}
+
+func TestCaptureEndedStateBounded(t *testing.T) {
+	c := Defaults()
+	c.AudioCapture = true
+	c.AudioCaptureDir = t.TempDir()
+	c.AudioCaptureMaxBytes = 1 << 20
+	s := New(c)
+	frame := []byte(`{"type":"session.input_audio.append","audio":"AQIDBA=="}`)
+	for i := 0; i < 2000; i++ {
+		k := Key{fmt.Sprintf("bad/%d", i), 1}
+		s.CaptureAudio(k, frame)
+		s.End(k)
+	}
+	s.Close()
+	n := 0
+	s.capture.ended.Range(func(_, _ any) bool { n++; return true })
+	if n != 0 {
+		t.Fatalf("ended entries: %d", n)
+	}
+	s.capture.drops.Range(func(_, _ any) bool { n++; return true })
+	if n != 0 || len(s.capture.recent) > 1024 || len(s.capture.order) > 1024 {
+		t.Fatalf("unbounded state: drops %d recent %d order %d", n, len(s.capture.recent), len(s.capture.order))
+	}
+}
+
+func TestCaptureLateFrameIgnored(t *testing.T) {
+	c := Defaults()
+	c.AudioCapture = true
+	c.AudioCaptureDir = t.TempDir()
+	s := New(c)
+	k := Key{"late", 1}
+	s.End(k)
+	s.CaptureAudio(k, []byte(`{"type":"session.input_audio.append","audio":"AQIDBA=="}`))
+	s.Close()
+	files, _ := filepath.Glob(filepath.Join(c.AudioCaptureDir, "late", "gen1", "*.wav"))
+	if len(files) != 0 {
+		t.Fatal("late frame created a file")
+	}
+}
+
+func TestCaptureRetentionCountsExisting(t *testing.T) {
+	dir := t.TempDir()
+	old := filepath.Join(dir, "old.wav")
+	if err := os.WriteFile(old, make([]byte, 48), 0600); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(old, at, at); err != nil {
+		t.Fatal(err)
+	}
+	c := Defaults()
+	c.AudioCapture = true
+	c.AudioCaptureDir = dir
+	c.AudioCaptureMaxBytes = 50
+	s := New(c)
+	k := Key{"new", 1}
+	s.CaptureAudio(k, []byte(`{"type":"session.input_audio.append","audio":"AQIDBA=="}`))
+	s.End(k)
+	s.Close()
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatal("pre-existing oldest file not deleted")
+	}
+	files, _ := filepath.Glob(filepath.Join(dir, "new", "gen1", "*.wav"))
+	if len(files) != 1 {
+		t.Fatal("newest file not retained")
 	}
 }
 func TestWriteErrorDisablesOnlyThatCall(t *testing.T) {
