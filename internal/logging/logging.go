@@ -73,6 +73,17 @@ func (w *responseRecorder) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
 }
 
+func (w *responseRecorder) FlushError() error {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	return http.NewResponseController(w.ResponseWriter).Flush()
+}
+
+func (w *responseRecorder) Flush() {
+	_ = w.FlushError()
+}
+
 // HTTPMiddleware adds request IDs, panic recovery, and structured access logs.
 func HTTPMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
