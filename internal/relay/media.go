@@ -271,16 +271,17 @@ type dataChannelPipe struct {
 }
 
 type dataChannelBridge struct {
-	done         <-chan struct{}
-	logger       *slog.Logger
-	downToUp     *dataChannelPipe
-	upToDown     *dataChannelPipe
-	closeOnce    sync.Once
-	closeErr     error
-	downstreamMu sync.Mutex
-	downstream   *webrtc.DataChannel
-	upstreamMu   sync.Mutex
-	upstream     *webrtc.DataChannel
+	done          <-chan struct{}
+	logger        *slog.Logger
+	onClientClose func()
+	downToUp      *dataChannelPipe
+	upToDown      *dataChannelPipe
+	closeOnce     sync.Once
+	closeErr      error
+	downstreamMu  sync.Mutex
+	downstream    *webrtc.DataChannel
+	upstreamMu    sync.Mutex
+	upstream      *webrtc.DataChannel
 
 	observeMu    sync.RWMutex
 	observe      func([]byte)
@@ -438,6 +439,7 @@ func (r *PionRelay) NewSession(ctx context.Context, clientOffer string, route Ro
 	session.bridge = newDataChannelBridge(session.done, session.logger, func(err error) {
 		session.fail("data_channel_failed", err)
 	}, session.markActiveChannelOpen)
+	session.bridge.onClientClose = func() { _ = session.CloseWithReason("client_data_channel_closed") }
 	session.bridge.setObserver(session.observeEvent)
 	session.bridge.capture = session.capture
 	if session.shapeSampler != nil {
@@ -1218,7 +1220,11 @@ func (b *dataChannelBridge) bindSource(channel *webrtc.DataChannel, destination 
 		case <-b.done:
 			return
 		default:
-			destination.reportError(fmt.Errorf("%s DataChannel closed", destination.name))
+			if b.onClientClose != nil {
+				b.onClientClose()
+			} else {
+				destination.reportError(fmt.Errorf("%s DataChannel closed", destination.name))
+			}
 		}
 	})
 }
