@@ -2,6 +2,7 @@ package eventlog
 
 import (
 	"encoding/binary"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -162,13 +163,176 @@ func TestRetentionProtectsOpenFile(t *testing.T) {
 	if err := os.Chtimes(older, old, old); err != nil {
 		t.Fatal(err)
 	}
-	w := &audioWriter{cfg: Config{AudioCaptureDir: dir, AudioCaptureMaxBytes: 60}}
-	w.retain(map[Key]map[string]*audioSegment{{"s", 1}: {"in": {path: opened}}})
+	w := &audioWriter{cfg: Config{AudioCaptureDir: dir, AudioCaptureMaxBytes: 59}}
+	w.scanRetention(map[Key]map[string]*audioSegment{{"s", 1}: {"in": {path: opened}}}, true)
 	if _, err := os.Stat(older); !os.IsNotExist(err) {
 		t.Fatal("old finished file retained")
 	}
 	if _, err := os.Stat(opened); err != nil {
 		t.Fatal("open file removed")
+	}
+}
+
+func TestCaptureEndedStateBounded(t *testing.T) {
+	c := Defaults()
+	c.AudioCapture = true
+	c.AudioCaptureDir = t.TempDir()
+	c.AudioCaptureMaxBytes = 1 << 20
+	s := New(c)
+	frame := []byte(`{"type":"session.input_audio.append","audio":"AQIDBA=="}`)
+	for i := 0; i < 2000; i++ {
+		k := Key{fmt.Sprintf("bad/%d", i), 1}
+		s.CaptureAudio(k, frame)
+		s.End(k)
+	}
+	s.Close()
+	n := 0
+	s.capture.ended.Range(func(_, _ any) bool { n++; return true })
+	if n != 0 {
+		t.Fatalf("ended entries: %d", n)
+	}
+	if n != 0 || s.capture.recentCount.Load() > 1024 || s.capture.disabledCount.Load() != 0 {
+		t.Fatalf("unbounded state: ended %d recent %d disabled %d", n, s.capture.recentCount.Load(), s.capture.disabledCount.Load())
+	}
+}
+
+func waitCapture(t *testing.T, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !condition() {
+		if time.Now().After(deadline) {
+			t.Fatal("capture condition timed out")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestEndedCleanupBeforeClose(t *testing.T) {
+	c := Defaults()
+	c.AudioCapture = true
+	c.AudioCaptureDir = t.TempDir()
+	s := New(c)
+	defer s.Close()
+	k := Key{"invalid/path", 1}
+	s.CaptureAudio(k, []byte(`{"type":"session.input_audio.append","audio":"AQIDBA=="}`))
+	waitCapture(t, func() bool { return s.capture.disabledCount.Load() == 1 })
+	v, _ := s.capture.states.Load(k)
+	v.(*captureState).drops.Add(3)
+	s.End(k)
+	waitCapture(t, func() bool {
+		_, pending := s.capture.ended.Load(k)
+		return !pending && s.capture.disabledCount.Load() == 0 && s.capture.recentCount.Load() == 1
+	})
+	if v.(*captureState).drops.Load() != 0 {
+		t.Fatal("drops not cleared")
+	}
+}
+
+func TestRetentionScansOnlyOverLimit(t *testing.T) {
+	c := Defaults()
+	c.AudioCapture = true
+	c.AudioCaptureDir = t.TempDir()
+	c.AudioCaptureMaxBytes = 48 * 20
+	s := New(c)
+	defer s.Close()
+	waitCapture(t, func() bool { return s.capture.scans.Load() == 1 })
+	frame := []byte(`{"type":"session.input_audio.append","audio":"AQIDBA=="}`)
+	for i := 0; i < 21; i++ {
+		k := Key{fmt.Sprintf("s%d", i), 1}
+		s.CaptureAudio(k, frame)
+		s.End(k)
+		want := int64(i + 1)
+		waitCapture(t, func() bool { return s.capture.recentCount.Load() >= want })
+		if i < 20 && s.capture.scans.Load() != 1 {
+			t.Fatal("unexpected scan below limit")
+		}
+	}
+	if s.capture.scans.Load() <= 1 {
+		t.Fatal("missing over-limit scan")
+	}
+}
+
+func TestEndedFinishesDuringOtherStream(t *testing.T) {
+	c := Defaults()
+	c.AudioCapture = true
+	c.AudioCaptureDir = t.TempDir()
+	c.AudioCaptureMaxBytes = 1 << 30
+	c.AudioCaptureSegment = time.Hour
+	s := New(c)
+	defer s.Close()
+	frame := []byte(`{"type":"session.input_audio.append","audio":"AQIDBA=="}`)
+	k := Key{"finished", 1}
+	s.CaptureAudio(k, frame)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				s.CaptureAudio(Key{"stream", 1}, frame)
+			}
+		}
+	}()
+	defer func() { close(stop); <-done }()
+	s.End(k)
+	waitCapture(t, func() bool {
+		files, _ := filepath.Glob(filepath.Join(c.AudioCaptureDir, "finished", "gen1", "*.wav"))
+		if len(files) != 1 {
+			return false
+		}
+		b, err := os.ReadFile(files[0])
+		return err == nil && len(b) > 44 && int(binary.LittleEndian.Uint32(b[40:44])) == len(b)-44
+	})
+	select {
+	case <-done:
+		t.Fatal("stream stopped early")
+	default:
+	}
+}
+
+func TestCaptureLateFrameIgnored(t *testing.T) {
+	c := Defaults()
+	c.AudioCapture = true
+	c.AudioCaptureDir = t.TempDir()
+	s := New(c)
+	k := Key{"late", 1}
+	s.End(k)
+	s.CaptureAudio(k, []byte(`{"type":"session.input_audio.append","audio":"AQIDBA=="}`))
+	s.Close()
+	files, _ := filepath.Glob(filepath.Join(c.AudioCaptureDir, "late", "gen1", "*.wav"))
+	if len(files) != 0 {
+		t.Fatal("late frame created a file")
+	}
+}
+
+func TestCaptureRetentionCountsExisting(t *testing.T) {
+	dir := t.TempDir()
+	old := filepath.Join(dir, "old.wav")
+	if err := os.WriteFile(old, make([]byte, 48), 0600); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(old, at, at); err != nil {
+		t.Fatal(err)
+	}
+	c := Defaults()
+	c.AudioCapture = true
+	c.AudioCaptureDir = dir
+	c.AudioCaptureMaxBytes = 50
+	s := New(c)
+	k := Key{"new", 1}
+	s.CaptureAudio(k, []byte(`{"type":"session.input_audio.append","audio":"AQIDBA=="}`))
+	s.End(k)
+	s.Close()
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatal("pre-existing oldest file not deleted")
+	}
+	files, _ := filepath.Glob(filepath.Join(dir, "new", "gen1", "*.wav"))
+	if len(files) != 1 {
+		t.Fatal("newest file not retained")
 	}
 }
 func TestWriteErrorDisablesOnlyThatCall(t *testing.T) {

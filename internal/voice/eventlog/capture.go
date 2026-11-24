@@ -23,9 +23,17 @@ const captureQueueSize = 256
 const maxSegmentBytes = 1 << 30
 
 type audioMessage struct {
-	key  Key
-	data []byte
-	at   time.Time
+	key   Key
+	data  []byte
+	at    time.Time
+	state *captureState
+}
+
+const captureEnded = uint64(1) << 63
+
+type captureState struct {
+	pending atomic.Uint64
+	drops   atomic.Uint64
 }
 type audioSegment struct {
 	file  *os.File
@@ -34,17 +42,20 @@ type audioSegment struct {
 	bytes uint32
 }
 type audioWriter struct {
-	cfg      Config
-	queue    chan audioMessage
-	done     chan struct{}
-	now      func() time.Time
-	closed   atomic.Bool
-	inflight atomic.Int64
-	stop     chan struct{}
-	wake     chan struct{}
-	stopOnce sync.Once
-	ended    sync.Map
-	drops    sync.Map
+	cfg           Config
+	queue         chan audioMessage
+	done          chan struct{}
+	now           func() time.Time
+	closed        atomic.Bool
+	inflight      atomic.Int64
+	stop          chan struct{}
+	wake          chan struct{}
+	stopOnce      sync.Once
+	ended         sync.Map
+	states        sync.Map
+	recentCount   atomic.Int64
+	disabledCount atomic.Int64
+	scans         atomic.Int64
 }
 
 func newAudioWriter(c Config) *audioWriter {
@@ -67,23 +78,50 @@ func (s *Store) CaptureAudio(k Key, data []byte) {
 	if w.closed.Load() {
 		return
 	}
-	if _, ended := w.ended.Load(k); ended {
-		return
+	v, _ := w.states.LoadOrStore(k, &captureState{})
+	state := v.(*captureState)
+	for {
+		n := state.pending.Load()
+		if n&captureEnded != 0 {
+			return
+		}
+		if state.pending.CompareAndSwap(n, n+1) {
+			break
+		}
 	}
+	defer func() {
+		if state.pending.Add(^uint64(0)) == captureEnded {
+			select {
+			case w.wake <- struct{}{}:
+			default:
+			}
+		}
+	}()
 	if len(w.queue) == cap(w.queue) {
-		v, _ := w.drops.LoadOrStore(k, &atomic.Uint64{})
-		v.(*atomic.Uint64).Add(1)
+		state.drops.Add(1)
 		return
 	}
+	state.pending.Add(1)
 	select {
-	case w.queue <- audioMessage{key: k, data: append([]byte(nil), data...), at: w.now().UTC()}:
+	case w.queue <- audioMessage{key: k, data: append([]byte(nil), data...), at: w.now().UTC(), state: state}:
 	default:
-		v, _ := w.drops.LoadOrStore(k, &atomic.Uint64{})
-		v.(*atomic.Uint64).Add(1)
+		state.pending.Add(^uint64(0))
+		state.drops.Add(1)
 	}
 }
 func (w *audioWriter) end(k Key) {
-	w.ended.Store(k, struct{}{})
+	v, _ := w.states.LoadOrStore(k, &captureState{})
+	state := v.(*captureState)
+	for {
+		n := state.pending.Load()
+		if n&captureEnded != 0 {
+			return
+		}
+		if state.pending.CompareAndSwap(n, n|captureEnded) {
+			break
+		}
+	}
+	w.ended.Store(k, state)
 	select {
 	case w.wake <- struct{}{}:
 	default:
@@ -178,18 +216,45 @@ func (w *audioWriter) run() {
 	defer close(w.done)
 	segments := map[Key]map[string]*audioSegment{}
 	disabled := map[Key]bool{}
+	var ring [1024]struct {
+		key   Key
+		state *captureState
+	}
+	ringIndex, ringLen := 0, 0
+	disable := func(k Key) {
+		if !disabled[k] {
+			disabled[k] = true
+			w.disabledCount.Add(1)
+		}
+	}
+	var total int64
+	if w.cfg.AudioCaptureMaxBytes > 0 {
+		total = w.scanRetention(nil, false)
+	}
+	retain := func() {
+		if w.cfg.AudioCaptureMaxBytes > 0 && total > w.cfg.AudioCaptureMaxBytes {
+			total = w.scanRetention(segments, true)
+		}
+	}
+	finishOne := func(seg *audioSegment) error {
+		err := finishSegment(seg)
+		if info, statErr := os.Stat(seg.path); statErr == nil {
+			total += info.Size()
+		}
+		return err
+	}
 	finish := func(k Key) {
 		for _, seg := range segments[k] {
-			if err := finishSegment(seg); err != nil {
+			if err := finishOne(seg); err != nil {
 				slog.Warn("audio_capture_write_failed", "class", "io")
 			}
 		}
 		delete(segments, k)
-		w.retain(segments)
+		retain()
 	}
 	process := func(m audioMessage) {
 		defer func() {
-			if _, ok := w.ended.Load(m.key); ok {
+			if m.state != nil && m.state.pending.Add(^uint64(0)) == captureEnded {
 				select {
 				case w.wake <- struct{}{}:
 				default:
@@ -204,14 +269,14 @@ func (w *audioWriter) run() {
 			return
 		}
 		if len(pcm) > maxSegmentBytes {
-			disabled[m.key] = true
+			disable(m.key)
 			slog.Warn("audio_capture_write_failed", "class", "frame_too_large")
 			finish(m.key)
 			return
 		}
 		id, ok := sanitizedSession(m.key.SessionID)
 		if !ok {
-			disabled[m.key] = true
+			disable(m.key)
 			slog.Warn("audio_capture_write_failed", "class", "invalid_session")
 			return
 		}
@@ -220,10 +285,10 @@ func (w *audioWriter) run() {
 		}
 		seg := segments[m.key][direction]
 		if seg != nil && shouldRotate(seg, m.at, w.cfg.AudioCaptureSegment, len(pcm)) {
-			err = finishSegment(seg)
+			err = finishOne(seg)
 			delete(segments[m.key], direction)
 			seg = nil
-			w.retain(segments)
+			retain()
 		}
 		if err == nil && seg == nil {
 			dir := filepath.Join(w.cfg.AudioCaptureDir, id, fmt.Sprintf("gen%d", m.key.Generation))
@@ -250,7 +315,7 @@ func (w *audioWriter) run() {
 		}
 		if err != nil {
 			slog.Warn("audio_capture_write_failed", "class", "io")
-			disabled[m.key] = true
+			disable(m.key)
 			finish(m.key)
 		}
 	}
@@ -261,11 +326,32 @@ func (w *audioWriter) run() {
 		}
 	}
 	finishEnded := func() {
-		w.ended.Range(func(key, _ any) bool {
+		w.ended.Range(func(key, value any) bool {
 			k := key.(Key)
+			state := value.(*captureState)
+			if state.pending.Load() != captureEnded {
+				return true
+			}
 			if _, ok := segments[k]; ok {
 				finish(k)
 			}
+			if disabled[k] {
+				delete(disabled, k)
+				w.disabledCount.Add(-1)
+			}
+			if count := state.drops.Swap(0); count != 0 {
+				slog.Warn("audio_capture_queue_full", "dropped", count)
+			}
+			w.ended.Delete(k)
+			// Retain the latest 1024 completed tombstones in a fixed FIFO ring.
+			if ringLen == len(ring) {
+				w.states.CompareAndDelete(ring[ringIndex].key, ring[ringIndex].state)
+			} else {
+				ringLen++
+				w.recentCount.Add(1)
+			}
+			ring[ringIndex].key, ring[ringIndex].state = k, state
+			ringIndex = (ringIndex + 1) % len(ring)
 			return true
 		})
 	}
@@ -273,6 +359,7 @@ func (w *audioWriter) run() {
 		select {
 		case m := <-w.queue:
 			process(m)
+			finishEnded()
 		case <-w.wake:
 			drain()
 			finishEnded()
@@ -286,15 +373,18 @@ func (w *audioWriter) run() {
 		}
 	}
 done:
-	w.drops.Range(func(key, value any) bool {
-		slog.Warn("audio_capture_queue_full", "dropped", value.(*atomic.Uint64).Load())
+	w.states.Range(func(key, value any) bool {
+		if count := value.(*captureState).drops.Swap(0); count != 0 {
+			slog.Warn("audio_capture_queue_full", "dropped", count)
+		}
 		return true
 	})
 }
-func (w *audioWriter) retain(open map[Key]map[string]*audioSegment) {
+func (w *audioWriter) scanRetention(open map[Key]map[string]*audioSegment, remove bool) int64 {
 	if w.cfg.AudioCaptureMaxBytes <= 0 {
-		return
+		return 0
 	}
+	w.scans.Add(1)
 	opened := map[string]bool{}
 	for _, dirs := range open {
 		for _, s := range dirs {
@@ -316,19 +406,20 @@ func (w *audioWriter) retain(open map[Key]map[string]*audioSegment) {
 		if err != nil || !info.Mode().IsRegular() {
 			return nil
 		}
-		total += info.Size()
 		if !opened[path] {
+			total += info.Size()
 			files = append(files, file{path, info.Size(), info.ModTime()})
 		}
 		return nil
 	})
 	sort.Slice(files, func(i, j int) bool { return files[i].mod.Before(files[j].mod) })
 	for _, f := range files {
-		if total <= w.cfg.AudioCaptureMaxBytes {
+		if !remove || total <= w.cfg.AudioCaptureMaxBytes {
 			break
 		}
 		if os.Remove(f.path) == nil {
 			total -= f.size
 		}
 	}
+	return total
 }
