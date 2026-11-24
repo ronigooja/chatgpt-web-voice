@@ -47,6 +47,8 @@ short in-memory retries. Evidence certifies gateway-local cleanup only; an
 unresolved account remains unavailable. A restart does not turn an unresolved
 lease into evidence. In-place upstream swaps are disabled for gateway-owned calls.
 
+The administrator viewer reads all retained calls via `GET /api/call-sessions/{id}/generations`, `GET /api/call-sessions/{id}/generations/{generation}/events`, and `GET /api/call-sessions/{id}/generations/{generation}/events/stream`. Browser session authentication applies; `VOICE_VIEWER_READ_KEY` optionally grants read-only bearer access only to these routes. `VOICE_EVENT_VIEWER_ENABLED` controls capture. Viewer data is sensitive conversation content, held only in bounded memory and lost on restart. Audio events are counted, not stored; oversized JSON is dropped. Eviction and lag are reported as gaps; delivery describes gateway transport observations, not upstream receipt.
+
 ## Turns and delegation
 
 After establishment, the runner sends `POST /runner/v1/voice/turns`. Ordinary

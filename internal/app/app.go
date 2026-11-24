@@ -2,12 +2,15 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -156,6 +159,7 @@ func Run() error {
 		Conversations: conversationStore,
 		APIKeys:       apiKeyStore,
 		CallSessions:  callSessionStore,
+		Events:        events,
 	})
 
 	handler := newHandler(cfg, authManager, apiKeyManager, apiServer, logger)
@@ -222,6 +226,23 @@ func newHandler(cfg config.Config, authManager *auth.Manager, apiKeyManager *aut
 	bridge := http.NewServeMux()
 	apiServer.RegisterBridge(bridge)
 	root := http.NewServeMux()
+	viewer := http.NewServeMux()
+	apiServer.RegisterViewer(viewer)
+	viewerAuth := authManager.Require(viewer)
+	viewerHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.Fields(r.Header.Get("Authorization"))
+		if r.Method == http.MethodGet && cfg.VoiceViewerReadKey != "" && len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+			got, expected := sha256.Sum256([]byte(parts[1])), sha256.Sum256([]byte(cfg.VoiceViewerReadKey))
+			if subtle.ConstantTimeCompare(got[:], expected[:]) == 1 {
+				viewer.ServeHTTP(w, r)
+				return
+			}
+		}
+		viewerAuth.ServeHTTP(w, r)
+	})
+	root.Handle("GET /api/call-sessions/{id}/generations", viewerHandler)
+	root.Handle("GET /api/call-sessions/{id}/generations/{gen}/events", viewerHandler)
+	root.Handle("GET /api/call-sessions/{id}/generations/{gen}/events/stream", viewerHandler)
 	apiServer.RegisterClientVoice(root)
 	root.Handle("/bridge/", authManager.RequireBasic(bridge))
 	// Shared CSS/assets must be public: login.html loads /static/app.css before auth.

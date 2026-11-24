@@ -8,6 +8,7 @@ import (
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/apikeys"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/conversations"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/voice"
+	"github.com/dyhhhhhh/chatgpt-web-voice/internal/voice/eventlog"
 )
 
 // AccountStore is the account-management surface required by HTTP handlers.
@@ -63,6 +64,7 @@ type Dependencies struct {
 	Conversations ConversationStore
 	APIKeys       APIKeyStore
 	CallSessions  CallSessionStore
+	Events        *eventlog.Store
 }
 
 // Server holds HTTP handlers for the voice gateway.
@@ -72,6 +74,7 @@ type Server struct {
 	conversations ConversationStore
 	apiKeys       APIKeyStore
 	callSessions  CallSessionStore
+	events        *eventlog.Store
 }
 
 // New creates an API server from domain dependencies.
@@ -82,6 +85,7 @@ func New(deps Dependencies) *Server {
 		conversations: deps.Conversations,
 		apiKeys:       deps.APIKeys,
 		callSessions:  deps.CallSessions,
+		events:        deps.Events,
 	}
 }
 
