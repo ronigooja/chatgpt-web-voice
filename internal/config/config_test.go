@@ -333,9 +333,13 @@ func TestRemovedRelayEnvironmentSettingsAreIgnored(t *testing.T) {
 }
 
 func TestAudioCaptureConfig(t *testing.T) {
- t.Setenv("VOICE_AUDIO_CAPTURE", "true")
- t.Setenv("VOICE_AUDIO_CAPTURE_MAX_BYTES", "0")
- c := Load()
- if !c.VoiceAudioCapture || c.VoiceAudioCaptureMaxBytes != 0 { t.Fatal("capture configuration") }
- if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "VOICE_AUDIO_CAPTURE_MAX_BYTES") { t.Fatal("zero limit accepted") }
+	t.Setenv("VOICE_AUDIO_CAPTURE", "true")
+	t.Setenv("VOICE_AUDIO_CAPTURE_MAX_BYTES", "0")
+	c := Load()
+	if !c.VoiceAudioCapture || c.VoiceAudioCaptureMaxBytes != 0 {
+		t.Fatal("capture configuration")
+	}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "VOICE_AUDIO_CAPTURE_MAX_BYTES") {
+		t.Fatal("zero limit accepted")
+	}
 }

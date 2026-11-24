@@ -134,7 +134,9 @@ func Run() error {
 	var events *eventlog.Store
 	if cfg.VoiceEventViewerEnabled || cfg.VoiceAudioCapture {
 		if cfg.VoiceAudioCapture {
-			if err := os.MkdirAll(cfg.VoiceAudioCaptureDir, 0700); err != nil { return fmt.Errorf("audio capture directory unavailable: %w", err) }
+			if err := os.MkdirAll(cfg.VoiceAudioCaptureDir, 0700); err != nil {
+				return fmt.Errorf("audio capture directory unavailable: %w", err)
+			}
 		}
 		eventConfig := eventlog.Defaults()
 		eventConfig.AudioCapture = cfg.VoiceAudioCapture

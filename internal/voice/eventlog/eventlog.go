@@ -14,15 +14,15 @@ const eventOverhead = 256
 const generationOverhead = 1024
 
 type Config struct {
-	MaxEvents     int
-	MaxBytes      int
-	GlobalBytes   int
-	EventBytes    int
-	TTL           time.Duration
-	AudioCapture bool
-	AudioCaptureDir string
+	MaxEvents            int
+	MaxBytes             int
+	GlobalBytes          int
+	EventBytes           int
+	TTL                  time.Duration
+	AudioCapture         bool
+	AudioCaptureDir      string
 	AudioCaptureMaxBytes int64
-	AudioCaptureSegment time.Duration
+	AudioCaptureSegment  time.Duration
 }
 
 func Defaults() Config {
@@ -61,7 +61,7 @@ type Generation struct {
 	AudioBytes    uint64        `json:"audio_bytes"`
 	Audio         []AudioFact   `json:"audio"`
 	AudioSamples  []AudioSample `json:"audio_samples"`
-	AudioCapture bool `json:"audio_capture"`
+	AudioCapture  bool          `json:"audio_capture"`
 }
 
 type Snapshot struct {
@@ -117,7 +117,9 @@ func New(c Config) *Store {
 		c.TTL = d.TTL
 	}
 	s := &Store{cfg: c, entries: make(map[Key]*entry)}
-	if c.AudioCapture { s.capture = newAudioWriter(c) }
+	if c.AudioCapture {
+		s.capture = newAudioWriter(c)
+	}
 	return s
 }
 
@@ -148,7 +150,9 @@ func (s *Store) End(k Key) {
 	if s == nil {
 		return
 	}
-	if s.capture != nil { s.capture.end(k) }
+	if s.capture != nil {
+		s.capture.end(k)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if e := s.entries[k]; e != nil && e.meta.Active {

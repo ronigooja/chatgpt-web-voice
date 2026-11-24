@@ -115,10 +115,10 @@ type Config struct {
 	RelayPublicIP    string
 
 	VoiceEventViewerEnabled          bool
-	VoiceAudioCapture bool
-	VoiceAudioCaptureDir string
-	VoiceAudioCaptureMaxBytes int
-	VoiceAudioCaptureSegmentSeconds int
+	VoiceAudioCapture                bool
+	VoiceAudioCaptureDir             string
+	VoiceAudioCaptureMaxBytes        int
+	VoiceAudioCaptureSegmentSeconds  int
 	VoiceViewerReadKey               string
 	VoiceEventShapeSampling          bool
 	VoiceEventShapeSamplingMaxFrames int
@@ -258,10 +258,10 @@ func Load() Config {
 		RelayPublicIP:    env("VOICE_RELAY_PUBLIC_IP", ""),
 
 		VoiceEventViewerEnabled:          envBool("VOICE_EVENT_VIEWER_ENABLED", true),
-		VoiceAudioCapture: envBool("VOICE_AUDIO_CAPTURE", false),
-		VoiceAudioCaptureDir: env("VOICE_AUDIO_CAPTURE_DIR", filepath.Join(filepath.Dir(databaseFile), "audio-capture")),
-		VoiceAudioCaptureMaxBytes: envInt("VOICE_AUDIO_CAPTURE_MAX_BYTES", 1073741824),
-		VoiceAudioCaptureSegmentSeconds: envInt("VOICE_AUDIO_CAPTURE_SEGMENT_SECONDS", 180),
+		VoiceAudioCapture:                envBool("VOICE_AUDIO_CAPTURE", false),
+		VoiceAudioCaptureDir:             env("VOICE_AUDIO_CAPTURE_DIR", filepath.Join(filepath.Dir(databaseFile), "audio-capture")),
+		VoiceAudioCaptureMaxBytes:        envInt("VOICE_AUDIO_CAPTURE_MAX_BYTES", 1073741824),
+		VoiceAudioCaptureSegmentSeconds:  envInt("VOICE_AUDIO_CAPTURE_SEGMENT_SECONDS", 180),
 		VoiceViewerReadKey:               envRaw("VOICE_VIEWER_READ_KEY", ""),
 		VoiceEventShapeSampling:          envBool("VOICE_EVENT_SHAPE_SAMPLING", false),
 		VoiceEventShapeSamplingMaxFrames: envInt("VOICE_EVENT_SHAPE_SAMPLING_MAX_FRAMES", 400),
@@ -280,8 +280,12 @@ func normalizeVoiceRoute(raw string) string {
 
 // Validate rejects configurations that would leave protected content exposed.
 func (c Config) Validate() error {
-	if c.VoiceAudioCaptureMaxBytes <= 0 { return fmt.Errorf("VOICE_AUDIO_CAPTURE_MAX_BYTES must be positive") }
-	if c.VoiceAudioCaptureSegmentSeconds <= 0 { return fmt.Errorf("VOICE_AUDIO_CAPTURE_SEGMENT_SECONDS must be positive") }
+	if c.VoiceAudioCaptureMaxBytes <= 0 {
+		return fmt.Errorf("VOICE_AUDIO_CAPTURE_MAX_BYTES must be positive")
+	}
+	if c.VoiceAudioCaptureSegmentSeconds <= 0 {
+		return fmt.Errorf("VOICE_AUDIO_CAPTURE_SEGMENT_SECONDS must be positive")
+	}
 	token, err := c.ZoeTranscriptToken()
 	if err != nil {
 		return err
