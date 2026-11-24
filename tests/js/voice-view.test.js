@@ -66,6 +66,17 @@ test('gateway gap flags and SSE gap events mark the log incomplete', () => {
   assert.deepEqual(streamed.gaps().reported, [{ from: 3, to: 7, source: 'stream' }]);
 });
 
+test('gap flag as a count or a boolean both mark the log incomplete', () => {
+  const counted = V.createStore();
+  counted.add([ev(1)]);
+  counted.setServerFlags(2, 0);
+  assert.equal(counted.incomplete(), true);
+  const zero = V.createStore();
+  zero.add([ev(1)]);
+  zero.setServerFlags(0, 0);
+  assert.equal(zero.incomplete(), false);
+});
+
 test('a complete log with no flags is not marked incomplete', () => {
   const s = V.createStore();
   s.add([ev(1), ev(2), ev(3)]);

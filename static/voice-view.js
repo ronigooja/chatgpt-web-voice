@@ -150,7 +150,7 @@
       maxSeq: function () { return seqs.length ? seqs[seqs.length - 1] : 0; },
       at: function (seq) { return byseq[seq] ? byseq[seq].at : ''; },
       setServerFlags: function (gap, dropped) {
-        serverGap = serverGap || gap === true;
+        serverGap = serverGap || gap === true || toInt(gap) > 0;
         serverDropped = Math.max(serverDropped, toInt(dropped));
       },
       reportGap: function (from, to, source) {
