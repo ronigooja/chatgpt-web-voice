@@ -12,7 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
- "sync/atomic"
+	"sync/atomic"
 	"time"
 )
 
@@ -40,7 +40,7 @@ type audioWriter struct {
 	now    func() time.Time
 	mu     sync.Mutex
 	closed bool
-	drops sync.Map
+	drops  sync.Map
 }
 
 func newAudioWriter(c Config) *audioWriter {
@@ -55,15 +55,24 @@ func (s *Store) CaptureAudio(k Key, data []byte) {
 		return
 	}
 	w := s.capture
-  dropped := func() { v,_:=w.drops.LoadOrStore(k, &atomic.Uint64{}); v.(*atomic.Uint64).Add(1) }
-  if !w.mu.TryLock() { dropped(); return }
-  defer w.mu.Unlock()
-  if w.closed { return }
-  if len(w.queue) == cap(w.queue) { dropped(); return }
-  select {
-  case w.queue <- audioMessage{key:k, data:append([]byte(nil),data...), at:w.now().UTC()}:
-  default: dropped()
-  }
+	dropped := func() { v, _ := w.drops.LoadOrStore(k, &atomic.Uint64{}); v.(*atomic.Uint64).Add(1) }
+	if !w.mu.TryLock() {
+		dropped()
+		return
+	}
+	defer w.mu.Unlock()
+	if w.closed {
+		return
+	}
+	if len(w.queue) == cap(w.queue) {
+		dropped()
+		return
+	}
+	select {
+	case w.queue <- audioMessage{key: k, data: append([]byte(nil), data...), at: w.now().UTC()}:
+	default:
+		dropped()
+	}
 }
 func (w *audioWriter) end(k Key) {
 	w.mu.Lock()
@@ -170,7 +179,9 @@ func (w *audioWriter) run() {
 	}
 	for m := range w.queue {
 		if m.end {
-            if v,ok:=w.drops.LoadAndDelete(m.key); ok { slog.Warn("audio_capture_queue_full", "dropped", v.(*atomic.Uint64).Load()) }
+			if v, ok := w.drops.LoadAndDelete(m.key); ok {
+				slog.Warn("audio_capture_queue_full", "dropped", v.(*atomic.Uint64).Load())
+			}
 			finish(m.key)
 			delete(disabled, m.key)
 			continue
