@@ -241,6 +241,7 @@ func (w *audioWriter) run() {
 	for k := range segments {
 		finish(k)
 	}
+	w.drops.Range(func(key, value any) bool { slog.Warn("audio_capture_queue_full", "dropped", value.(*atomic.Uint64).Load()); return true })
 }
 func (w *audioWriter) retain(open map[Key]map[string]*audioSegment) {
 	if w.cfg.AudioCaptureMaxBytes <= 0 {

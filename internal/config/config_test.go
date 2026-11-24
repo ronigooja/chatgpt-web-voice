@@ -343,3 +343,13 @@ func TestAudioCaptureConfig(t *testing.T) {
 		t.Fatal("zero limit accepted")
 	}
 }
+
+func TestAudioCaptureDefaults(t *testing.T) {
+ t.Setenv("VOICE_AUDIO_CAPTURE", "")
+ t.Setenv("VOICE_AUDIO_CAPTURE_MAX_BYTES", "")
+ t.Setenv("VOICE_AUDIO_CAPTURE_SEGMENT_SECONDS", "")
+ t.Setenv("VOICE_DATABASE_FILE", "/tmp/test-voice/voice.db")
+ t.Setenv("VOICE_AUDIO_CAPTURE_DIR", "")
+ c:=Load()
+ if c.VoiceAudioCapture || c.VoiceAudioCaptureMaxBytes!=1073741824 || c.VoiceAudioCaptureSegmentSeconds!=180 || c.VoiceAudioCaptureDir!="/tmp/test-voice/audio-capture" { t.Fatal("capture defaults") }
+}
