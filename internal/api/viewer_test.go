@@ -18,7 +18,7 @@ func TestViewerSnapshotAndStream(t *testing.T) {
 	key := eventlog.Key{SessionID: "s", Generation: 1}
 	store.Start(key, "zoe", 7)
 	for i := 0; i < 2050; i++ {
-		store.Append(key, "upstream_to_client", "test", "queued", []byte(`{"type":"test"}`), false)
+		store.Append(key, "upstream_to_client", "test", "queued", []byte(`{"type":"data_message","data":{"type":"delegation.created"}}`), false)
 	}
 	mux := http.NewServeMux()
 	New(Dependencies{Events: store}).RegisterViewer(mux)
@@ -34,6 +34,9 @@ func TestViewerSnapshotAndStream(t *testing.T) {
 	var snap eventlog.Snapshot
 	if err := json.Unmarshal(w.Body.Bytes(), &snap); err != nil || len(snap.Events) != 2000 || snap.ZoeGeneration != 7 {
 		t.Fatal(err, len(snap.Events), snap.ZoeGeneration)
+	}
+	if snap.Events[0].Type != "delegation.created" || snap.Events[0].Wrapper != "data_message" || !strings.Contains(w.Body.String(), `"wrapper":"data_message"`) {
+		t.Fatal(snap.Events[0])
 	}
 	store.End(key)
 	server := httptest.NewServer(mux)
@@ -51,7 +54,7 @@ func TestViewerSnapshotAndStream(t *testing.T) {
 		lines = append(lines, scanner.Text())
 	}
 	body := strings.Join(lines, "\n")
-	if strings.Count(body, "event: event") != 1 || !strings.Contains(body, "id: 2050") || !strings.Contains(body, "event: end") {
+	if strings.Count(body, "event: event") != 1 || !strings.Contains(body, "id: 2050") || !strings.Contains(body, `"type":"delegation.created"`) || !strings.Contains(body, `"wrapper":"data_message"`) || !strings.Contains(body, "event: end") {
 		t.Fatal(body)
 	}
 }
@@ -71,6 +74,9 @@ func TestViewerStreamHandoffAndGap(t *testing.T) {
 	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/call-sessions/s/generations/1/events", nil))
 	var snapshot eventlog.Snapshot
 	if json.Unmarshal(w.Body.Bytes(), &snapshot) != nil || !snapshot.Gap || snapshot.Dropped != 2 {
+		t.Fatal(w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), `"wrapper"`) {
 		t.Fatal(w.Body.String())
 	}
 	resp, err := server.Client().Get(server.URL + "/api/call-sessions/s/generations/1/events/stream")

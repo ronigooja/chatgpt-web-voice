@@ -33,6 +33,7 @@ type Event struct {
 	At        time.Time `json:"at"`
 	Direction string    `json:"direction"`
 	Type      string    `json:"type"`
+	Wrapper   string    `json:"wrapper,omitempty"`
 	Source    string    `json:"source"`
 	Payload   string    `json:"payload"`
 	Size      int       `json:"size"`
@@ -166,6 +167,7 @@ func (s *Store) Append(k Key, direction, source, delivery string, payload []byte
 		return
 	}
 	typ := "text"
+	wrapper := ""
 	audio := false
 	if binary {
 		typ = "binary"
@@ -188,6 +190,9 @@ func (s *Store) Append(k Key, direction, source, delivery string, payload []byte
 				}
 				if json.Unmarshal(data, &nested) == nil && nested.Type != "" {
 					inner = nested.Type
+					if v.Type == "data_message" && inner != v.Type {
+						typ, wrapper = inner, v.Type
+					}
 				}
 			}
 			audio = inner == "session.input_audio.append" || inner == "session.output_audio.delta"
@@ -208,7 +213,7 @@ func (s *Store) Append(k Key, direction, source, delivery string, payload []byte
 	if len(payload) > limit {
 		payload = payload[:limit]
 	}
-	event := Event{At: time.Now().UTC(), Direction: direction, Type: typ, Source: source, Payload: string(payload), Size: size, Truncated: size > len(payload), Delivery: delivery}
+	event := Event{At: time.Now().UTC(), Direction: direction, Type: typ, Wrapper: wrapper, Source: source, Payload: string(payload), Size: size, Truncated: size > len(payload), Delivery: delivery}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e := s.entries[k]
@@ -230,7 +235,7 @@ func (s *Store) Append(k Key, direction, source, delivery string, payload []byte
 }
 
 func eventSize(e Event) int {
-	return eventOverhead + len(e.Payload) + len(e.Type) + len(e.Source) + len(e.Direction) + len(e.Delivery)
+	return eventOverhead + len(e.Payload) + len(e.Type) + len(e.Wrapper) + len(e.Source) + len(e.Direction) + len(e.Delivery)
 }
 
 func (s *Store) enforceGlobal() {

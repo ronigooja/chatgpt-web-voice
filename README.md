@@ -85,6 +85,8 @@ bash ./scripts/dev.sh
 | `/keys` | 下游 API Key（完整密钥只显示一次） |
 | `/sessions` | 网关语音会话元数据（无聊天正文） |
 
+Viewer event snapshots and streams use the inner `type` for `data_message` frames with a non-empty inner type. When it differs, `wrapper` records `data_message`; otherwise `wrapper` is omitted and `type` remains the outer type. Audio events are counted, not retained.
+
 编译二进制：
 
 ```bash
