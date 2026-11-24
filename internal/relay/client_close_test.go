@@ -10,7 +10,7 @@ import (
 )
 
 type lockedLog struct {
-	mu sync.Mutex
+	mu  sync.Mutex
 	buf bytes.Buffer
 }
 
