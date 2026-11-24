@@ -196,33 +196,6 @@ test('store warnings are empty for a complete log and name every gap source', ()
   assert.ok(lines[lines.length - 1].indexOf('Loading stopped early') === 0);
 });
 
-test('frames URL encodes the ring and falls back to all for unknown rings', () => {
-  assert.equal(V.framesUrl('vs_1', 2, 'audio'), '/api/call-sessions/vs_1/generations/2/frames?ring=audio');
-  assert.equal(V.framesUrl('vs_1', 2, 'bogus'), '/api/call-sessions/vs_1/generations/2/frames?ring=all');
-  assert.equal(V.framesUrl('vs_1', 2, undefined), '/api/call-sessions/vs_1/generations/2/frames?ring=all');
-});
-
-test('ring stats are sorted and tolerate absent fields', () => {
-  assert.deepEqual(V.ringStats({ rings: { oversize: { size_frames: 1, size_bytes: 10, dropped: 0 }, audio: { size_frames: 4, size_bytes: 2048, dropped: 2 } } }), [
-    { name: 'audio', frames: 4, bytes: 2048, dropped: 2 },
-    { name: 'oversize', frames: 1, bytes: 10, dropped: 0 }
-  ]);
-  assert.deepEqual(V.ringStats(null), []);
-  assert.deepEqual(V.ringStats({ rings: { conversation: null } }), [{ name: 'conversation', frames: 0, bytes: 0, dropped: 0 }]);
-});
-
-test('frame rows flag base64 and oversize frames and are never decoded', () => {
-  const row = V.frameRow({ seq: 3, at: '2026-11-18T10:00:00Z', direction: 'client_to_upstream', ring: 'audio', length: 4096, encoding: 'base64', oversize: true, delivery: 'sent', truncated: false });
-  assert.equal(row.base64, true);
-  assert.equal(row.oversize, true);
-  assert.equal(row.arrow, '→');
-  assert.equal(V.framePayloadText(row, 'AAAA'), 'AAAA');
-  assert.match(V.frameNote(row), /base64, shown as received, not decoded/);
-  const text = V.frameRow({ seq: 4, encoding: 'utf8', length: 7 });
-  assert.equal(V.framePayloadText(text, '{"a":1}'), '{\n  "a": 1\n}');
-  assert.equal(V.frameRow(null).seq, 0);
-});
-
 test('audio facts are absent for old generations and readable for new ones', () => {
   assert.equal(V.audioFacts({ generation: 1 }), null);
   assert.equal(V.audioFacts(null), null);
@@ -253,27 +226,6 @@ test('picker state follows the live flag for the open generation and the summary
   assert.equal(V.generationStateLabel(open, true, false), 'ended');
   assert.equal(V.generationStateLabel({ generation: 1, active: true, ended_at: '' }, false, false), 'active');
   assert.equal(V.generationStateLabel({ generation: 1, active: false, ended_at: '2026-11-18T10:00:10Z' }, false, true), 'ended');
-});
-
-test('frames are grouped by ring in a fixed order with unknown rings last', () => {
-  const groups = V.frameGroups([
-    { seq: 1, ring: 'audio' },
-    { seq: 2, ring: 'conversation' },
-    { seq: 3, ring: 'zeta' },
-    { seq: 4, ring: 'audio' },
-    { seq: 5, ring: 'oversize' }
-  ]);
-  assert.deepEqual(groups.map(g => g.ring), ['conversation', 'audio', 'oversize', 'zeta']);
-  assert.deepEqual(groups[1].frames.map(f => f.seq), [1, 4]);
-  assert.deepEqual(V.frameGroups(undefined), []);
-});
-
-test('frame delivery and encoding are separate: base64 is an encoding tag, not a delivery value', () => {
-  const row = V.frameRow({ seq: 1, ring: 'audio', delivery: 'sent', encoding: 'base64', length: 4096 });
-  assert.deepEqual(V.frameDisplay(row), { delivery: 'sent', encoding: 'base64', base64: true });
-  const text = V.frameRow({ seq: 2, ring: 'conversation', delivery: 'observed', encoding: 'utf8' });
-  assert.deepEqual(V.frameDisplay(text), { delivery: 'observed', encoding: 'utf8', base64: false });
-  assert.equal(V.frameDisplay(V.frameRow({ seq: 3 })).delivery, 'unknown');
 });
 
 test('dropped events without a gap get one compact line; a real gap gets the full banner', () => {

@@ -245,7 +245,7 @@
       <div class="vw-tabs" role="tablist" aria-label="Views">
         <button type="button" role="tab" id="vwTabTranscript" class="vw-tab vw-tab-narrow" aria-selected="true" aria-controls="vwColTranscript">Transcript</button>
         <button type="button" role="tab" id="vwTabEvents" class="vw-tab" aria-selected="false" aria-controls="vwPanelEvents">Timeline</button>
-        <button type="button" role="tab" id="vwTabFrames" class="vw-tab" aria-selected="false" aria-controls="vwPanelFrames">Frames</button>
+        <button type="button" role="tab" id="vwTabFrames" class="vw-tab" aria-selected="false" aria-controls="vwPanelFrames">Audio</button>
       </div>
       <section id="vwColTranscript" class="vw-col vw-col-transcript" aria-label="Transcript">
         <div class="vw-col-head"><span class="vw-title">Transcript</span><span id="vwTranscriptCount"></span></div>
@@ -257,22 +257,12 @@
         <div id="vwEventsScroll" class="vw-scroll"><div id="vwEvents" class="vw-timeline"></div></div>
         <button type="button" id="vwFollowEvents" class="vw-follow" hidden>Jump to latest</button>
       </section>
-      <section id="vwPanelFrames" class="vw-col vw-col-right" role="tabpanel" aria-label="Frames" hidden>
-        <div class="vw-col-head vw-frames-head">
-          <label class="vw-ring-label"><span class="vw-k">Ring</span><select id="vwRing" class="vw-select" aria-label="Frame ring">
-            <option value="all">all</option>
-            <option value="conversation">conversation</option>
-            <option value="audio">audio</option>
-            <option value="oversize">oversize</option>
-          </select></label>
-          <button type="button" id="vwFramesRefresh" class="vw-btn">Refresh</button>
-          <span id="vwFramesStats" class="vw-frame-stats"></span>
-        </div>
-        <details id="vwFramesAudio" class="vw-audio-block" hidden>
+      <section id="vwPanelFrames" class="vw-col vw-col-right" role="tabpanel" aria-label="Audio" hidden>
+        <div id="vwCaptureState" class="vw-col-head"></div>
+        <details id="vwFramesAudio" class="vw-audio-block" open>
           <summary>Audio facts</summary>
           <div id="vwFramesAudioBody" class="vw-audio-body"></div>
         </details>
-        <div id="vwFramesScroll" class="vw-scroll"><div id="vwFrames" class="vw-timeline"></div></div>
       </section>
     </div>
     <div id="vwToast" class="header-toast" role="status" aria-live="polite"></div>

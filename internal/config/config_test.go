@@ -331,3 +331,40 @@ func TestRemovedRelayEnvironmentSettingsAreIgnored(t *testing.T) {
 		t.Fatalf("removed settings must not fail startup: %v", err)
 	}
 }
+
+func TestAudioCaptureConfig(t *testing.T) {
+	t.Setenv("VOICE_AUDIO_CAPTURE", "true")
+	t.Setenv("VOICE_AUDIO_CAPTURE_MAX_BYTES", "0")
+	c := Load()
+	if !c.VoiceAudioCapture || c.VoiceAudioCaptureMaxBytes != 0 {
+		t.Fatal("capture configuration")
+	}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "VOICE_AUDIO_CAPTURE_MAX_BYTES") {
+		t.Fatal("zero limit accepted")
+	}
+}
+
+func TestAudioCaptureDefaults(t *testing.T) {
+	t.Setenv("VOICE_AUDIO_CAPTURE", "")
+	t.Setenv("VOICE_AUDIO_CAPTURE_MAX_BYTES", "")
+	t.Setenv("VOICE_AUDIO_CAPTURE_SEGMENT_SECONDS", "")
+	t.Setenv("VOICE_DATABASE_FILE", "/tmp/test-voice/voice.db")
+	t.Setenv("VOICE_AUDIO_CAPTURE_DIR", "")
+	c := Load()
+	if c.VoiceAudioCapture || c.VoiceAudioCaptureMaxBytes != 1073741824 || c.VoiceAudioCaptureSegmentSeconds != 180 || c.VoiceAudioCaptureDir != "/tmp/test-voice/audio-capture" {
+		t.Fatal("capture defaults")
+	}
+}
+
+func TestAudioCaptureSegmentMaximum(t *testing.T) {
+	t.Setenv("VOICE_AUDIO_CAPTURE", "true")
+	t.Setenv("VOICE_AUDIO_CAPTURE_SEGMENT_SECONDS", "3601")
+	if err := Load().Validate(); err == nil || !strings.Contains(err.Error(), "VOICE_AUDIO_CAPTURE_SEGMENT_SECONDS") {
+		t.Fatal("segment maximum not rejected")
+	}
+	t.Setenv("VOICE_AUDIO_CAPTURE", "false")
+	c := Load()
+	if c.VoiceAudioCaptureSegmentSeconds != 3601 {
+		t.Fatal("unexpected configuration")
+	}
+}

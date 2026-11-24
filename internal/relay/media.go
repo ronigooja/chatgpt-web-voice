@@ -177,8 +177,8 @@ func (s *pionSession) capture(direction, source, delivery string, data []byte, b
 	defer s.captureMu.RUnlock()
 	if s.captureStore != nil {
 		s.captureStore.Append(s.captureKey, direction, source, delivery, data, binary)
-		if direction == "client_to_upstream" || direction == "upstream_to_client" {
-			s.captureStore.AppendFrame(s.captureKey, direction, source, delivery, data, binary)
+		if direction == "upstream_to_client" && source == "avas_sideband" && !binary {
+			s.captureStore.CaptureAudio(s.captureKey, data)
 		}
 	}
 	if len(data) > mediaDataMessageMaxSize && (direction == "client_to_upstream" || direction == "upstream_to_client") {

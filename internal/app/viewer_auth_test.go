@@ -55,7 +55,7 @@ func TestViewerAuthenticationIsolation(t *testing.T) {
 	if cookie == nil {
 		t.Fatal("login failed")
 	}
-	paths := []string{"/api/call-sessions/s/generations", "/api/call-sessions/s/generations/1/events", "/api/call-sessions/s/generations/1/events/stream", "/api/call-sessions/s/generations/1/frames"}
+	paths := []string{"/api/call-sessions/s/generations", "/api/call-sessions/s/generations/1/events", "/api/call-sessions/s/generations/1/events/stream"}
 	for _, path := range paths {
 		for _, tc := range []struct {
 			bearer string
