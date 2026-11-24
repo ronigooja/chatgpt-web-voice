@@ -1930,6 +1930,7 @@
       errAuthExpired: '登录已失效',
       errInsecure: '当前不是安全上下文，无法使用麦克风。请改用 http://127.0.0.1:端口/voice 或 HTTPS 打开（不要用局域网 IP 的 http://192.168.x.x）。开发环境下可运行 ./scripts/dev.sh --tls',
       errNoMicApi: '浏览器不支持麦克风',
+      errMicDenied: '麦克风权限被拒绝。请在浏览器的站点设置中允许麦克风后重试。',
       previewPrompt: '请只用当前语音说：你好。不要添加其他内容。',
       voiceDesc_fathom: '随和多才',
       voiceDesc_cove: '沉稳直率',
@@ -2094,6 +2095,7 @@
       errAuthExpired: 'Session expired',
       errInsecure: 'This page is not a secure context, so the microphone is blocked. Open http://127.0.0.1:PORT/voice or HTTPS (not http://192.168.x.x). For local development on WSL, run ./scripts/dev.sh --tls.',
       errNoMicApi: 'This browser does not support the microphone API',
+      errMicDenied: 'Microphone permission was denied. Allow the microphone for this site in browser settings, then try again.',
       previewPrompt: 'Using only the current voice, say: hello. Do not add anything else.',
       voiceDesc_fathom: 'Easygoing & versatile',
       voiceDesc_cove: 'Composed & direct',
@@ -4490,6 +4492,19 @@
     }
   }
 
+  async function getMicStream(constraints) {
+    try {
+      return await navigator.mediaDevices.getUserMedia(constraints);
+    } catch (e) {
+      if (e && (e.name === 'NotAllowedError' || e.name === 'SecurityError')) {
+        var denied = new Error(t('errMicDenied'));
+        denied.micDenied = true;
+        throw denied;
+      }
+      throw e;
+    }
+  }
+
   async function requestMic() {
     if (!window.isSecureContext) {
       throw new Error(t('errInsecure'));
@@ -4502,9 +4517,10 @@
       : { video: false, audio: true };
     var stream;
     try {
-      stream = await navigator.mediaDevices.getUserMedia(constraints);
+      stream = await getMicStream(constraints);
     } catch (e) {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      if (e && e.micDenied) throw e;
+      stream = await getMicStream({ audio: true, video: false });
     }
     var label = (stream.getAudioTracks()[0] && stream.getAudioTracks()[0].label) || '';
     if (isVirtualMic(label)) {
@@ -5143,7 +5159,6 @@
     if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
       navigator.mediaDevices.enumerateDevices().then(refreshMics).catch(function () {});
     }
-    setTimeout(warmMicPermission, 600);
   }
 
   try {
