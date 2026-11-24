@@ -7,7 +7,7 @@ import (
 )
 
 func TestBoundsAndTruncation(t *testing.T) {
-	s := New(Config{MaxEvents: 2, MaxBytes: 10, GlobalBytes: 100, EventBytes: 4})
+	s := New(Config{MaxEvents: 2, MaxBytes: 4096, GlobalBytes: 8192, EventBytes: 4})
 	k := Key{"vs_1", 1}
 	s.Start(k, "zoe")
 	for _, p := range []string{"abcdef", "12", "34"} {
@@ -26,7 +26,7 @@ func TestBoundsAndTruncation(t *testing.T) {
 }
 
 func TestGlobalEvictionAndIsolation(t *testing.T) {
-	s := New(Config{MaxEvents: 10, MaxBytes: 10, GlobalBytes: 4, EventBytes: 4})
+	s := New(Config{MaxEvents: 10, MaxBytes: 4096, GlobalBytes: 2400, EventBytes: 4})
 	a, b := Key{"a", 1}, Key{"b", 1}
 	s.Start(a, "")
 	s.Append(a, "", "", "", []byte("1234"), false)
@@ -38,6 +38,21 @@ func TestGlobalEvictionAndIsolation(t *testing.T) {
 	}
 	x, ok := s.Snapshot(b, 0, 10)
 	if !ok || len(x.Events) != 1 || x.Events[0].Payload != "5678" {
+		t.Fatalf("snapshot: %+v", x)
+	}
+}
+
+func TestEstimatedAccounting(t *testing.T) {
+	s := New(Config{MaxEvents: 10, MaxBytes: 300, GlobalBytes: 2048})
+	k := Key{"a", 1}
+	s.Start(k, "")
+	s.Append(k, "direction", "source", "delivery", []byte("payload"), false)
+	if got, want := s.bytes, generationOverhead+eventOverhead+len("direction")+len("source")+len("delivery")+len("payload")+len("text"); got != want {
+		t.Fatalf("bytes: %d, want %d", got, want)
+	}
+	s.Append(k, "direction", "source", "delivery", []byte("payload"), false)
+	x, _ := s.Snapshot(k, 0, 10)
+	if x.Dropped != 1 || len(x.Events) != 1 {
 		t.Fatalf("snapshot: %+v", x)
 	}
 }

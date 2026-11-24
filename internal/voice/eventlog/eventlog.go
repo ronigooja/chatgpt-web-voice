@@ -8,6 +8,10 @@ import (
 	"time"
 )
 
+// These are accounting estimates, not exact heap size.
+const eventOverhead = 256
+const generationOverhead = 1024
+
 type Config struct {
 	MaxEvents   int
 	MaxBytes    int
@@ -83,6 +87,9 @@ func New(c Config) *Store {
 	if c.GlobalBytes <= 0 {
 		c.GlobalBytes = d.GlobalBytes
 	}
+	if c.GlobalBytes < generationOverhead {
+		c.GlobalBytes = generationOverhead
+	}
 	if c.EventBytes <= 0 {
 		c.EventBytes = d.EventBytes
 	}
@@ -103,6 +110,8 @@ func (s *Store) Start(k Key, zoeID string) {
 		return
 	}
 	s.entries[k] = &entry{meta: Generation{Generation: k.Generation, ZoeSessionID: zoeID, StartedAt: time.Now().UTC(), Active: true}, subs: make(map[chan struct{}]struct{})}
+	s.bytes += generationOverhead
+	s.enforceGlobal()
 }
 
 func (s *Store) End(k Key) {
@@ -130,7 +139,7 @@ func (s *Store) Append(k Key, direction, source, delivery string, payload []byte
 		}
 	}
 	size := len(payload)
-	limit := min(s.cfg.EventBytes, s.cfg.MaxBytes, s.cfg.GlobalBytes)
+	limit := s.cfg.EventBytes
 	if len(payload) > limit {
 		payload = payload[:limit]
 	}
@@ -144,17 +153,27 @@ func (s *Store) Append(k Key, direction, source, delivery string, payload []byte
 	e.meta.NewestSeq++
 	event.Seq = e.meta.NewestSeq
 	e.events = append(e.events, event)
-	e.bytes += len(event.Payload)
-	s.bytes += len(event.Payload)
+	n := eventSize(event)
+	e.bytes += n
+	s.bytes += n
 	for len(e.events) > s.cfg.MaxEvents || e.bytes > s.cfg.MaxBytes {
 		s.drop(e)
 	}
 	s.expire(time.Now())
+	s.enforceGlobal()
+	notify(e)
+}
+
+func eventSize(e Event) int {
+	return eventOverhead + len(e.Payload) + len(e.Type) + len(e.Source) + len(e.Direction) + len(e.Delivery)
+}
+
+func (s *Store) enforceGlobal() {
 	for s.bytes > s.cfg.GlobalBytes {
 		var oldest Key
 		var victim *entry
 		for key, candidate := range s.entries {
-			if candidate == e || candidate.meta.Active || candidate.meta.EndedAt == nil {
+			if candidate.meta.Active || candidate.meta.EndedAt == nil {
 				continue
 			}
 			if victim == nil || candidate.meta.EndedAt.Before(*victim.meta.EndedAt) {
@@ -172,16 +191,25 @@ func (s *Store) Append(k Key, direction, source, delivery string, payload []byte
 			}
 		}
 		if victim == nil {
-			break
+			// If active generation metadata alone exhausts the cap, evict the oldest.
+			for key, candidate := range s.entries {
+				if victim == nil || candidate.meta.StartedAt.Before(victim.meta.StartedAt) {
+					oldest, victim = key, candidate
+				}
+			}
+			if victim == nil {
+				break
+			}
+			s.remove(oldest, victim)
+			continue
 		}
 		s.drop(victim)
 		notify(victim)
 	}
-	notify(e)
 }
 
 func (s *Store) drop(e *entry) {
-	n := len(e.events[0].Payload)
+	n := eventSize(e.events[0])
 	e.events[0] = Event{}
 	e.events = e.events[1:]
 	e.bytes -= n
@@ -196,7 +224,11 @@ func notify(e *entry) {
 		}
 	}
 }
-func (s *Store) remove(k Key, e *entry) { s.bytes -= e.bytes; delete(s.entries, k); notify(e) }
+func (s *Store) remove(k Key, e *entry) {
+	s.bytes -= e.bytes + generationOverhead
+	delete(s.entries, k)
+	notify(e)
+}
 func (s *Store) expire(now time.Time) {
 	for k, e := range s.entries {
 		if e.meta.EndedAt != nil && now.Sub(*e.meta.EndedAt) >= s.cfg.TTL {
