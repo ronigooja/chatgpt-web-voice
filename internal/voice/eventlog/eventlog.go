@@ -19,12 +19,14 @@ type Config struct {
 	GlobalBytes   int
 	EventBytes    int
 	TTL           time.Duration
-	FrameRingSize int
-	AudioRingSize int
+	AudioCapture bool
+	AudioCaptureDir string
+	AudioCaptureMaxBytes int64
+	AudioCaptureSegment time.Duration
 }
 
 func Defaults() Config {
-	return Config{MaxEvents: 2000, MaxBytes: 4 << 20, GlobalBytes: 64 << 20, EventBytes: 64 << 10, TTL: 6 * time.Hour, FrameRingSize: 1000, AudioRingSize: 300}
+	return Config{MaxEvents: 2000, MaxBytes: 4 << 20, GlobalBytes: 64 << 20, EventBytes: 64 << 10, TTL: 6 * time.Hour}
 }
 
 type Key struct {
@@ -59,6 +61,7 @@ type Generation struct {
 	AudioBytes    uint64        `json:"audio_bytes"`
 	Audio         []AudioFact   `json:"audio"`
 	AudioSamples  []AudioSample `json:"audio_samples"`
+	AudioCapture bool `json:"audio_capture"`
 }
 
 type Snapshot struct {
@@ -83,7 +86,6 @@ type entry struct {
 	events []Event
 	bytes  int
 	subs   map[chan struct{}]struct{}
-	rings  [3]frameRing
 }
 
 type Store struct {
@@ -91,6 +93,7 @@ type Store struct {
 	cfg     Config
 	entries map[Key]*entry
 	bytes   int
+	capture *audioWriter
 }
 
 func New(c Config) *Store {
@@ -113,7 +116,9 @@ func New(c Config) *Store {
 	if c.TTL <= 0 {
 		c.TTL = d.TTL
 	}
-	return &Store{cfg: c, entries: make(map[Key]*entry)}
+	s := &Store{cfg: c, entries: make(map[Key]*entry)}
+	if c.AudioCapture { s.capture = newAudioWriter(c) }
+	return s
 }
 
 func (s *Store) Start(k Key, zoeID string, zoeGeneration ...int64) {
@@ -134,7 +139,7 @@ func (s *Store) Start(k Key, zoeID string, zoeGeneration ...int64) {
 		}
 		return
 	}
-	s.entries[k] = &entry{meta: Generation{Generation: k.Generation, ZoeSessionID: zoeID, ZoeGeneration: zg, StartedAt: time.Now().UTC(), Active: true}, subs: make(map[chan struct{}]struct{})}
+	s.entries[k] = &entry{meta: Generation{Generation: k.Generation, ZoeSessionID: zoeID, ZoeGeneration: zg, StartedAt: time.Now().UTC(), Active: true, AudioCapture: s.capture != nil}, subs: make(map[chan struct{}]struct{})}
 	s.bytes += generationOverhead
 	s.enforceGlobal()
 }
@@ -143,6 +148,7 @@ func (s *Store) End(k Key) {
 	if s == nil {
 		return
 	}
+	if s.capture != nil { s.capture.end(k) }
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if e := s.entries[k]; e != nil && e.meta.Active {
@@ -261,19 +267,6 @@ func (s *Store) enforceGlobal() {
 			s.remove(oldest, victim)
 			continue
 		}
-		var frameVictim *frameRing
-		for _, candidate := range s.entries {
-			for i := range candidate.rings {
-				r := &candidate.rings[i]
-				if len(r.frames) > 0 && (frameVictim == nil || r.frames[0].At.Before(frameVictim.frames[0].At)) {
-					frameVictim = r
-				}
-			}
-		}
-		if frameVictim != nil {
-			s.dropFrame(frameVictim)
-			continue
-		}
 		// Active generations remain addressable, but their oldest events can be evicted.
 		for _, candidate := range s.entries {
 			if len(candidate.events) > 0 && (victim == nil || candidate.events[0].At.Before(victim.events[0].At)) {
@@ -316,9 +309,6 @@ func notify(e *entry) {
 }
 func (s *Store) remove(k Key, e *entry) {
 	s.bytes -= e.bytes + generationOverhead
-	for i := range e.rings {
-		s.bytes -= e.rings[i].bytes
-	}
 	delete(s.entries, k)
 	notify(e)
 }

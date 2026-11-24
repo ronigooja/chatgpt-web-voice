@@ -391,7 +391,6 @@
     gateway_to_upstream: '⇒',
     gateway_creation: '•'
   };
-  var RING_NAMES = ['all', 'conversation', 'audio', 'oversize'];
 
   function lookup(map, key, fallback) {
     return Object.prototype.hasOwnProperty.call(map, key) ? map[key] : fallback;
@@ -558,52 +557,6 @@
     return lines;
   }
 
-  function framesUrl(sessionId, gen, ring) {
-    var r = RING_NAMES.indexOf(ring) >= 0 ? ring : 'all';
-    return '/api/call-sessions/' + enc(sessionId) + '/generations/' + enc(gen) + '/frames?ring=' + enc(r);
-  }
-
-  function ringStats(data) {
-    var rings = data && data.rings && typeof data.rings === 'object' ? data.rings : {};
-    return Object.keys(rings).sort().map(function (name) {
-      var r = rings[name] && typeof rings[name] === 'object' ? rings[name] : {};
-      return { name: name, frames: toInt(r.size_frames), bytes: toInt(r.size_bytes), dropped: toInt(r.dropped) };
-    });
-  }
-
-  function frameRow(f) {
-    var o = f && typeof f === 'object' ? f : {};
-    var encoding = String(o.encoding || '');
-    var direction = String(o.direction || '');
-    return {
-      seq: toInt(o.seq),
-      time: formatClock(o.at),
-      arrow: lookup(DIRECTION_ARROWS, direction, '?'),
-      direction: direction,
-      source: String(o.source || ''),
-      ring: String(o.ring || ''),
-      oversize: o.oversize === true,
-      length: toInt(o.length),
-      delivery: String(o.delivery || 'unknown'),
-      truncated: o.truncated === true,
-      encoding: encoding,
-      base64: encoding.toLowerCase() === 'base64'
-    };
-  }
-
-  // Base64 payloads are returned exactly as received; they are never decoded here.
-  function framePayloadText(row, payload) {
-    if (row.base64) return String(payload === null || payload === undefined ? '' : payload);
-    return prettyPayload(payload);
-  }
-
-  function frameNote(row) {
-    var parts = ['length ' + row.length];
-    if (row.base64) parts.push('base64, shown as received, not decoded');
-    if (row.truncated) parts.push('truncated by gateway');
-    return parts.join(' · ');
-  }
-
   // Audio facts from a generation summary. Returns null when the generation has no audio fields at all.
   function audioFacts(item) {
     if (!item || typeof item !== 'object') return null;
@@ -664,32 +617,6 @@
     return 'Gen ' + g.generation + ' · ' + state + ' · ' + count + ' event' + (count === 1 ? '' : 's');
   }
 
-  var RING_ORDER = ['conversation', 'audio', 'oversize'];
-
-  // Frames grouped by ring in a fixed display order; unknown rings follow, sorted by name.
-  function frameGroups(frames) {
-    var byRing = {};
-    (Array.isArray(frames) ? frames : []).forEach(function (f) {
-      var name = frameRow(f).ring || 'unknown';
-      if (!byRing[name]) byRing[name] = [];
-      byRing[name].push(f);
-    });
-    var names = Object.keys(byRing).sort(function (a, b) {
-      var ia = RING_ORDER.indexOf(a);
-      var ib = RING_ORDER.indexOf(b);
-      if (ia >= 0 && ib >= 0) return ia - ib;
-      if (ia >= 0) return -1;
-      if (ib >= 0) return 1;
-      return a < b ? -1 : (a > b ? 1 : 0);
-    });
-    return names.map(function (name) { return { ring: name, frames: byRing[name] }; });
-  }
-
-  // Delivery and encoding are separate facts. Encoding is shown as a tag, never in the delivery column.
-  function frameDisplay(row) {
-    return { delivery: row.delivery || 'unknown', encoding: row.encoding || '', base64: row.base64 === true };
-  }
-
   // Full banner only for a real gap or an error. Dropped events alone get one compact line.
   function noticeFor(store, capped, error) {
     if (error) return { kind: 'error', full: true, lines: [error].concat(storeWarnings(store, capped)) };
@@ -726,8 +653,8 @@
       transcriptCount: $('vwTranscriptCount'), followTranscript: $('vwFollowTranscript'),
       panelEvents: $('vwPanelEvents'), eventsScroll: $('vwEventsScroll'), events: $('vwEvents'),
       timelineCount: $('vwTimelineCount'), followEvents: $('vwFollowEvents'),
-      panelFrames: $('vwPanelFrames'), ring: $('vwRing'), framesStats: $('vwFramesStats'), framesRefresh: $('vwFramesRefresh'),
-      framesAudio: $('vwFramesAudio'), framesAudioBody: $('vwFramesAudioBody'), frames: $('vwFrames'),
+      panelFrames: $('vwPanelFrames'), captureState: $('vwCaptureState'),
+      framesAudio: $('vwFramesAudio'), framesAudioBody: $('vwFramesAudioBody'),
       toast: $('vwToast')
     };
     if (!el.transcript) return;
@@ -817,7 +744,6 @@
       renderAudio();
       renderTranscript();
       renderEvents();
-      renderFrames();
       syncUrl();
     }
 
@@ -1037,6 +963,8 @@
     function renderAudio() {
       var facts = audioFacts(findGeneration(view.gens, view.gen));
       el.audioWrap.hidden = !facts;
+      var generation = findGeneration(view.gens, view.gen);
+      el.captureState.textContent = 'File capture: ' + (generation && generation.audio_capture ? 'on' : 'off');
       el.framesAudio.hidden = !facts;
       if (!facts) return;
       el.audioSummary.textContent = plural(facts.events, 'event') + ' · ' + formatBytes(facts.bytes);
@@ -1124,93 +1052,6 @@
       }
       el.timelineCount.textContent = plural(shownRows.length, 'row');
       applyScroll(pane, top, 'events');
-    }
-
-    function frameEntry(raw) {
-      var r = frameRow(raw);
-      var key = r.ring + '#' + r.seq;
-      var wrap = make('div', 'vw-event' + (r.oversize ? ' is-oversize' : ''));
-      var head = make('div', 'vw-row');
-      head.setAttribute('role', 'button');
-      head.tabIndex = 0;
-      head.setAttribute('aria-expanded', 'false');
-      head.appendChild(make('span', 'vw-time', r.time));
-      var arrow = make('span', 'vw-arrow dir-' + safeClass(r.direction), r.arrow);
-      arrow.title = r.direction;
-      head.appendChild(arrow);
-      var shown = frameDisplay(r);
-      var typeCell = make('span', 'vw-type', (r.oversize ? 'oversize · ' : '') + formatBytes(r.length));
-      head.appendChild(typeCell);
-      head.appendChild(make('span', 'vw-size', r.source || ''));
-      head.appendChild(make('span', 'vw-delivery', shown.delivery));
-      head.appendChild(make('span', shown.encoding ? 'vw-tag enc' : '', shown.encoding || ''));
-      head.appendChild(make('span', 'vw-seq', '#' + r.seq));
-      wrap.appendChild(head);
-      var body = make('div', 'vw-payload');
-      body.hidden = true;
-      var filled = false;
-      var fill = function () {
-        filled = true;
-        body.appendChild(make('div', 'vw-payload-meta' + (r.truncated ? ' warn' : ''), frameNote(r) + (r.source ? ' · ' + r.source : '')));
-        body.appendChild(make('pre', 'vw-pre', framePayloadText(r, raw.payload)));
-      };
-      var setOpen = function (open) {
-        if (open && !filled) fill();
-        body.hidden = !open;
-        head.setAttribute('aria-expanded', String(open));
-        if (open) view.frames.open[key] = true; else delete view.frames.open[key];
-      };
-      if (view.frames.open[key]) setOpen(true);
-      head.addEventListener('click', function () { setOpen(body.hidden); });
-      head.addEventListener('keydown', function (e) {
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(body.hidden); }
-      });
-      wrap.appendChild(body);
-      return wrap;
-    }
-
-    function renderFrames() {
-      var f = view.frames;
-      el.frames.textContent = '';
-      el.framesStats.textContent = '';
-      if (f.loading) el.framesStats.textContent = 'Loading frames…';
-      else if (f.data) {
-        ringStats(f.data).forEach(function (r) {
-          el.framesStats.appendChild(make('span', 'vw-frame-pill',
-            r.name + ': ' + plural(r.frames, 'frame') + ' · ' + formatBytes(r.bytes) + (r.dropped ? ' · dropped ' + r.dropped : '')));
-        });
-      }
-      if (f.error) { el.frames.appendChild(emptyRow(f.error)); return; }
-      if (!f.data) return;
-      var list = Array.isArray(f.data.frames) ? f.data.frames : [];
-      if (!list.length) el.frames.appendChild(emptyRow('No frames in this ring.'));
-      frameGroups(list.slice(-MAX_EVENT_ROWS)).forEach(function (group) {
-        var heading = make('div', 'vw-group-h', group.ring.charAt(0).toUpperCase() + group.ring.slice(1) + ' · ' + plural(group.frames.length, 'frame'));
-        el.frames.appendChild(heading);
-        group.frames.forEach(function (raw) { el.frames.appendChild(frameEntry(raw)); });
-      });
-    }
-
-    async function loadFrames() {
-      if (!view.gen) return;
-      var f = view.frames;
-      f.token++;
-      var token = f.token;
-      f.loading = true;
-      f.error = '';
-      renderFrames();
-      var data = null;
-      var error = '';
-      try {
-        data = await getJSON(framesUrl(sessionId, view.gen, f.ring));
-      } catch (e) {
-        error = e && e.message ? e.message : String(e);
-      }
-      if (token !== f.token) return;
-      f.loading = false;
-      f.data = data;
-      f.error = error;
-      renderFrames();
     }
 
     function renderGenSelect() {
@@ -1321,7 +1162,6 @@
       setConn('Loading');
       renderGenSelect();
       scheduleRender();
-      if (view.tab === 'frames') loadFrames();
       loadSnapshot(token).then(function (ok) {
         if (!ok || token !== view.token) return;
         if (view.active) {
@@ -1348,7 +1188,6 @@
       view.tab = tab;
       view.following = { transcript: true, events: true };
       renderAll();
-      if (tab === 'frames') loadFrames();
     }
 
     function onPaneScroll(key, pane) {
@@ -1489,11 +1328,6 @@
       });
       el.session.addEventListener('click', function () { if (sessionId) copyWithToast(sessionId, 'Copied session id'); });
       el.zoe.addEventListener('click', function () { if (view.zoeId) copyWithToast(view.zoeId, 'Copied Zoe session id'); });
-      el.framesRefresh.addEventListener('click', loadFrames);
-      el.ring.addEventListener('change', function () {
-        view.frames.ring = el.ring.value;
-        loadFrames();
-      });
       el.followTranscript.addEventListener('click', function () {
         view.following.transcript = true;
         scheduleRender();
@@ -1572,8 +1406,6 @@
     summaryIsActive: summaryIsActive,
     generationStateLabel: generationStateLabel,
     generationOptionLabel: generationOptionLabel,
-    frameGroups: frameGroups,
-    frameDisplay: frameDisplay,
     noticeFor: noticeFor,
     formatClock: formatClock,
     formatBytes: formatBytes,
@@ -1588,11 +1420,6 @@
     creationDetails: creationDetails,
     creationSummary: creationSummary,
     storeWarnings: storeWarnings,
-    framesUrl: framesUrl,
-    ringStats: ringStats,
-    frameRow: frameRow,
-    framePayloadText: framePayloadText,
-    frameNote: frameNote,
     audioFacts: audioFacts,
     audioFactLine: audioFactLine,
     audioSampleLine: audioSampleLine
