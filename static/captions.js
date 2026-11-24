@@ -147,7 +147,9 @@
         if (seen[role + ':' + id]) return false;
         seen[role + ':' + id] = true;
       }
-      captions.push({ key: role + ':' + (id || '#' + seq), role: role, id: id, text: text, final: !!final, seq: seq });
+      var entry = { key: role + ':' + (id || '#' + seq), role: role, id: id, text: text, final: !!final, seq: seq };
+      captions.push(entry);
+      if (id) byKey[role + ':' + id] = entry;
       return true;
     }
 
@@ -182,8 +184,17 @@
     function onTurnDone(turn, seq) {
       var role = String(turn.role || (cur && cur.role) || '');
       var id = String(turn.id || (cur && cur.id) || '');
-      if (id && seen[role + ':' + id]) return false;
-      var text = turnText(turn.transcript) || turnText(turn.content) || turnText(turn.text) || (cur ? cur.text : '');
+      var completedText = turnText(turn.transcript) || turnText(turn.content) || turnText(turn.text);
+      var text = completedText || (cur && cur.role === role && (!id || cur.id === id) ? cur.text : '');
+      var existing = id && byKey[role + ':' + id];
+      if (existing) {
+        if (existing.final) return false;
+        if (String(completedText || '').trim()) existing.text = completedText;
+        existing.final = true;
+        if (cur && cur.role === role && cur.id === id) cur = null;
+        if (role === 'user') lastUser = { text: existing.text, id: id };
+        return true;
+      }
       if (cur && cur.role && (cur.role !== role || (id && cur.id && cur.id !== id))) flush();
       cur = null;
       if (role === 'user') {
@@ -200,9 +211,8 @@
       if (!id || !text.trim() || delegated[id]) return false;
       delegated[id] = true;
       if (cur && cur.role === 'assistant') flush();
-      var turnID = (cur && cur.id) || id;
-      cur = null;
-      return emit('user', turnID, text, seq, true);
+      var turnID = (cur && cur.id) || (lastUser && lastUser.id) || id;
+      return emit('user', turnID, text, seq, false);
     }
 
     function onLegacy(delta, seq) {
@@ -238,6 +248,11 @@
           return onTurnDone(turn, seq);
         case 'delegation.created':
           return onDelegation(item, seq);
+        case 'turn.delta':
+          if (!cur || !cur.role || (raw.turn_id && String(raw.turn_id) !== cur.id)) return false;
+          cur.text = cur.text + turnText(raw.delta);
+          cur.seq = seq;
+          return true;
         case 'turn.text.delta':
         case 'output_text.delta':
         case 'output_audio_transcript.delta':
@@ -256,7 +271,7 @@
 
     function snapshot() {
       var out = captions.slice();
-      if (cur && cur.role && cur.text) {
+      if (cur && cur.role && cur.text && !(cur.id && seen[cur.role + ':' + cur.id])) {
         out.push({ key: 'current', role: cur.role, id: cur.id, text: cur.text, final: false, seq: cur.seq });
       }
       return out;
