@@ -26,7 +26,7 @@
   var GROUPS = [
     { id: 'conversation', label: 'Conversation' },
     { id: 'delegation', label: 'Delegation' },
-    { id: 'instructions', label: 'Instructions & opening' },
+    { id: 'instructions', label: 'Instructions' },
     { id: 'context', label: 'Context writes' },
     { id: 'client', label: 'Client messages' },
     { id: 'session', label: 'Session & usage' },
@@ -644,16 +644,25 @@
     var doc = root.document;
     var $ = function (id) { return doc.getElementById(id); };
     var el = {
-      conn: $('vwConn'), orb: $('vwOrb'), session: $('vwSession'), zoe: $('vwZoe'), gen: $('vwGen'), status: $('vwStatus'),
-      genSelect: $('vwGenSelect'), tabCaptions: $('vwTabCaptions'), tabEvents: $('vwTabEvents'), notice: $('vwNotice'),
-      creation: $('vwCreation'), creationBody: $('vwCreationBody'), captionsPane: $('vwCaptionsPane'), captions: $('vwCaptions'),
-      eventsPane: $('vwEventsPane'), events: $('vwEvents'), type: $('vwType'),
-      groups: $('vwGroups'), search: $('vwSearch'), presets: doc.querySelectorAll('.viewer-presets button'),
-      tabDelegations: $('vwTabDelegations'), delegationCount: $('vwDelegationCount'), delegationBadge: $('vwDelegationBadge'),
-      delegationsPane: $('vwDelegationsPane'), delegations: $('vwDelegations'),
-      copy: $('vwCopy'), follow: $('vwFollow'), theme: $('vwTheme'), toast: $('vwToast')
+      conn: $('vwConn'), orb: $('vwOrb'), theme: $('vwTheme'), delegationBadge: $('vwDelegationBadge'),
+      statusPill: $('vwStatusPill'), session: $('vwSession'), zoe: $('vwZoe'), genSelect: $('vwGenSelect'),
+      eventCount: $('vwEventCount'), dropped: $('vwDropped'), lastEvent: $('vwLastEvent'), gapPill: $('vwGapPill'),
+      audioWrap: $('vwAudioWrap'), audioBtn: $('vwAudioBtn'), audioSummary: $('vwAudioSummary'), audioPop: $('vwAudioPop'),
+      notice: $('vwNotice'), creation: $('vwCreation'), creationSummary: $('vwCreationSummary'),
+      creationBody: $('vwCreationBody'), creationCopy: $('vwCreationCopy'),
+      groups: $('vwGroups'), filterLine: $('vwFilterLine'), filterText: $('vwFilterText'), filterClear: $('vwFilterClear'),
+      search: $('vwSearch'), menuBtn: $('vwMenuBtn'), menu: $('vwMenu'), type: $('vwType'),
+      copy: $('vwCopy'), download: $('vwDownload'),
+      tabTranscript: $('vwTabTranscript'), tabEvents: $('vwTabEvents'), tabFrames: $('vwTabFrames'),
+      colTranscript: $('vwColTranscript'), transcriptScroll: $('vwTranscriptScroll'), transcript: $('vwTranscript'),
+      transcriptCount: $('vwTranscriptCount'), followTranscript: $('vwFollowTranscript'),
+      panelEvents: $('vwPanelEvents'), eventsScroll: $('vwEventsScroll'), events: $('vwEvents'),
+      timelineCount: $('vwTimelineCount'), followEvents: $('vwFollowEvents'),
+      panelFrames: $('vwPanelFrames'), ring: $('vwRing'), framesStats: $('vwFramesStats'), framesRefresh: $('vwFramesRefresh'),
+      framesAudio: $('vwFramesAudio'), framesAudioBody: $('vwFramesAudioBody'), frames: $('vwFrames'),
+      toast: $('vwToast')
     };
-    if (!el.captions) return;
+    if (!el.transcript) return;
 
     function make(tag, cls, text) {
       var node = doc.createElement(tag);
@@ -662,14 +671,8 @@
       return node;
     }
 
-    function formatTime(value) {
-      var d = new Date(value);
-      if (!value || isNaN(d.getTime())) return value ? String(value) : '';
-      return d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    }
-
-    function formatBytes(n) {
-      return n < 1024 ? n + ' B' : (n / 1024).toFixed(1) + ' KB';
+    function plural(n, word) {
+      return n + ' ' + word + (n === 1 ? '' : 's');
     }
 
     function safeClass(value) {
@@ -679,15 +682,20 @@
     var params = new URLSearchParams(root.location.search);
     var sessionId = String(params.get('session') || '').trim();
     var requestedGen = parseGeneration(params.get('gen'));
+    var mq = root.matchMedia ? root.matchMedia('(min-width: 1000px)') : null;
     var view = {
-      gens: [], gen: 0, zoeId: '', store: null, es: null, retryTimer: 0, retryDelay: 1000,
-      token: 0, active: false, startedAt: '', endedAt: '', conn: '', error: '', capped: false,
-      tab: 'captions', following: true, renderQueued: false, filters: filterFromParams(params),
-      typesKey: null, open: {}
+      gens: [], gen: 0, zoeId: '', store: null, es: null, retryTimer: 0, retryDelay: 1000, toastTimer: 0,
+      token: 0, active: false, startedAt: '', endedAt: '', error: '', capped: false,
+      tab: 'transcript', following: { transcript: true, events: true }, renderQueued: false,
+      filters: filterFromParams(params), typesKey: null, open: {}, menuOpen: false, audioOpen: false,
+      frames: { ring: 'all', token: 0, loading: false, error: '', data: null, open: {} }
     };
 
+    function isWide() {
+      return mq ? mq.matches : true;
+    }
+
     function setConn(label, kind) {
-      view.conn = label;
       el.conn.textContent = label;
       el.orb.className = 'orb ' + (kind || 'idle');
     }
@@ -695,7 +703,7 @@
     function showError(message) {
       view.error = String(message || 'Unknown error');
       setConn('Error', 'error');
-      renderNotice();
+      renderAll();
     }
 
     async function getJSON(url) {
@@ -730,14 +738,17 @@
     }
 
     function renderAll() {
-      renderHeader();
+      renderLayout();
+      renderStatus();
       renderNotice();
       renderCreation();
       renderGroupChips();
+      renderFilterLine();
       renderDelegationBadge();
-      renderCaptions();
-      renderDelegations();
+      renderAudio();
+      renderTranscript();
       renderEvents();
+      renderFrames();
       syncUrl();
     }
 
@@ -747,116 +758,119 @@
       if (url !== root.location.pathname + root.location.search) root.history.replaceState(null, '', url);
     }
 
-    function renderHeader() {
-      el.session.textContent = sessionId || '—';
-      el.zoe.textContent = view.zoeId || '—';
-      el.gen.textContent = view.gen ? String(view.gen) : '—';
-      el.status.textContent = view.active ? 'Live' : (view.endedAt ? 'Ended ' + formatTime(view.endedAt) : 'Ended');
+    // Tabs pick the single column on narrow screens; on wide screens the transcript is always shown
+    // and the right column shows the timeline or the frames.
+    function renderLayout() {
+      var wide = isWide();
+      var t = view.tab;
+      var rightVisible = wide || t !== 'transcript';
+      var frames = t === 'frames';
+      el.colTranscript.hidden = !(wide || t === 'transcript');
+      el.panelEvents.hidden = !(rightVisible && !frames);
+      el.panelFrames.hidden = !(rightVisible && frames);
+      el.tabTranscript.setAttribute('aria-selected', String(t === 'transcript'));
+      el.tabEvents.setAttribute('aria-selected', String(t === 'events' || (wide && t === 'transcript')));
+      el.tabFrames.setAttribute('aria-selected', String(frames));
+    }
+
+    function renderStatus() {
+      var list = view.store ? view.store.list() : [];
+      var last = list.length ? list[list.length - 1] : null;
+      var kind = 'neutral';
+      var label = 'Loading';
+      if (view.error) { label = 'Error'; kind = 'error'; } else if (view.gen && view.active) { label = 'Live'; kind = 'live'; } else if (view.gen) { label = 'Ended'; }
+      el.statusPill.textContent = label;
+      el.statusPill.className = 'vw-pill ' + kind;
+      el.session.textContent = middleEllipsis(sessionId, 30) || '—';
+      el.session.title = sessionId;
+      el.session.disabled = !sessionId;
+      el.zoe.textContent = middleEllipsis(view.zoeId, 30) || '—';
+      el.zoe.title = view.zoeId;
+      el.zoe.disabled = !view.zoeId;
+      el.eventCount.textContent = view.store ? plural(view.store.size(), 'event') : '0 events';
+      var dropped = view.store ? view.store.dropped() : 0;
+      el.dropped.textContent = 'Dropped ' + dropped;
+      el.dropped.className = 'vw-stat' + (dropped > 0 ? ' warn' : '');
+      var lastAt = last ? formatClock(last.at) : '';
+      el.lastEvent.textContent = 'Last event ' + (lastAt || '—');
+      el.gapPill.hidden = !(view.store && view.store.incomplete());
     }
 
     function renderNotice() {
       var lines = [];
       if (view.error) lines.push(view.error);
-      if (view.store && view.store.incomplete()) {
-        var gaps = view.store.gaps();
-        lines.push('Incomplete log: this view is NOT a complete record.');
-        if (view.store.dropped() > 0) lines.push(view.store.dropped() + ' event(s) were dropped by the gateway.');
-        gaps.reported.forEach(function (g) { lines.push('Gap reported for seq ' + g.from + '–' + g.to + '.'); });
-        if (gaps.missing.length) {
-          var sample = gaps.missing.slice(0, 3).map(function (g) { return g.from + '–' + g.to; }).join(', ');
-          lines.push(gaps.missing.length + ' missing seq range(s) between loaded events: ' + sample + (gaps.missing.length > 3 ? ', …' : '') + '.');
-        }
-      }
-      if (view.store && view.store.truncatedUpstream() > 0) {
-        lines.push(view.store.truncatedUpstream() + ' upstream event(s) were truncated; their captions may be missing.');
-      }
-      if (view.capped) lines.push('Loading stopped early; events beyond the loaded range are not shown.');
-      el.notice.textContent = lines.join('\n');
+      lines = lines.concat(storeWarnings(view.store, view.capped));
+      el.notice.textContent = '';
       el.notice.hidden = !lines.length;
+      if (!lines.length) return;
       el.notice.setAttribute('data-kind', view.error ? 'error' : 'warn');
+      el.notice.appendChild(make('div', 'vw-notice-title', lines[0]));
+      lines.slice(1).forEach(function (line) { el.notice.appendChild(make('div', 'vw-notice-line', line)); });
     }
 
     function renderCreation() {
-      var c = view.store ? view.store.creation() : null;
-      el.creation.hidden = !c;
-      if (!c) return;
-      var lines = [];
-      var parsed = c.parsed;
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        if (typeof parsed.instructions === 'string') {
-          lines.push('instructions:');
-          lines.push(parsed.instructions);
-        } else if (parsed.instructions !== undefined) {
-          lines.push('instructions: ' + JSON.stringify(parsed.instructions, null, 2));
-        }
-        if (parsed.initial_items !== undefined) lines.push('initial_items: ' + JSON.stringify(parsed.initial_items, null, 2));
-        if (!lines.length) lines.push(prettyPayload(c.text));
-      } else {
-        lines.push(prettyPayload(c.text));
-      }
-      if (c.truncated) lines.push('[payload truncated by gateway]');
-      el.creationBody.textContent = lines.join('\n\n');
+      var d = creationDetails(view.store ? view.store.creation() : null);
+      el.creation.hidden = !d;
+      if (!d) return;
+      el.creationSummary.textContent = creationSummary(d);
+      el.creationBody.textContent = d.body;
     }
 
-    function boundaryRow(text, cls) {
-      return make('div', cls || 'viewer-boundary', text);
-    }
-
-    function gapRow(text) {
-      return make('div', 'viewer-gap', text);
+    function boundaryRow(text) {
+      return make('div', 'vw-boundary', text);
     }
 
     function emptyRow(text) {
-      return make('p', 'caption-empty', text);
+      return make('p', 'vw-empty', text);
     }
 
-    function applyScroll(pane, top, active) {
-      if (!active) { pane.scrollTop = top; return; }
-      pane.scrollTop = view.following ? pane.scrollHeight : top;
+    function applyScroll(pane, top, key) {
+      if (view.following[key]) {
+        pane.scrollTop = pane.scrollHeight;
+      } else {
+        pane.scrollTop = top;
+      }
+      var btn = key === 'transcript' ? el.followTranscript : el.followEvents;
+      if (btn && key !== 'frames') btn.hidden = !!view.following[key];
     }
 
-    function captionRow(item, at) {
-      var role = item.role === 'assistant' ? 'assistant' : 'user';
-      var row = make('div', 'caption-log-line ' + role + (item.final ? '' : ' pending'));
-      var avatar = make('div', 'message-avatar', role === 'assistant' ? 'V' : 'U');
-      var body = make('div', 'message-body');
-      var meta = make('div', 'message-meta', (role === 'assistant' ? 'Assistant' : 'User') + (at ? ' · ' + formatTime(at) : ''));
-      var bubble = make('div', 'message-bubble');
-      bubble.appendChild(make('span', 'caption-log-content', item.text));
-      body.appendChild(meta);
-      body.appendChild(bubble);
-      row.appendChild(avatar);
-      row.appendChild(body);
+    function turnRow(line) {
+      var row = make('div', 'vw-turn ' + line.role + (line.pending ? ' pending' : ''));
+      row.appendChild(make('span', 'vw-time', line.time));
+      row.appendChild(make('span', 'vw-role', line.roleLabel));
+      row.appendChild(make('span', 'vw-text', line.text));
       return row;
     }
 
-    function delegationMarker(row) {
-      var text = 'Delegation ' + (row.kind === 'created' ? 'created' : 'write') + ' · ' + formatTime(row.at) +
-        (row.target ? ' · target ' + row.target : '') + (row.handoff ? ' · handoff ' + row.handoff : '');
-      return make('div', 'viewer-marker', text);
+    function markerRow(m) {
+      var text = 'Delegation' + (m.target ? ' · target ' + m.target : '') + (m.handoff ? ' · handoff ' + m.handoff : '');
+      var row = make('div', 'vw-marker');
+      row.appendChild(make('span', 'vw-time', formatClock(m.at)));
+      row.appendChild(make('span', 'vw-marker-text', text));
+      return row;
     }
 
-    function renderCaptions() {
-      var top = el.captionsPane.scrollTop;
-      el.captions.textContent = '';
-      if (!view.store) return;
-      el.captions.appendChild(boundaryRow('Generation ' + view.gen + (view.startedAt ? ' started ' + formatTime(view.startedAt) : ' started')));
+    function renderTranscript() {
+      var pane = el.transcriptScroll;
+      var top = pane.scrollTop;
+      el.transcript.textContent = '';
+      if (!view.store) { applyScroll(pane, top, 'transcript'); return; }
+      el.transcript.appendChild(boundaryRow('Generation ' + view.gen + (view.startedAt ? ' started ' + formatClock(view.startedAt) : ' started')));
       var items = view.store.captions();
       var markers = view.store.delegations().filter(function (r) { return r.kind === 'created'; });
-      if (!items.length && !markers.length) el.captions.appendChild(emptyRow('No captions in this generation yet.'));
-      var pendingMarkers = markers.slice();
+      var pending = markers.slice();
       items.forEach(function (item) {
-        pendingMarkers.forEach(function (m) {
-          if (m.seq <= item.seq) el.captions.appendChild(delegationMarker(m));
-        });
-        pendingMarkers = pendingMarkers.filter(function (m) { return m.seq > item.seq; });
-        el.captions.appendChild(captionRow(item, view.store.at(item.seq)));
+        pending.forEach(function (m) { if (m.seq <= item.seq) el.transcript.appendChild(markerRow(m)); });
+        pending = pending.filter(function (m) { return m.seq > item.seq; });
+        el.transcript.appendChild(turnRow(transcriptLine(item, view.store.at(item.seq))));
       });
-      pendingMarkers.forEach(function (m) { el.captions.appendChild(delegationMarker(m)); });
+      pending.forEach(function (m) { el.transcript.appendChild(markerRow(m)); });
+      if (!items.length && !markers.length) el.transcript.appendChild(emptyRow('No captions in this generation yet.'));
       if (!view.active && view.store.size()) {
-        el.captions.appendChild(boundaryRow('Generation ' + view.gen + ' ended' + (view.endedAt ? ' ' + formatTime(view.endedAt) : '')));
+        el.transcript.appendChild(boundaryRow('Generation ' + view.gen + ' ended' + (view.endedAt ? ' ' + formatClock(view.endedAt) : '')));
       }
-      applyScroll(el.captionsPane, top, view.tab === 'captions');
+      el.transcriptCount.textContent = plural(items.length, 'turn');
+      applyScroll(pane, top, 'transcript');
     }
 
     function syncTypeOptions() {
@@ -878,99 +892,134 @@
       view.filters.type = el.type.value;
     }
 
-    // Group chips with live counts. Counts respect the search text, not the group toggles,
-    // so a user can see what a toggle would add.
+    // Chip counts respect the search text, not the group toggles, so a user can see what a toggle would add.
     function renderGroupChips() {
+      var list = view.store ? view.store.list() : [];
       var counts = view.store ? view.store.counts(view.filters.q) : {};
       el.groups.textContent = '';
       GROUPS.forEach(function (g) {
         var on = view.filters.groups.indexOf(g.id) >= 0;
-        var btn = make('button', 'viewer-chip', g.label + ' ');
+        var btn = make('button', 'vw-chip');
         btn.type = 'button';
         btn.setAttribute('aria-pressed', String(on));
         btn.setAttribute('data-group', g.id);
-        btn.appendChild(make('span', 'viewer-count', String(counts[g.id] || 0)));
+        btn.appendChild(make('span', 'vw-chip-dot'));
+        btn.appendChild(make('span', '', g.label));
+        btn.appendChild(make('span', 'vw-count', String(counts[g.id] || 0)));
+        if (g.id === 'delegation') btn.title = delegationTooltip(delegationCounts(list, view.filters.q));
         el.groups.appendChild(btn);
-      });
-      var preset = presetOf(view.filters.groups);
-      Array.prototype.forEach.call(el.presets, function (b) {
-        b.setAttribute('aria-pressed', String(b.getAttribute('data-preset') === preset));
       });
     }
 
+    function renderFilterLine() {
+      var active = filterIsActive(view.filters);
+      el.filterLine.hidden = !active;
+      if (!active) return;
+      var shown = view.store ? view.store.filtered(view.filters).length : 0;
+      var total = view.store ? view.store.size() : 0;
+      el.filterText.textContent = filterSummary(shown, total, view.filters);
+    }
+
+    // The badge and the Delegation group both come from delegationCounts: created events only for the badge.
     function renderDelegationBadge() {
-      var rows = view.store ? view.store.delegations() : [];
-      var created = rows.filter(function (r) { return r.kind === 'created'; }).length;
-      el.delegationCount.textContent = String(created);
-      el.delegationBadge.textContent = created + (created === 1 ? ' delegation' : ' delegations');
-      el.delegationBadge.hidden = created === 0;
-      el.tabDelegations.setAttribute('data-count', String(rows.length));
+      var c = delegationCounts(view.store ? view.store.list() : [], '');
+      el.delegationBadge.textContent = plural(c.created, 'delegation');
+      el.delegationBadge.hidden = c.created === 0;
+    }
+
+    function renderAudioInto(box, facts) {
+      box.textContent = '';
+      box.appendChild(make('div', 'vw-audio-h', 'Totals'));
+      box.appendChild(make('div', '', plural(facts.events, 'audio event') + ' · ' + formatBytes(facts.bytes)));
+      box.appendChild(make('div', 'vw-audio-h', 'By direction, source and type'));
+      if (facts.facts.length) {
+        var ul = make('ul', 'vw-list');
+        facts.facts.forEach(function (f) { ul.appendChild(make('li', '', audioFactLine(f))); });
+        box.appendChild(ul);
+      } else {
+        box.appendChild(make('div', 'vw-empty', 'No per-type audio facts recorded.'));
+      }
+      if (facts.samples.length) {
+        box.appendChild(make('div', 'vw-audio-h', 'Shape samples (structure only, no payload content)'));
+        var sl = make('ul', 'vw-list');
+        facts.samples.forEach(function (s) {
+          var li = make('li', '', audioSampleLine(s));
+          if (s.paths.length) {
+            var pl = make('ul', 'vw-list');
+            s.paths.forEach(function (p) { pl.appendChild(make('li', '', p)); });
+            li.appendChild(pl);
+          }
+          sl.appendChild(li);
+        });
+        box.appendChild(sl);
+      }
+    }
+
+    function renderAudio() {
+      var facts = audioFacts(findGeneration(view.gens, view.gen));
+      el.audioWrap.hidden = !facts;
+      el.framesAudio.hidden = !facts;
+      if (!facts) return;
+      el.audioSummary.textContent = plural(facts.events, 'event') + ' · ' + formatBytes(facts.bytes);
+      el.audioPop.hidden = !view.audioOpen;
+      el.audioBtn.setAttribute('aria-expanded', String(view.audioOpen));
+      renderAudioInto(el.audioPop, facts);
+      renderAudioInto(el.framesAudioBody, facts);
     }
 
     function eventRow(ev) {
-      var row = make('div', 'viewer-event');
-      var head = make('div', 'viewer-event-head');
-      head.appendChild(make('span', 'viewer-badge dir-' + safeClass(ev.direction), DIRECTION_LABELS[ev.direction] || ev.direction || 'unknown'));
-      head.appendChild(make('span', 'viewer-badge group-' + safeClass(ev.group), groupLabel(ev.group)));
-      head.appendChild(make('span', 'viewer-type mono', ev.type || '(no type)'));
-      head.appendChild(make('span', 'viewer-meta', formatTime(ev.at)));
-      head.appendChild(make('span', 'viewer-meta', '#' + ev.seq));
-      head.appendChild(make('span', 'viewer-meta', formatBytes(ev.size)));
-      if (ev.truncated) head.appendChild(make('span', 'viewer-badge warn', 'truncated'));
-      head.appendChild(make('span', 'viewer-badge', 'delivery: ' + ev.delivery));
-      if (ev.source) head.appendChild(make('span', 'viewer-meta', ev.source));
-      row.appendChild(head);
+      var r = compactEventRow(ev);
+      var wrap = make('div', 'vw-event' + (r.delegation ? ' is-delegation' : ''));
+      var head = make('div', 'vw-row');
+      head.setAttribute('role', 'button');
+      head.tabIndex = 0;
+      head.setAttribute('aria-expanded', 'false');
+      head.title = r.group + ' · ' + r.dirLabel;
+      head.appendChild(make('span', 'vw-time', r.time));
+      var arrow = make('span', 'vw-arrow dir-' + safeClass(r.direction), r.arrow);
+      arrow.title = r.dirLabel;
+      arrow.setAttribute('aria-label', r.dirLabel);
+      head.appendChild(arrow);
+      head.appendChild(make('span', 'vw-type', r.type));
+      head.appendChild(make('span', 'vw-size', r.size));
+      head.appendChild(make('span', 'vw-delivery', r.delivery));
+      head.appendChild(make('span', 'vw-seq', '#' + r.seq));
+      wrap.appendChild(head);
 
-      var details = make('details', 'viewer-payload');
-      details.appendChild(make('summary', '', 'Payload'));
+      var body = make('div', 'vw-payload');
+      body.hidden = true;
       var filled = false;
       var fill = function () {
-        if (filled) return;
         filled = true;
-        var pre = make('pre', 'viewer-pre', prettyPayload(ev.payload));
-        details.appendChild(pre);
-        if (ev.truncated) details.appendChild(make('div', 'viewer-meta', '[payload truncated by gateway]'));
+        body.appendChild(make('div', 'vw-payload-meta', [groupLabel(ev.group), ev.at, ev.source, 'delivery ' + ev.delivery].filter(Boolean).join(' · ')));
+        body.appendChild(make('pre', 'vw-pre', prettyPayload(ev.payload)));
+        if (ev.truncated) body.appendChild(make('div', 'vw-payload-meta warn', '[payload truncated by gateway]'));
       };
-      if (view.open[ev.seq]) { details.open = true; fill(); }
-      details.addEventListener('toggle', function () {
-        if (details.open) { view.open[ev.seq] = true; fill(); } else { delete view.open[ev.seq]; }
+      var setOpen = function (open) {
+        if (open && !filled) fill();
+        body.hidden = !open;
+        head.setAttribute('aria-expanded', String(open));
+        if (open) view.open[ev.seq] = true; else delete view.open[ev.seq];
+      };
+      if (view.open[ev.seq]) setOpen(true);
+      head.addEventListener('click', function () { setOpen(body.hidden); });
+      head.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(body.hidden); }
       });
-      row.appendChild(details);
-      return row;
-    }
-
-    function renderDelegations() {
-      var top = el.delegationsPane.scrollTop;
-      el.delegations.textContent = '';
-      if (!view.store) return;
-      var rows = view.store.delegations();
-      if (!rows.length) el.delegations.appendChild(emptyRow('No delegations in this generation.'));
-      rows.forEach(function (r) {
-        var card = make('div', 'viewer-delegation');
-        var head = make('div', 'viewer-event-head');
-        head.appendChild(make('span', 'viewer-badge', r.kind === 'created' ? 'created' : 'gateway write'));
-        head.appendChild(make('span', 'viewer-meta', formatTime(r.at)));
-        head.appendChild(make('span', 'viewer-meta', '#' + r.seq));
-        if (r.target) head.appendChild(make('span', 'viewer-meta', 'target ' + r.target));
-        if (r.handoff) head.appendChild(make('span', 'viewer-meta', 'handoff ' + r.handoff));
-        if (r.delegationItemId) head.appendChild(make('span', 'viewer-meta', 'item ' + r.delegationItemId));
-        if (r.kind === 'write') head.appendChild(make('span', 'viewer-badge', 'delivery: ' + r.delivery));
-        if (r.truncated) head.appendChild(make('span', 'viewer-badge warn', 'truncated'));
-        card.appendChild(head);
-        if (r.text) card.appendChild(make('pre', '', r.text));
-        el.delegations.appendChild(card);
-      });
-      applyScroll(el.delegationsPane, top, view.tab === 'delegations');
+      wrap.appendChild(body);
+      return wrap;
     }
 
     function renderEvents() {
-      var top = el.eventsPane.scrollTop;
+      var pane = el.eventsScroll;
+      var top = pane.scrollTop;
       el.events.textContent = '';
-      if (!view.store) return;
+      if (!view.store) { applyScroll(pane, top, 'events'); return; }
       syncTypeOptions();
-      el.events.appendChild(boundaryRow('Generation ' + view.gen + (view.startedAt ? ' started ' + formatTime(view.startedAt) : ' started')));
-      var gaps = view.store.gaps();
-      gaps.reported.forEach(function (g) { el.events.appendChild(gapRow('Gap reported by gateway: seq ' + g.from + '–' + g.to)); });
+      el.events.appendChild(boundaryRow('Generation ' + view.gen + (view.startedAt ? ' started ' + formatClock(view.startedAt) : ' started')));
+      view.store.gaps().reported.forEach(function (g) {
+        el.events.appendChild(make('div', 'vw-gap-row', 'Gap reported by gateway: seq ' + g.from + '–' + g.to));
+      });
       var all = view.store.list();
       var rows = [];
       var prev = -1;
@@ -979,25 +1028,105 @@
         prev = ev.seq;
         if (eventMatches(ev, view.filters)) rows.push({ ev: ev });
       });
+      var shownRows = rows.filter(function (row) { return row.ev; });
       var visible = rows.slice(-MAX_EVENT_ROWS);
       if (visible.length < rows.length) {
         el.events.appendChild(emptyRow('Showing the latest ' + MAX_EVENT_ROWS + ' rows of ' + rows.length + '. Use filters to narrow the list.'));
       }
       visible.forEach(function (row) {
-        el.events.appendChild(row.ev ? eventRow(row.ev) : gapRow(row.gap));
+        el.events.appendChild(row.ev ? eventRow(row.ev) : make('div', 'vw-gap-row', row.gap));
       });
       if (!all.length) el.events.appendChild(emptyRow('No events loaded for this generation yet.'));
-      else if (!rows.some(function (row) { return row.ev; })) el.events.appendChild(emptyRow('No events match the current filters.'));
+      else if (!shownRows.length) el.events.appendChild(emptyRow('No events match the current filters.'));
       if (!view.active && all.length) {
-        el.events.appendChild(boundaryRow('Generation ' + view.gen + ' ended' + (view.endedAt ? ' ' + formatTime(view.endedAt) : '')));
+        el.events.appendChild(boundaryRow('Generation ' + view.gen + ' ended' + (view.endedAt ? ' ' + formatClock(view.endedAt) : '')));
       }
-      applyScroll(el.eventsPane, top, view.tab === 'events');
+      el.timelineCount.textContent = plural(shownRows.length, 'row');
+      applyScroll(pane, top, 'events');
+    }
+
+    function frameEntry(raw) {
+      var r = frameRow(raw);
+      var key = r.ring + '#' + r.seq;
+      var wrap = make('div', 'vw-event' + (r.oversize ? ' is-oversize' : ''));
+      var head = make('div', 'vw-row');
+      head.setAttribute('role', 'button');
+      head.tabIndex = 0;
+      head.setAttribute('aria-expanded', 'false');
+      head.appendChild(make('span', 'vw-time', r.time));
+      var arrow = make('span', 'vw-arrow dir-' + safeClass(r.direction), r.arrow);
+      arrow.title = r.direction;
+      head.appendChild(arrow);
+      head.appendChild(make('span', 'vw-type', r.ring + (r.oversize ? ' · oversize' : '')));
+      head.appendChild(make('span', 'vw-size', formatBytes(r.length)));
+      head.appendChild(make('span', 'vw-delivery', r.base64 ? 'base64' : r.delivery));
+      head.appendChild(make('span', 'vw-seq', '#' + r.seq));
+      wrap.appendChild(head);
+      var body = make('div', 'vw-payload');
+      body.hidden = true;
+      var filled = false;
+      var fill = function () {
+        filled = true;
+        body.appendChild(make('div', 'vw-payload-meta' + (r.truncated ? ' warn' : ''), frameNote(r) + (r.source ? ' · ' + r.source : '')));
+        body.appendChild(make('pre', 'vw-pre', framePayloadText(r, raw.payload)));
+      };
+      var setOpen = function (open) {
+        if (open && !filled) fill();
+        body.hidden = !open;
+        head.setAttribute('aria-expanded', String(open));
+        if (open) view.frames.open[key] = true; else delete view.frames.open[key];
+      };
+      if (view.frames.open[key]) setOpen(true);
+      head.addEventListener('click', function () { setOpen(body.hidden); });
+      head.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(body.hidden); }
+      });
+      wrap.appendChild(body);
+      return wrap;
+    }
+
+    function renderFrames() {
+      var f = view.frames;
+      el.frames.textContent = '';
+      if (f.loading) el.framesStats.textContent = 'Loading frames…';
+      else if (f.data) {
+        el.framesStats.textContent = ringStats(f.data).map(function (r) {
+          return r.name + ': ' + plural(r.frames, 'frame') + ' · ' + formatBytes(r.bytes) + (r.dropped ? ' · dropped ' + r.dropped : '');
+        }).join('   ');
+      } else el.framesStats.textContent = '';
+      if (f.error) { el.frames.appendChild(emptyRow(f.error)); return; }
+      if (!f.data) return;
+      var list = Array.isArray(f.data.frames) ? f.data.frames : [];
+      if (!list.length) el.frames.appendChild(emptyRow('No frames in this ring.'));
+      list.slice(-MAX_EVENT_ROWS).forEach(function (raw) { el.frames.appendChild(frameEntry(raw)); });
+    }
+
+    async function loadFrames() {
+      if (!view.gen) return;
+      var f = view.frames;
+      f.token++;
+      var token = f.token;
+      f.loading = true;
+      f.error = '';
+      renderFrames();
+      var data = null;
+      var error = '';
+      try {
+        data = await getJSON(framesUrl(sessionId, view.gen, f.ring));
+      } catch (e) {
+        error = e && e.message ? e.message : String(e);
+      }
+      if (token !== f.token) return;
+      f.loading = false;
+      f.data = data;
+      f.error = error;
+      renderFrames();
     }
 
     function renderGenSelect() {
       el.genSelect.textContent = '';
       view.gens.forEach(function (g) {
-        var opt = make('option', '', 'Gen ' + g.generation + (g.active ? ' · active' : ' · ended') + ' · ' + toInt(g.event_count) + ' events');
+        var opt = make('option', '', 'Gen ' + g.generation + (g.active ? ' · active' : ' · ended') + ' · ' + plural(toInt(g.event_count), 'event'));
         opt.value = String(g.generation);
         if (Number(g.generation) === view.gen) opt.selected = true;
         el.genSelect.appendChild(opt);
@@ -1091,13 +1220,18 @@
       view.typesKey = null;
       view.filters.type = '';
       el.type.value = '';
+      view.frames.token++;
+      view.frames.loading = false;
+      view.frames.error = '';
+      view.frames.data = null;
+      view.frames.open = {};
       root.history.replaceState(null, '', viewerUrl(sessionId, view.gen, view.filters));
       setConn('Loading', 'idle');
       renderGenSelect();
       scheduleRender();
+      if (view.tab === 'frames') loadFrames();
       loadSnapshot(token).then(function (ok) {
         if (!ok || token !== view.token) return;
-        renderHeader();
         if (view.active) {
           setConn('Connecting', 'idle');
           startStream(token);
@@ -1113,32 +1247,23 @@
     async function refreshGenerations() {
       try {
         await loadGenerations();
+        renderAudio();
+        renderStatus();
       } catch (e) {}
     }
 
     function setTab(tab) {
       view.tab = tab;
-      el.tabCaptions.setAttribute('aria-selected', String(tab === 'captions'));
-      el.tabDelegations.setAttribute('aria-selected', String(tab === 'delegations'));
-      el.tabEvents.setAttribute('aria-selected', String(tab === 'events'));
-      el.captionsPane.hidden = tab !== 'captions';
-      el.delegationsPane.hidden = tab !== 'delegations';
-      el.eventsPane.hidden = tab !== 'events';
-      view.following = true;
-      el.follow.hidden = true;
+      view.following = { transcript: true, events: true };
       renderAll();
+      if (tab === 'frames') loadFrames();
     }
 
-    function activePane() {
-      if (view.tab === 'events') return el.eventsPane;
-      if (view.tab === 'delegations') return el.delegationsPane;
-      return el.captionsPane;
-    }
-
-    function onPaneScroll(pane) {
-      if (pane !== activePane()) return;
-      view.following = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 40;
-      el.follow.hidden = view.following;
+    function onPaneScroll(key, pane) {
+      if (!pane.clientHeight) return;
+      view.following[key] = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 40;
+      var btn = key === 'transcript' ? el.followTranscript : el.followEvents;
+      btn.hidden = view.following[key];
     }
 
     function paintTheme() {
@@ -1173,15 +1298,53 @@
       if (!ok) throw new Error('copy unsupported');
     }
 
+    async function copyWithToast(text, label) {
+      try {
+        await copyText(text);
+        toast(label);
+      } catch (e) {
+        toast('Copy failed');
+      }
+    }
+
+    function visibleJSON() {
+      var list = view.store ? view.store.filtered(view.filters) : [];
+      return { count: list.length, text: JSON.stringify(list.map(function (ev) { return ev.raw; }), null, 2) };
+    }
+
+    function setMenu(open) {
+      view.menuOpen = open;
+      el.menu.hidden = !open;
+      el.menuBtn.setAttribute('aria-expanded', String(open));
+    }
+
+    function setAudio(open) {
+      view.audioOpen = open;
+      el.audioPop.hidden = !open;
+      el.audioBtn.setAttribute('aria-expanded', String(open));
+    }
+
+    function clearFilters() {
+      view.filters = clearedFilter();
+      el.search.value = '';
+      el.type.value = '';
+      renderAll();
+    }
+
     function bind() {
       el.genSelect.addEventListener('change', function () {
         var gen = Number(el.genSelect.value);
         openGeneration(gen, findGeneration(view.gens, gen));
       });
-      el.tabCaptions.addEventListener('click', function () { setTab('captions'); });
-      el.tabDelegations.addEventListener('click', function () { setTab('delegations'); });
+      el.tabTranscript.addEventListener('click', function () { setTab('transcript'); });
       el.tabEvents.addEventListener('click', function () { setTab('events'); });
-      el.delegationBadge.addEventListener('click', function () { setTab('delegations'); });
+      el.tabFrames.addEventListener('click', function () { setTab('frames'); });
+      el.delegationBadge.addEventListener('click', function () {
+        view.filters.groups = ['delegation'];
+        view.filters.type = '';
+        el.type.value = '';
+        setTab('events');
+      });
       el.type.addEventListener('change', function () { view.filters.type = el.type.value; scheduleRender(); });
       el.search.value = view.filters.q;
       var searchTimer = 0;
@@ -1200,33 +1363,68 @@
         });
         scheduleRender();
       });
-      Array.prototype.forEach.call(el.presets, function (b) {
+      el.filterClear.addEventListener('click', clearFilters);
+      el.menuBtn.addEventListener('click', function () { setMenu(!view.menuOpen); });
+      Array.prototype.forEach.call(el.menu.querySelectorAll('button[data-preset]'), function (b) {
         b.addEventListener('click', function () {
           view.filters.groups = presetGroups(b.getAttribute('data-preset')) || GROUP_IDS.slice();
+          setMenu(false);
           scheduleRender();
         });
       });
-      el.copy.addEventListener('click', async function () {
-        var list = view.store ? view.store.filtered(view.filters) : [];
-        var text = JSON.stringify(list.map(function (ev) { return ev.raw; }), null, 2);
-        try {
-          await copyText(text);
-          toast('Copied ' + list.length + ' event(s) as JSON');
-        } catch (e) {
-          toast('Copy failed');
-        }
+      el.copy.addEventListener('click', function () {
+        var out = visibleJSON();
+        setMenu(false);
+        copyWithToast(out.text, 'Copied ' + plural(out.count, 'event') + ' as JSON');
       });
-      el.follow.addEventListener('click', function () {
-        view.following = true;
-        el.follow.hidden = true;
+      el.download.addEventListener('click', function () {
+        var out = visibleJSON();
+        setMenu(false);
+        var blob = new root.Blob([out.text + '\n'], { type: 'application/json' });
+        var url = root.URL.createObjectURL(blob);
+        var a = make('a', '');
+        a.href = url;
+        a.download = 'viewer-' + (sessionId || 'session').replace(/[^a-z0-9_-]/gi, '_') + '-gen' + view.gen + '.json';
+        doc.body.appendChild(a);
+        a.click();
+        doc.body.removeChild(a);
+        root.setTimeout(function () { root.URL.revokeObjectURL(url); }, 1000);
+        toast('Downloading ' + plural(out.count, 'event'));
+      });
+      el.audioBtn.addEventListener('click', function () { setAudio(!view.audioOpen); });
+      el.creationCopy.addEventListener('click', function () {
+        copyWithToast(el.creationBody.textContent, 'Copied creation text');
+      });
+      el.session.addEventListener('click', function () { if (sessionId) copyWithToast(sessionId, 'Copied session id'); });
+      el.zoe.addEventListener('click', function () { if (view.zoeId) copyWithToast(view.zoeId, 'Copied Zoe session id'); });
+      el.framesRefresh.addEventListener('click', loadFrames);
+      el.ring.addEventListener('change', function () {
+        view.frames.ring = el.ring.value;
+        loadFrames();
+      });
+      el.followTranscript.addEventListener('click', function () {
+        view.following.transcript = true;
         scheduleRender();
       });
-      el.captionsPane.addEventListener('scroll', function () { onPaneScroll(el.captionsPane); }, { passive: true });
-      el.delegationsPane.addEventListener('scroll', function () { onPaneScroll(el.delegationsPane); }, { passive: true });
-      el.eventsPane.addEventListener('scroll', function () { onPaneScroll(el.eventsPane); }, { passive: true });
+      el.followEvents.addEventListener('click', function () {
+        view.following.events = true;
+        scheduleRender();
+      });
+      el.transcriptScroll.addEventListener('scroll', function () { onPaneScroll('transcript', el.transcriptScroll); }, { passive: true });
+      el.eventsScroll.addEventListener('scroll', function () { onPaneScroll('events', el.eventsScroll); }, { passive: true });
       el.theme.addEventListener('click', function () {
         setTheme(doc.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
       });
+      doc.addEventListener('click', function (e) {
+        if (view.menuOpen && !el.menuBtn.parentNode.contains(e.target)) setMenu(false);
+        if (view.audioOpen && !el.audioWrap.contains(e.target)) setAudio(false);
+      });
+      doc.addEventListener('keydown', function (e) {
+        if (e.key !== 'Escape') return;
+        if (view.menuOpen) { setMenu(false); el.menuBtn.focus(); }
+        if (view.audioOpen) { setAudio(false); el.audioBtn.focus(); }
+      });
+      if (mq && mq.addEventListener) mq.addEventListener('change', renderAll);
       paintTheme();
       root.addEventListener('pagehide', function () {
         stopStream();
@@ -1238,7 +1436,7 @@
       doc.title = 'Upstream viewer · ' + (sessionId || 'no session');
       bind();
       setConn('Loading', 'idle');
-      renderHeader();
+      renderAll();
       if (!sessionId) return showError('Missing session id. Open /viewer?session=<gateway_session_id>.');
       if (requestedGen.error) return showError(requestedGen.error);
       try {
@@ -1252,7 +1450,6 @@
       root.setInterval(refreshGenerations, REFRESH_MS);
     }
 
-    el.follow.hidden = true;
     init();
   }
 
