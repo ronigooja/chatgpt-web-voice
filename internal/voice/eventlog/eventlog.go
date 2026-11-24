@@ -14,14 +14,18 @@ const eventOverhead = 256
 const generationOverhead = 1024
 
 type Config struct {
-	MaxEvents   int
-	MaxBytes    int
-	GlobalBytes int
-	EventBytes  int
-	TTL         time.Duration
+	MaxEvents     int
+	MaxBytes      int
+	GlobalBytes   int
+	EventBytes    int
+	TTL           time.Duration
+	FrameRingSize int
+	AudioRingSize int
 }
 
-func Defaults() Config { return Config{2000, 4 << 20, 64 << 20, 64 << 10, 6 * time.Hour} }
+func Defaults() Config {
+	return Config{MaxEvents: 2000, MaxBytes: 4 << 20, GlobalBytes: 64 << 20, EventBytes: 64 << 10, TTL: 6 * time.Hour, FrameRingSize: 200, AudioRingSize: 300}
+}
 
 type Key struct {
 	SessionID  string
@@ -42,32 +46,36 @@ type Event struct {
 }
 
 type Generation struct {
-	Generation    int64      `json:"generation"`
-	ZoeSessionID  string     `json:"zoe_session_id"`
-	ZoeGeneration int64      `json:"zoe_generation"`
-	StartedAt     time.Time  `json:"started_at"`
-	EndedAt       *time.Time `json:"ended_at"`
-	Active        bool       `json:"active"`
-	EventCount    int        `json:"event_count"`
-	NewestSeq     uint64     `json:"newest_seq"`
-	Dropped       uint64     `json:"dropped"`
-	AudioEvents   uint64     `json:"audio_events"`
-	AudioBytes    uint64     `json:"audio_bytes"`
+	Generation    int64         `json:"generation"`
+	ZoeSessionID  string        `json:"zoe_session_id"`
+	ZoeGeneration int64         `json:"zoe_generation"`
+	StartedAt     time.Time     `json:"started_at"`
+	EndedAt       *time.Time    `json:"ended_at"`
+	Active        bool          `json:"active"`
+	EventCount    int           `json:"event_count"`
+	NewestSeq     uint64        `json:"newest_seq"`
+	Dropped       uint64        `json:"dropped"`
+	AudioEvents   uint64        `json:"audio_events"`
+	AudioBytes    uint64        `json:"audio_bytes"`
+	Audio         []AudioFact   `json:"audio"`
+	AudioSamples  []AudioSample `json:"audio_samples"`
 }
 
 type Snapshot struct {
-	SessionID     string  `json:"session_id"`
-	Generation    int64   `json:"generation"`
-	ZoeSessionID  string  `json:"zoe_session_id"`
-	ZoeGeneration int64   `json:"zoe_generation"`
-	OldestSeq     uint64  `json:"oldest_seq"`
-	NewestSeq     uint64  `json:"newest_seq"`
-	Dropped       uint64  `json:"dropped"`
-	AudioEvents   uint64  `json:"audio_events"`
-	AudioBytes    uint64  `json:"audio_bytes"`
-	Gap           bool    `json:"gap"`
-	Active        bool    `json:"active"`
-	Events        []Event `json:"events"`
+	SessionID     string        `json:"session_id"`
+	Generation    int64         `json:"generation"`
+	ZoeSessionID  string        `json:"zoe_session_id"`
+	ZoeGeneration int64         `json:"zoe_generation"`
+	OldestSeq     uint64        `json:"oldest_seq"`
+	NewestSeq     uint64        `json:"newest_seq"`
+	Dropped       uint64        `json:"dropped"`
+	AudioEvents   uint64        `json:"audio_events"`
+	AudioBytes    uint64        `json:"audio_bytes"`
+	Audio         []AudioFact   `json:"audio"`
+	AudioSamples  []AudioSample `json:"audio_samples"`
+	Gap           bool          `json:"gap"`
+	Active        bool          `json:"active"`
+	Events        []Event       `json:"events"`
 }
 
 type entry struct {
@@ -75,6 +83,7 @@ type entry struct {
 	events []Event
 	bytes  int
 	subs   map[chan struct{}]struct{}
+	rings  [3]frameRing
 }
 
 type Store struct {
@@ -155,9 +164,8 @@ func (s *Store) Append(k Key, direction, source, delivery string, payload []byte
 		prefix := payload[:s.cfg.EventBytes]
 		s.mu.Lock()
 		if e := s.entries[k]; e != nil && e.meta.Active {
-			if bytes.Contains(prefix, []byte("session.input_audio.append")) || bytes.Contains(prefix, []byte("session.output_audio.delta")) {
-				e.meta.AudioEvents++
-				e.meta.AudioBytes += uint64(len(payload))
+			if typ := audioPrefixType(prefix); typ != "" {
+				s.countAudio(e, direction, source, typ, payload)
 			} else {
 				e.meta.Dropped++
 			}
@@ -202,8 +210,7 @@ func (s *Store) Append(k Key, direction, source, delivery string, payload []byte
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if e := s.entries[k]; e != nil && e.meta.Active {
-			e.meta.AudioEvents++
-			e.meta.AudioBytes += uint64(len(payload))
+			s.countAudio(e, direction, source, audioType(payload), payload)
 			notify(e)
 		}
 		return
@@ -254,6 +261,19 @@ func (s *Store) enforceGlobal() {
 			s.remove(oldest, victim)
 			continue
 		}
+		var frameVictim *frameRing
+		for _, candidate := range s.entries {
+			for i := range candidate.rings {
+				r := &candidate.rings[i]
+				if len(r.frames) > 0 && (frameVictim == nil || r.frames[0].At.Before(frameVictim.frames[0].At)) {
+					frameVictim = r
+				}
+			}
+		}
+		if frameVictim != nil {
+			s.dropFrame(frameVictim)
+			continue
+		}
 		// Active generations remain addressable, but their oldest events can be evicted.
 		for _, candidate := range s.entries {
 			if len(candidate.events) > 0 && (victim == nil || candidate.events[0].At.Before(victim.events[0].At)) {
@@ -296,6 +316,9 @@ func notify(e *entry) {
 }
 func (s *Store) remove(k Key, e *entry) {
 	s.bytes -= e.bytes + generationOverhead
+	for i := range e.rings {
+		s.bytes -= e.rings[i].bytes
+	}
 	delete(s.entries, k)
 	notify(e)
 }
@@ -315,6 +338,8 @@ func (s *Store) List(id string) []Generation {
 	for k, e := range s.entries {
 		if k.SessionID == id {
 			m := e.meta
+			m.Audio = append([]AudioFact{}, e.meta.Audio...)
+			m.AudioSamples = append([]AudioSample{}, e.meta.AudioSamples...)
 			m.EventCount = len(e.events)
 			out = append(out, m)
 		}
@@ -328,7 +353,7 @@ func (s *Store) snapshot(k Key, after uint64, limit int) (Snapshot, bool) {
 	if e == nil {
 		return Snapshot{}, false
 	}
-	out := Snapshot{SessionID: k.SessionID, Generation: k.Generation, ZoeSessionID: e.meta.ZoeSessionID, ZoeGeneration: e.meta.ZoeGeneration, NewestSeq: e.meta.NewestSeq, Dropped: e.meta.Dropped, AudioEvents: e.meta.AudioEvents, AudioBytes: e.meta.AudioBytes, Active: e.meta.Active, Events: []Event{}}
+	out := Snapshot{SessionID: k.SessionID, Generation: k.Generation, ZoeSessionID: e.meta.ZoeSessionID, ZoeGeneration: e.meta.ZoeGeneration, NewestSeq: e.meta.NewestSeq, Dropped: e.meta.Dropped, AudioEvents: e.meta.AudioEvents, AudioBytes: e.meta.AudioBytes, Audio: append([]AudioFact{}, e.meta.Audio...), AudioSamples: append([]AudioSample{}, e.meta.AudioSamples...), Active: e.meta.Active, Events: []Event{}}
 	if len(e.events) > 0 {
 		out.OldestSeq = e.events[0].Seq
 	} else {

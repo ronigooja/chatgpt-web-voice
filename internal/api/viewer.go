@@ -17,6 +17,30 @@ func (s *Server) RegisterViewer(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/call-sessions/{id}/generations", s.viewerGenerations)
 	mux.HandleFunc("GET /api/call-sessions/{id}/generations/{gen}/events", s.viewerEvents)
 	mux.HandleFunc("GET /api/call-sessions/{id}/generations/{gen}/events/stream", s.viewerStream)
+	mux.HandleFunc("GET /api/call-sessions/{id}/generations/{gen}/frames", s.viewerFrames)
+}
+
+func (s *Server) viewerFrames(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	key, valid := viewerKey(r)
+	if !valid || s.events == nil {
+		http.NotFound(w, r)
+		return
+	}
+	ring := r.URL.Query().Get("ring")
+	if ring == "" {
+		ring = "all"
+	}
+	if ring != "all" && ring != "conversation" && ring != "audio" && ring != "oversize" {
+		http.Error(w, "invalid ring", http.StatusBadRequest)
+		return
+	}
+	snapshot, ok := s.events.Frames(key, ring)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, http.StatusOK, snapshot)
 }
 
 func (s *Server) generationCount(id string) int {

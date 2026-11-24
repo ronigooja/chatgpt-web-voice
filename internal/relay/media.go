@@ -63,14 +63,13 @@ var opusCodec = webrtc.RTPCodecCapability{
 
 // PionRelay is the Pion based Relay implementation.
 type PionRelay struct {
-	downstreamAPI      *webrtc.API
-	upstreamAPI        *webrtc.API
-	proxyUpstreamAPI   *webrtc.API
-	configuration      webrtc.Configuration
-	limiter            *sessionLimiter
-	logger             *slog.Logger
-	eventShapeConfig   eventShapeConfig
-	oversizeCaptureDir string
+	downstreamAPI    *webrtc.API
+	upstreamAPI      *webrtc.API
+	proxyUpstreamAPI *webrtc.API
+	configuration    webrtc.Configuration
+	limiter          *sessionLimiter
+	logger           *slog.Logger
+	eventShapeConfig eventShapeConfig
 }
 
 var _ Relay = (*PionRelay)(nil)
@@ -178,6 +177,13 @@ func (s *pionSession) capture(direction, source, delivery string, data []byte, b
 	defer s.captureMu.RUnlock()
 	if s.captureStore != nil {
 		s.captureStore.Append(s.captureKey, direction, source, delivery, data, binary)
+		if direction == "client_to_upstream" || direction == "upstream_to_client" {
+			s.captureStore.AppendFrame(s.captureKey, direction, source, delivery, data, binary)
+		}
+	}
+	if len(data) > mediaDataMessageMaxSize && (direction == "client_to_upstream" || direction == "upstream_to_client") {
+		outer, inner, _, _ := shapeFrame(data)
+		s.logger.Warn("relay_oversize_frame", "direction", direction, "source", source, "byte_length", len(data), "outer_type", outer, "inner_type", inner, "is_string", !binary)
 	}
 }
 
@@ -262,7 +268,6 @@ type dataChannelPipe struct {
 	onError     func(error)
 	onOpen      func()
 	logger      *slog.Logger
-	capture     *oversizeCapture
 }
 
 type dataChannelBridge struct {
@@ -332,13 +337,12 @@ func New(cfg Config, logger *slog.Logger) (*PionRelay, error) {
 		return nil, err
 	}
 	return &PionRelay{
-		downstreamAPI:      downstreamAPI,
-		upstreamAPI:        upstreamAPI,
-		proxyUpstreamAPI:   proxyUpstreamAPI,
-		limiter:            &sessionLimiter{limit: cfg.EffectiveMaxSessions()},
-		logger:             logger,
-		oversizeCaptureDir: cfg.OversizeCaptureDir,
-		eventShapeConfig:   eventShapeConfig{enabled: cfg.EventShapeSampling, maxFrames: cfg.EventShapeSamplingMaxFrames, route: cfg.EventShapeRoute},
+		downstreamAPI:    downstreamAPI,
+		upstreamAPI:      upstreamAPI,
+		proxyUpstreamAPI: proxyUpstreamAPI,
+		limiter:          &sessionLimiter{limit: cfg.EffectiveMaxSessions()},
+		logger:           logger,
+		eventShapeConfig: eventShapeConfig{enabled: cfg.EventShapeSampling, maxFrames: cfg.EventShapeSamplingMaxFrames, route: cfg.EventShapeRoute},
 	}, nil
 }
 
@@ -434,7 +438,6 @@ func (r *PionRelay) NewSession(ctx context.Context, clientOffer string, route Ro
 	session.bridge = newDataChannelBridge(session.done, session.logger, func(err error) {
 		session.fail("data_channel_failed", err)
 	}, session.markActiveChannelOpen)
-	session.bridge.upToDown.capture = &oversizeCapture{dir: r.oversizeCaptureDir, mediaID: id, logger: session.logger}
 	session.bridge.setObserver(session.observeEvent)
 	session.bridge.capture = session.capture
 	if session.shapeSampler != nil {
@@ -1130,10 +1133,6 @@ func (b *dataChannelBridge) bindUpstreamSource(channel *webrtc.DataChannel) {
 		if !b.owns(channel) {
 			return
 		}
-		if len(message.Data) > mediaDataMessageMaxSize {
-			destination.reportError(fmt.Errorf("%s DataChannel message exceeds %d bytes", destination.name, mediaDataMessageMaxSize))
-			return
-		}
 		payload := append([]byte(nil), message.Data...)
 		if b.capture != nil {
 			b.capture("upstream_to_client", "datachannel", "queued", payload, !message.IsString)
@@ -1191,10 +1190,6 @@ func (b *dataChannelBridge) swapUpstream(next *webrtc.DataChannel) *webrtc.DataC
 
 func (b *dataChannelBridge) bindSource(channel *webrtc.DataChannel, destination *dataChannelPipe) {
 	channel.OnMessage(func(message webrtc.DataChannelMessage) {
-		if len(message.Data) > mediaDataMessageMaxSize {
-			destination.reportError(fmt.Errorf("%s DataChannel message exceeds %d bytes", destination.name, mediaDataMessageMaxSize))
-			return
-		}
 		payload := append([]byte(nil), message.Data...)
 		if message.IsString {
 			b.observeMu.RLock()
@@ -1309,10 +1304,6 @@ func (p *dataChannelPipe) run() {
 				p.reportError(fmt.Errorf("%s DataChannel destination unavailable", p.name))
 				return
 			}
-			capture := p.capture != nil && len(message.data) > mediaDataMessageMaxSize
-			if capture {
-				p.capture.start(message, p.name)
-			}
 			if !p.waitWritable(destination, len(message.data)) {
 				return
 			}
@@ -1323,9 +1314,6 @@ func (p *dataChannelPipe) run() {
 				err = destination.Send(message.data)
 			}
 			if err != nil {
-				if capture {
-					p.capture.failure(message, p.name)
-				}
 				p.reportError(fmt.Errorf("send %s DataChannel message: %w", p.name, err))
 				return
 			}
@@ -1335,8 +1323,12 @@ func (p *dataChannelPipe) run() {
 	}
 }
 
+func mustWaitWritable(amount uint64, messageSize int) bool {
+	return amount != 0 && amount+uint64(messageSize) > mediaDataBufferedMaxSize
+}
+
 func (p *dataChannelPipe) waitWritable(destination *webrtc.DataChannel, messageSize int) bool {
-	for destination.BufferedAmount()+uint64(messageSize) > mediaDataBufferedMaxSize {
+	for mustWaitWritable(destination.BufferedAmount(), messageSize) {
 		select {
 		case <-p.writable:
 		case <-p.done:

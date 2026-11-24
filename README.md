@@ -210,8 +210,9 @@ the loaded image.
 | `VOICE_SESSION_TTL_SECONDS` | `180` | 语音内存绑定 TTL |
 | `VOICE_RELAY_ENABLED` | `true` | Terminate voice media in the gateway (two PeerConnections per call). Set `false` to keep client-direct media |
 | `VOICE_RELAY_MEDIA_ROUTE` | `account` | `account`: relay media follows the account proxy. `direct`: relay media bypasses it. Signaling always follows the account proxy |
-| `VOICE_OVERSIZE_CAPTURE_DIR` | empty | Captures downstream messages larger than 262144 bytes and keeps the newest 30 files; contents are private conversation data |
 | `VOICE_EVENT_VIEWER_ENABLED` | `true` | Enable bounded in-memory voice event capture |
+| `VOICE_FRAME_RING_SIZE` | `200` | Conversation frame limit per generation; 0 disables |
+| `VOICE_AUDIO_RING_SIZE` | `300` | Audio event frame limit per generation; 0 disables |
 | `VOICE_VIEWER_READ_KEY` | empty | Optional read-only bearer credential for viewer endpoints |
 | `VOICE_RELAY_MAX_SESSIONS` | `16` | Concurrent relayed calls (`0` uses the default) |
 | `VOICE_RELAY_UDP_PORT_MIN` / `VOICE_RELAY_UDP_PORT_MAX` | unset | Restrict the relay's UDP port range; set both or neither |
