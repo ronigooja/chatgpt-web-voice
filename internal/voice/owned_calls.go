@@ -413,6 +413,8 @@ func ownedEndReason(reason string) string {
 	switch reason {
 	case "user_hangup", "upstream_voice_end", "gateway_shutdown", "failure":
 		return reason
+	case "client_data_channel_closed":
+		return "media_lost"
 	default:
 		return "media_lost"
 	}
