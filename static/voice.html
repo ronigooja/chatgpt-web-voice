@@ -1767,7 +1767,6 @@
   var playbackSuppressed = false;
   var pendingVoicePreview = false;
   var suppressPreviewAssistantUntil = 0;
-  var micPermissionWarmed = false;
 
 
   var uiLocaleStorageKey = 'chatgpt_web_voice_ui_locale_v1';
@@ -3948,21 +3947,6 @@
     sendVoicePreviewGreeting();
   }
 
-  async function warmMicPermission() {
-    if (micPermissionWarmed) return true;
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return false;
-    try {
-      var stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-      stream.getTracks().forEach(function (track) { track.stop(); });
-      micPermissionWarmed = true;
-      await refreshMics();
-      return true;
-    } catch (e) {
-      log('warm mic permission fail', String(e));
-      return false;
-    }
-  }
-
   async function stopVoicePreviewOnly() {
     if (previewTimer) clearTimeout(previewTimer);
     previewTimer = 0;
@@ -3998,7 +3982,6 @@
     previewStarting = true;
     try {
       await stopVoicePreviewOnly();
-      await warmMicPermission();
       previewStarting = true;
       var pcLocal = newVoicePeerConnection();
       previewPc = pcLocal;
