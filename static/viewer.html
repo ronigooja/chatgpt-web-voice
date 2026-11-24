@@ -26,7 +26,19 @@
     .viewer-bar .viewer-kv { display: inline-flex; gap: 5px; align-items: baseline; min-width: 0; }
     .viewer-bar .viewer-k { color: var(--dim); text-transform: uppercase; letter-spacing: .08em; font-size: 10px; font-weight: 700; }
     .viewer-bar .viewer-v { color: var(--ink); font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11px; overflow-wrap: anywhere; }
-    .viewer-bar select, .viewer-bar input[type="search"], .viewer-filters select, .viewer-filters button, .viewer-tabs button {
+    .viewer-presets, .viewer-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+    .viewer-chips button[aria-pressed="false"] { color: var(--dim); text-decoration: line-through; }
+    .viewer-chips button[aria-pressed="true"], .viewer-presets button[aria-pressed="true"] { background: var(--surface-3); }
+    .viewer-filters input[type="search"] { min-width: 180px; }
+    .viewer-advanced { font-size: 12px; color: var(--muted); }
+    .viewer-advanced summary { cursor: pointer; }
+    .viewer-count { display: inline-block; min-width: 18px; padding: 0 6px; border-radius: 999px; background: var(--surface-3); color: var(--ink); font-size: 11px; text-align: center; }
+    .viewer-count-header { border: 1px solid var(--green-bright); color: var(--green-bright); background: transparent; font: inherit; font-size: 12px; cursor: pointer; padding: 2px 8px; }
+    .viewer-count-header[hidden] { display: none; }
+    .viewer-marker { margin: 10px 0; padding: 6px 10px; border-left: 3px solid var(--green-bright); background: var(--green-soft); border-radius: 8px; font-size: 12px; color: var(--ink); }
+    .viewer-delegation { padding: 8px 10px; margin-bottom: 8px; border: 1px solid var(--line); border-radius: 10px; font-size: 12px; }
+    .viewer-delegation pre { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font-family: inherit; }
+    .viewer-bar select, .viewer-bar input[type="search"], .viewer-filters select, .viewer-filters input[type="search"], .viewer-filters button, .viewer-presets button, .viewer-chips button, .viewer-tabs button {
       min-height: 30px; padding: 4px 9px; border: 1px solid var(--line-strong); border-radius: 8px;
       color: var(--ink); background: var(--input-bg); font: inherit; font-size: 12px;
     }
@@ -63,7 +75,7 @@
 <body>
   <header class="topbar">
     <a class="brand" href="/sessions"><span class="brand-mark">SS</span><span class="brand-title">Upstream viewer</span></a>
-    <div class="top-actions"><span id="vwOrb" class="orb idle" aria-hidden="true"></span><span id="vwConn">Loading</span><span>Read-only</span><button type="button" id="vwTheme" class="header-chip" aria-label="Toggle theme">Dark</button><a class="nav-link" href="/sessions">Sessions</a><a class="nav-link" href="/voice">Voice</a></div>
+    <div class="top-actions"><span id="vwOrb" class="orb idle" aria-hidden="true"></span><span id="vwConn">Loading</span><span>Read-only</span><button type="button" id="vwDelegationBadge" class="viewer-count viewer-count-header" hidden>0 delegations</button><button type="button" id="vwTheme" class="header-chip" aria-label="Toggle theme">Dark</button><a class="nav-link" href="/sessions">Sessions</a><a class="nav-link" href="/voice">Voice</a></div>
   </header>
   <main id="viewerPage" class="layout viewer-page" aria-label="Upstream context viewer">
     <div class="viewer-bar">
@@ -82,21 +94,28 @@
     </details>
     <div class="viewer-tabs" role="tablist">
       <button type="button" id="vwTabCaptions" role="tab" aria-selected="true">Captions</button>
+      <button type="button" id="vwTabDelegations" role="tab" aria-selected="false">Delegations <span id="vwDelegationCount" class="viewer-count">0</span></button>
       <button type="button" id="vwTabEvents" role="tab" aria-selected="false">Events</button>
     </div>
     <div class="viewer-filters">
-      <select id="vwDirection" aria-label="Filter by direction">
-        <option value="">All directions</option>
-        <option value="upstream_to_client">upstream → client</option>
-        <option value="client_to_upstream">client → upstream</option>
-        <option value="gateway_to_upstream">gateway → upstream</option>
-        <option value="gateway_creation">creation</option>
-      </select>
-      <select id="vwType" aria-label="Filter by type"><option value="">All types</option></select>
+      <div class="viewer-presets" role="group" aria-label="Presets">
+        <button type="button" data-preset="conversation">Conversation only</button>
+        <button type="button" data-preset="delegation">Delegation only</button>
+        <button type="button" data-preset="everything">Everything</button>
+      </div>
+      <div id="vwGroups" class="viewer-chips" role="group" aria-label="Event groups"></div>
+      <input type="search" id="vwSearch" aria-label="Search type and payload" placeholder="Search type or payload" />
+      <details class="viewer-advanced">
+        <summary>Advanced</summary>
+        <label>Raw type <select id="vwType" aria-label="Filter by raw type"><option value="">All types</option></select></label>
+      </details>
       <button type="button" id="vwCopy">Copy visible JSON</button>
     </div>
     <section id="vwCaptionsPane" class="viewer-pane" role="tabpanel" aria-label="Captions">
       <div id="vwCaptions" class="transcript-list" aria-live="off"></div>
+    </section>
+    <section id="vwDelegationsPane" class="viewer-pane" role="tabpanel" aria-label="Delegations" hidden>
+      <div id="vwDelegations"></div>
     </section>
     <section id="vwEventsPane" class="viewer-pane" role="tabpanel" aria-label="Events" hidden>
       <div id="vwEvents"></div>

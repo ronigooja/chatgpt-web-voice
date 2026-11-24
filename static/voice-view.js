@@ -392,7 +392,10 @@
       conn: $('vwConn'), orb: $('vwOrb'), session: $('vwSession'), zoe: $('vwZoe'), gen: $('vwGen'), status: $('vwStatus'),
       genSelect: $('vwGenSelect'), tabCaptions: $('vwTabCaptions'), tabEvents: $('vwTabEvents'), notice: $('vwNotice'),
       creation: $('vwCreation'), creationBody: $('vwCreationBody'), captionsPane: $('vwCaptionsPane'), captions: $('vwCaptions'),
-      eventsPane: $('vwEventsPane'), events: $('vwEvents'), direction: $('vwDirection'), type: $('vwType'),
+      eventsPane: $('vwEventsPane'), events: $('vwEvents'), type: $('vwType'),
+      groups: $('vwGroups'), search: $('vwSearch'), presets: doc.querySelectorAll('.viewer-presets button'),
+      tabDelegations: $('vwTabDelegations'), delegationCount: $('vwDelegationCount'), delegationBadge: $('vwDelegationBadge'),
+      delegationsPane: $('vwDelegationsPane'), delegations: $('vwDelegations'),
       copy: $('vwCopy'), follow: $('vwFollow'), theme: $('vwTheme'), toast: $('vwToast')
     };
     if (!el.captions) return;
@@ -424,7 +427,7 @@
     var view = {
       gens: [], gen: 0, zoeId: '', store: null, es: null, retryTimer: 0, retryDelay: 1000,
       token: 0, active: false, startedAt: '', endedAt: '', conn: '', error: '', capped: false,
-      tab: 'captions', following: true, renderQueued: false, filters: { direction: '', type: '' },
+      tab: 'captions', following: true, renderQueued: false, filters: filterFromParams(params),
       typesKey: null, open: {}
     };
 
@@ -475,8 +478,18 @@
       renderHeader();
       renderNotice();
       renderCreation();
+      renderGroupChips();
+      renderDelegationBadge();
       renderCaptions();
+      renderDelegations();
       renderEvents();
+      syncUrl();
+    }
+
+    function syncUrl() {
+      if (!view.gen) return;
+      var url = viewerUrl(sessionId, view.gen, view.filters);
+      if (url !== root.location.pathname + root.location.search) root.history.replaceState(null, '', url);
     }
 
     function renderHeader() {
@@ -562,24 +575,33 @@
       return row;
     }
 
+    function delegationMarker(row) {
+      var text = 'Delegation ' + (row.kind === 'created' ? 'created' : 'write') + ' · ' + formatTime(row.at) +
+        (row.target ? ' · target ' + row.target : '') + (row.handoff ? ' · handoff ' + row.handoff : '');
+      return make('div', 'viewer-marker', text);
+    }
+
     function renderCaptions() {
       var top = el.captionsPane.scrollTop;
       el.captions.textContent = '';
       if (!view.store) return;
       el.captions.appendChild(boundaryRow('Generation ' + view.gen + (view.startedAt ? ' started ' + formatTime(view.startedAt) : ' started')));
       var items = view.store.captions();
-      if (!items.length) el.captions.appendChild(emptyRow('No captions in this generation yet.'));
+      var markers = view.store.delegations().filter(function (r) { return r.kind === 'created'; });
+      if (!items.length && !markers.length) el.captions.appendChild(emptyRow('No captions in this generation yet.'));
+      var pendingMarkers = markers.slice();
       items.forEach(function (item) {
+        pendingMarkers.forEach(function (m) {
+          if (m.seq <= item.seq) el.captions.appendChild(delegationMarker(m));
+        });
+        pendingMarkers = pendingMarkers.filter(function (m) { return m.seq > item.seq; });
         el.captions.appendChild(captionRow(item, view.store.at(item.seq)));
       });
+      pendingMarkers.forEach(function (m) { el.captions.appendChild(delegationMarker(m)); });
       if (!view.active && view.store.size()) {
         el.captions.appendChild(boundaryRow('Generation ' + view.gen + ' ended' + (view.endedAt ? ' ' + formatTime(view.endedAt) : '')));
       }
       applyScroll(el.captionsPane, top, view.tab === 'captions');
-    }
-
-    function passes(ev, filter) {
-      return (!filter.direction || ev.direction === filter.direction) && (!filter.type || ev.type === filter.type);
     }
 
     function syncTypeOptions() {
@@ -601,10 +623,40 @@
       view.filters.type = el.type.value;
     }
 
+    // Group chips with live counts. Counts respect the search text, not the group toggles,
+    // so a user can see what a toggle would add.
+    function renderGroupChips() {
+      var counts = view.store ? view.store.counts(view.filters.q) : {};
+      el.groups.textContent = '';
+      GROUPS.forEach(function (g) {
+        var on = view.filters.groups.indexOf(g.id) >= 0;
+        var btn = make('button', 'viewer-chip', g.label + ' ');
+        btn.type = 'button';
+        btn.setAttribute('aria-pressed', String(on));
+        btn.setAttribute('data-group', g.id);
+        btn.appendChild(make('span', 'viewer-count', String(counts[g.id] || 0)));
+        el.groups.appendChild(btn);
+      });
+      var preset = presetOf(view.filters.groups);
+      Array.prototype.forEach.call(el.presets, function (b) {
+        b.setAttribute('aria-pressed', String(b.getAttribute('data-preset') === preset));
+      });
+    }
+
+    function renderDelegationBadge() {
+      var rows = view.store ? view.store.delegations() : [];
+      var created = rows.filter(function (r) { return r.kind === 'created'; }).length;
+      el.delegationCount.textContent = String(created);
+      el.delegationBadge.textContent = created + (created === 1 ? ' delegation' : ' delegations');
+      el.delegationBadge.hidden = created === 0;
+      el.tabDelegations.setAttribute('data-count', String(rows.length));
+    }
+
     function eventRow(ev) {
       var row = make('div', 'viewer-event');
       var head = make('div', 'viewer-event-head');
       head.appendChild(make('span', 'viewer-badge dir-' + safeClass(ev.direction), DIRECTION_LABELS[ev.direction] || ev.direction || 'unknown'));
+      head.appendChild(make('span', 'viewer-badge group-' + safeClass(ev.group), groupLabel(ev.group)));
       head.appendChild(make('span', 'viewer-type mono', ev.type || '(no type)'));
       head.appendChild(make('span', 'viewer-meta', formatTime(ev.at)));
       head.appendChild(make('span', 'viewer-meta', '#' + ev.seq));
@@ -632,6 +684,30 @@
       return row;
     }
 
+    function renderDelegations() {
+      var top = el.delegationsPane.scrollTop;
+      el.delegations.textContent = '';
+      if (!view.store) return;
+      var rows = view.store.delegations();
+      if (!rows.length) el.delegations.appendChild(emptyRow('No delegations in this generation.'));
+      rows.forEach(function (r) {
+        var card = make('div', 'viewer-delegation');
+        var head = make('div', 'viewer-event-head');
+        head.appendChild(make('span', 'viewer-badge', r.kind === 'created' ? 'created' : 'gateway write'));
+        head.appendChild(make('span', 'viewer-meta', formatTime(r.at)));
+        head.appendChild(make('span', 'viewer-meta', '#' + r.seq));
+        if (r.target) head.appendChild(make('span', 'viewer-meta', 'target ' + r.target));
+        if (r.handoff) head.appendChild(make('span', 'viewer-meta', 'handoff ' + r.handoff));
+        if (r.delegationItemId) head.appendChild(make('span', 'viewer-meta', 'item ' + r.delegationItemId));
+        if (r.kind === 'write') head.appendChild(make('span', 'viewer-badge', 'delivery: ' + r.delivery));
+        if (r.truncated) head.appendChild(make('span', 'viewer-badge warn', 'truncated'));
+        card.appendChild(head);
+        if (r.text) card.appendChild(make('pre', '', r.text));
+        el.delegations.appendChild(card);
+      });
+      applyScroll(el.delegationsPane, top, view.tab === 'delegations');
+    }
+
     function renderEvents() {
       var top = el.eventsPane.scrollTop;
       el.events.textContent = '';
@@ -646,7 +722,7 @@
       all.forEach(function (ev) {
         if (prev >= 0 && ev.seq - prev > 1) rows.push({ gap: 'Missing seq ' + (prev + 1) + '–' + (ev.seq - 1) + ' (not loaded)' });
         prev = ev.seq;
-        if (passes(ev, view.filters)) rows.push({ ev: ev });
+        if (eventMatches(ev, view.filters)) rows.push({ ev: ev });
       });
       var visible = rows.slice(-MAX_EVENT_ROWS);
       if (visible.length < rows.length) {
@@ -760,7 +836,7 @@
       view.typesKey = null;
       view.filters.type = '';
       el.type.value = '';
-      root.history.replaceState(null, '', viewerUrl(sessionId, view.gen));
+      root.history.replaceState(null, '', viewerUrl(sessionId, view.gen, view.filters));
       setConn('Loading', 'idle');
       renderGenSelect();
       scheduleRender();
@@ -788,8 +864,10 @@
     function setTab(tab) {
       view.tab = tab;
       el.tabCaptions.setAttribute('aria-selected', String(tab === 'captions'));
+      el.tabDelegations.setAttribute('aria-selected', String(tab === 'delegations'));
       el.tabEvents.setAttribute('aria-selected', String(tab === 'events'));
       el.captionsPane.hidden = tab !== 'captions';
+      el.delegationsPane.hidden = tab !== 'delegations';
       el.eventsPane.hidden = tab !== 'events';
       view.following = true;
       el.follow.hidden = true;
@@ -797,7 +875,9 @@
     }
 
     function activePane() {
-      return view.tab === 'events' ? el.eventsPane : el.captionsPane;
+      if (view.tab === 'events') return el.eventsPane;
+      if (view.tab === 'delegations') return el.delegationsPane;
+      return el.captionsPane;
     }
 
     function onPaneScroll(pane) {
@@ -844,9 +924,33 @@
         openGeneration(gen, findGeneration(view.gens, gen));
       });
       el.tabCaptions.addEventListener('click', function () { setTab('captions'); });
+      el.tabDelegations.addEventListener('click', function () { setTab('delegations'); });
       el.tabEvents.addEventListener('click', function () { setTab('events'); });
-      el.direction.addEventListener('change', function () { view.filters.direction = el.direction.value; scheduleRender(); });
+      el.delegationBadge.addEventListener('click', function () { setTab('delegations'); });
       el.type.addEventListener('change', function () { view.filters.type = el.type.value; scheduleRender(); });
+      el.search.value = view.filters.q;
+      var searchTimer = 0;
+      el.search.addEventListener('input', function () {
+        view.filters.q = el.search.value.trim();
+        root.clearTimeout(searchTimer);
+        searchTimer = root.setTimeout(scheduleRender, 120);
+      });
+      el.groups.addEventListener('click', function (e) {
+        var btn = e.target && e.target.closest ? e.target.closest('button[data-group]') : null;
+        if (!btn) return;
+        var id = btn.getAttribute('data-group');
+        var on = view.filters.groups.indexOf(id) >= 0;
+        view.filters.groups = GROUP_IDS.filter(function (g) {
+          return g === id ? !on : view.filters.groups.indexOf(g) >= 0;
+        });
+        scheduleRender();
+      });
+      Array.prototype.forEach.call(el.presets, function (b) {
+        b.addEventListener('click', function () {
+          view.filters.groups = presetGroups(b.getAttribute('data-preset')) || GROUP_IDS.slice();
+          scheduleRender();
+        });
+      });
       el.copy.addEventListener('click', async function () {
         var list = view.store ? view.store.filtered(view.filters) : [];
         var text = JSON.stringify(list.map(function (ev) { return ev.raw; }), null, 2);
@@ -863,6 +967,7 @@
         scheduleRender();
       });
       el.captionsPane.addEventListener('scroll', function () { onPaneScroll(el.captionsPane); }, { passive: true });
+      el.delegationsPane.addEventListener('scroll', function () { onPaneScroll(el.delegationsPane); }, { passive: true });
       el.eventsPane.addEventListener('scroll', function () { onPaneScroll(el.eventsPane); }, { passive: true });
       el.theme.addEventListener('click', function () {
         setTheme(doc.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
