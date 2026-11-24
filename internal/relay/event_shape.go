@@ -1,7 +1,6 @@
 package relay
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -47,16 +46,14 @@ type eventShapeSampler struct {
 }
 type eventShapeCount struct{ direction, outer, inner string }
 
-var allowedShapeValueKeys = map[string]bool{
-	"type": true, "role": true, "direction": true, "content_type": true, "status": true,
-	"finish_type": true, "finish_details": true, "end_turn": true, "is_final": true,
-	"final": true, "done": true, "complete": true, "completed": true, "o": true, "p": true,
+var eventShapeType = regexp.MustCompile(`^[a-z0-9_.-]{1,64}$`)
+var knownShapeKeys = map[string]bool{
+	"type": true, "data": true, "payload": true, "delta": true, "v": true, "o": true, "p": true,
+	"message": true, "id": true, "turn_id": true, "role": true, "author": true, "content": true,
+	"parts": true, "text": true, "transcript": true, "status": true, "content_type": true,
+	"direction": true, "patches": true, "end_turn": true, "is_final": true, "final": true,
+	"done": true, "complete": true, "completed": true, "finish_type": true, "finish_details": true,
 }
-var safeShapeValue = regexp.MustCompile(`^[A-Za-z0-9_./:\-\[\]]{1,64}$`)
-var safeShapeKey = regexp.MustCompile(`^[A-Za-z0-9_\-]{1,32}$`)
-var uuidShapeValue = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
-var hexShapeValue = regexp.MustCompile(`(?i)^[0-9a-f]{24,}$`)
-var patchShapeValue = regexp.MustCompile(`^[a-z_]{1,40}$`)
 
 func newEventShapeSampler(logger *slog.Logger, mediaID, route string, maxFrames int) *eventShapeSampler {
 	if maxFrames <= 0 {
@@ -190,24 +187,19 @@ func shapeFrame(raw []byte) (outerType, innerType string, paths []string, finali
 func collectShapePaths(root map[string]any) ([]string, bool) {
 	paths := make([]string, 0, maxEventShapePaths)
 	finalish := false
-	var walk func(any, string, int, bool)
-	walk = func(value any, path string, depth int, patchValueAllowed bool) {
+	var walk func(any, string, int)
+	walk = func(value any, path string, depth int) {
 		if len(paths) >= maxEventShapePaths || depth > maxEventShapeDepth {
 			return
 		}
 		kind := shapeKind(value)
 		valueText := ""
 		if str, ok := value.(string); ok {
-			valueText = shapeDisclosure(path, str)
-			if patchValueAllowed && patchShapeValue.MatchString(str) {
-				valueText = "=" + str
-			}
-		} else if b, ok := value.(bool); ok && (isFinalShapeKey(keyFromPath(path)) || patchValueAllowed) {
-			valueText = fmt.Sprintf("=%t", b)
+			valueText = "(" + shapeLenBucket(str) + ")"
 		}
 		paths = append(paths, path+"="+kind+valueText)
 		key := keyFromPath(path)
-		if allowedShapeValueKeys[key] && isFinalShapeKey(key) {
+		if isFinalShapeKey(key) {
 			finalish = true
 		}
 		switch v := value.(type) {
@@ -220,12 +212,9 @@ func collectShapePaths(root map[string]any) ([]string, bool) {
 				keys = append(keys, k)
 			}
 			sort.Strings(keys)
-			patchPath := ""
-			if p, ok := v["p"].(string); ok && (p == "/message/status" || p == "/message/end_turn" || p == "/message/channel") {
-				patchPath = p
-			}
+
 			for _, k := range keys {
-				walk(v[k], path+"."+shapeKey(k), depth+1, k == "v" && patchPath != "")
+				walk(v[k], path+"."+shapeKey(k), depth+1)
 				if len(paths) >= maxEventShapePaths {
 					return
 				}
@@ -233,7 +222,7 @@ func collectShapePaths(root map[string]any) ([]string, bool) {
 		case []any:
 			if depth < maxEventShapeDepth {
 				for _, child := range v {
-					walk(child, path+".[]", depth+1, false)
+					walk(child, path+".[]", depth+1)
 					if len(paths) >= maxEventShapePaths {
 						return
 					}
@@ -247,7 +236,7 @@ func collectShapePaths(root map[string]any) ([]string, bool) {
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		walk(root[key], shapeKey(key), 1, false)
+		walk(root[key], shapeKey(key), 1)
 	}
 	return paths, finalish
 }
@@ -274,39 +263,21 @@ func shapeKind(v any) string {
 }
 func shapeString(v any) string {
 	if s, ok := v.(string); ok {
-		if !safeShapeValue.MatchString(s) || uuidShapeValue.MatchString(s) || hexShapeValue.MatchString(s) || len(s) > 24 && looksLikeEncoded(s) {
-			return ""
+		if eventShapeType.MatchString(s) {
+			return s
 		}
-		return s
+		return "<other>"
 	}
 	return ""
 }
 func shapeKey(key string) string {
-	if !safeShapeKey.MatchString(key) || uuidShapeValue.MatchString(key) || hexShapeValue.MatchString(key) || len(key) > 24 && looksLikeEncoded(key) {
-		return "<key>"
+	if knownShapeKeys[key] {
+		return key
 	}
-	return key
+	return "<key>"
 }
 func isFinalShapeKey(key string) bool {
 	return key == "end_turn" || key == "is_final" || key == "final" || key == "done" || key == "complete" || key == "completed" || key == "finish_type" || key == "finish_details"
-}
-func shapeDisclosure(path, value string) string {
-	key := path[strings.LastIndex(path, ".")+1:]
-	if !allowedShapeValueKeys[key] {
-		return "(" + shapeLenBucket(value) + ")"
-	}
-	if key == "p" && strings.IndexFunc(value, func(r rune) bool { return r >= '0' && r <= '9' }) >= 0 {
-		return "=" + strings.Map(func(r rune) rune {
-			if r >= '0' && r <= '9' {
-				return '#'
-			}
-			return r
-		}, value)
-	}
-	if !safeShapeValue.MatchString(value) || uuidShapeValue.MatchString(value) || hexShapeValue.MatchString(value) || len(value) > 24 && looksLikeEncoded(value) {
-		return "(redacted)"
-	}
-	return "=" + value
 }
 func shapeLenBucket(s string) string {
 	n := utf8.RuneCountInString(s)
@@ -322,11 +293,4 @@ func shapeLenBucket(s string) string {
 	default:
 		return "len=>1000"
 	}
-}
-func looksLikeEncoded(s string) bool {
-	if len(s) <= 24 {
-		return false
-	}
-	_, err := base64.RawStdEncoding.DecodeString(s)
-	return err == nil
 }
