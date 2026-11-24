@@ -83,20 +83,56 @@ func TestDecodeAudio(t *testing.T) {
 }
 
 func TestCaptureRetentionAndShutdown(t *testing.T) {
- dir:=t.TempDir(); c:=Defaults(); c.AudioCapture=true; c.AudioCaptureDir=dir; c.AudioCaptureMaxBytes=50; c.AudioCaptureSegment=time.Second
- s:=New(c); k:=Key{"keep",1}; s.Start(k,"")
- at:=time.Date(2026,1,1,0,0,0,0,time.UTC); s.capture.now=func() time.Time{return at}
- frame:=[]byte(`{"type":"session.input_audio.append","audio":"AQIDBA=="}`)
- s.CaptureAudio(k,frame); at=at.Add(2*time.Second); s.CaptureAudio(k,frame); s.Close()
- files,err:=filepath.Glob(filepath.Join(dir,"keep","gen1","*.wav")); if err!=nil || len(files)!=1 { t.Fatalf("retention file count %d",len(files)) }
- b,err:=os.ReadFile(files[0]); if err!=nil || binary.LittleEndian.Uint32(b[40:44])!=4 { t.Fatal("shutdown did not finalize") }
+	dir := t.TempDir()
+	c := Defaults()
+	c.AudioCapture = true
+	c.AudioCaptureDir = dir
+	c.AudioCaptureMaxBytes = 50
+	c.AudioCaptureSegment = time.Second
+	s := New(c)
+	k := Key{"keep", 1}
+	s.Start(k, "")
+	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s.capture.now = func() time.Time { return at }
+	frame := []byte(`{"type":"session.input_audio.append","audio":"AQIDBA=="}`)
+	s.CaptureAudio(k, frame)
+	at = at.Add(2 * time.Second)
+	s.CaptureAudio(k, frame)
+	s.Close()
+	files, err := filepath.Glob(filepath.Join(dir, "keep", "gen1", "*.wav"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("retention file count %d", len(files))
+	}
+	b, err := os.ReadFile(files[0])
+	if err != nil || binary.LittleEndian.Uint32(b[40:44]) != 4 {
+		t.Fatal("shutdown did not finalize")
+	}
 }
 func TestCaptureQueueFullDoesNotBlock(t *testing.T) {
- w:=&audioWriter{queue:make(chan audioMessage,1),now:time.Now}; w.queue<-audioMessage{}; s:=&Store{capture:w}; done:=make(chan struct{})
- go func(){s.CaptureAudio(Key{"s",1},[]byte("x")); close(done)}()
- select {case <-done: case <-time.After(time.Second): t.Fatal("capture blocked")}
+	w := &audioWriter{queue: make(chan audioMessage, 1), now: time.Now}
+	w.queue <- audioMessage{}
+	s := &Store{capture: w}
+	done := make(chan struct{})
+	go func() { s.CaptureAudio(Key{"s", 1}, []byte("x")); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("capture blocked")
+	}
 }
 func TestCaptureWriteFailureDoesNotEscape(t *testing.T) {
- dir:=filepath.Join(t.TempDir(),"file"); if err:=os.WriteFile(dir,[]byte("x"),0600); err!=nil { t.Fatal(err) }
- c:=Defaults(); c.AudioCapture=true; c.AudioCaptureDir=dir; c.AudioCaptureSegment=time.Second; s:=New(c); k:=Key{"s",1}; s.Start(k,""); s.CaptureAudio(k,[]byte(`{"type":"session.input_audio.append","audio":"AQIDBA=="}`)); s.End(k); s.Close()
+	dir := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(dir, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c := Defaults()
+	c.AudioCapture = true
+	c.AudioCaptureDir = dir
+	c.AudioCaptureSegment = time.Second
+	s := New(c)
+	k := Key{"s", 1}
+	s.Start(k, "")
+	s.CaptureAudio(k, []byte(`{"type":"session.input_audio.append","audio":"AQIDBA=="}`))
+	s.End(k)
+	s.Close()
 }
