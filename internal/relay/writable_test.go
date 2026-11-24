@@ -3,7 +3,11 @@ package relay
 import "testing"
 
 func TestWritableAllowsLargeMessageOnEmptyBuffer(t *testing.T) {
-	for _, tc := range []struct{ amount uint64; size int; wait bool }{
+	for _, tc := range []struct {
+		amount uint64
+		size   int
+		wait   bool
+	}{
 		{0, mediaDataBufferedMaxSize + 1, false},
 		{1, mediaDataBufferedMaxSize + 1, true},
 		{1, mediaDataBufferedMaxSize - 1, false},

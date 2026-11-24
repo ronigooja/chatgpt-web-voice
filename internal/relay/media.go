@@ -177,6 +177,13 @@ func (s *pionSession) capture(direction, source, delivery string, data []byte, b
 	defer s.captureMu.RUnlock()
 	if s.captureStore != nil {
 		s.captureStore.Append(s.captureKey, direction, source, delivery, data, binary)
+		if direction == "client_to_upstream" || direction == "upstream_to_client" {
+			s.captureStore.AppendFrame(s.captureKey, direction, source, delivery, data, binary)
+		}
+	}
+	if len(data) > mediaDataMessageMaxSize && (direction == "client_to_upstream" || direction == "upstream_to_client") {
+		outer, inner, _, _ := shapeFrame(data)
+		s.logger.Warn("relay_oversize_frame", "direction", direction, "source", source, "byte_length", len(data), "outer_type", outer, "inner_type", inner, "is_string", !binary)
 	}
 }
 

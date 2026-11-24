@@ -115,6 +115,8 @@ type Config struct {
 	RelayPublicIP    string
 
 	VoiceEventViewerEnabled          bool
+	VoiceFrameRingSize               int
+	VoiceAudioRingSize               int
 	VoiceViewerReadKey               string
 	VoiceEventShapeSampling          bool
 	VoiceEventShapeSamplingMaxFrames int
@@ -254,6 +256,8 @@ func Load() Config {
 		RelayPublicIP:    env("VOICE_RELAY_PUBLIC_IP", ""),
 
 		VoiceEventViewerEnabled:          envBool("VOICE_EVENT_VIEWER_ENABLED", true),
+		VoiceFrameRingSize:               envInt("VOICE_FRAME_RING_SIZE", 200),
+		VoiceAudioRingSize:               envInt("VOICE_AUDIO_RING_SIZE", 300),
 		VoiceViewerReadKey:               envRaw("VOICE_VIEWER_READ_KEY", ""),
 		VoiceEventShapeSampling:          envBool("VOICE_EVENT_SHAPE_SAMPLING", false),
 		VoiceEventShapeSamplingMaxFrames: envInt("VOICE_EVENT_SHAPE_SAMPLING_MAX_FRAMES", 400),

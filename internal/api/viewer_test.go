@@ -13,6 +13,33 @@ import (
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/voice/eventlog"
 )
 
+func TestViewerFrames(t *testing.T) {
+	store := eventlog.New(eventlog.Defaults())
+	key := eventlog.Key{SessionID: "s", Generation: 1}
+	store.Start(key, "")
+	store.AppendFrame(key, "client_to_upstream", "datachannel", "queued", []byte("hello"), false)
+	mux := http.NewServeMux()
+	New(Dependencies{Events: store}).RegisterViewer(mux)
+	for _, tc := range []struct {
+		path   string
+		status int
+	}{
+		{"/api/call-sessions/s/generations/1/frames", 200},
+		{"/api/call-sessions/s/generations/1/frames?ring=audio", 200},
+		{"/api/call-sessions/s/generations/1/frames?ring=wrong", 400},
+		{"/api/call-sessions/s/generations/2/frames", 404},
+	} {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest("GET", tc.path, nil))
+		if w.Code != tc.status || w.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("%s: %d %s", tc.path, w.Code, w.Header())
+		}
+		if tc.status == 200 && !strings.Contains(w.Body.String(), `"rings"`) {
+			t.Fatal(w.Body.String())
+		}
+	}
+}
+
 func TestViewerSnapshotAndStream(t *testing.T) {
 	store := eventlog.New(eventlog.Config{MaxEvents: 2100})
 	key := eventlog.Key{SessionID: "s", Generation: 1}

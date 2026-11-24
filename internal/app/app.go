@@ -133,7 +133,10 @@ func Run() error {
 	}
 	var events *eventlog.Store
 	if cfg.VoiceEventViewerEnabled {
-		events = eventlog.New(eventlog.Defaults())
+		eventConfig := eventlog.Defaults()
+		eventConfig.FrameRingSize = cfg.VoiceFrameRingSize
+		eventConfig.AudioRingSize = cfg.VoiceAudioRingSize
+		events = eventlog.New(eventConfig)
 	}
 	voiceService := voice.New(cfg, accountPool, logger).WithEventLog(events).WithCallSessions(callSessionStore).WithMediaEvidence(mediaEvidenceStore).WithCreationOutcomes(db).WithResultReceipts(db)
 	if cfg.RelayEnabled {
@@ -242,6 +245,7 @@ func newHandler(cfg config.Config, authManager *auth.Manager, apiKeyManager *aut
 	root.Handle("GET /api/call-sessions/{id}/generations", viewerHandler)
 	root.Handle("GET /api/call-sessions/{id}/generations/{gen}/events", viewerHandler)
 	root.Handle("GET /api/call-sessions/{id}/generations/{gen}/events/stream", viewerHandler)
+	root.Handle("GET /api/call-sessions/{id}/generations/{gen}/frames", viewerHandler)
 	apiServer.RegisterClientVoice(root)
 	root.Handle("/bridge/", authManager.RequireBasic(bridge))
 	// Shared CSS/assets must be public: login.html loads /static/app.css before auth.
