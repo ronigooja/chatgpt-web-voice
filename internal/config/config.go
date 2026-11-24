@@ -256,7 +256,7 @@ func Load() Config {
 		RelayPublicIP:    env("VOICE_RELAY_PUBLIC_IP", ""),
 
 		VoiceEventViewerEnabled:          envBool("VOICE_EVENT_VIEWER_ENABLED", true),
-		VoiceFrameRingSize:               envInt("VOICE_FRAME_RING_SIZE", 200),
+		VoiceFrameRingSize:               envInt("VOICE_FRAME_RING_SIZE", 1000),
 		VoiceAudioRingSize:               envInt("VOICE_AUDIO_RING_SIZE", 300),
 		VoiceViewerReadKey:               envRaw("VOICE_VIEWER_READ_KEY", ""),
 		VoiceEventShapeSampling:          envBool("VOICE_EVENT_SHAPE_SAMPLING", false),
