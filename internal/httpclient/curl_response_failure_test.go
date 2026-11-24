@@ -2,9 +2,11 @@ package httpclient
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -64,6 +66,20 @@ func TestCurlFailureRetainsExitAndResponseState(t *testing.T) {
 		var failure *CurlRequestError
 		if !errors.As(err, &failure) || failure.ExitCode != 97 || failure.ResponseBegan != partial {
 			t.Fatalf("partial=%v err=%+v", partial, err)
+		}
+	}
+}
+
+func TestMalformedResponseDoesNotExposeContent(t *testing.T) {
+	for _, line := range []string{"SECRET-CONTENT-MARKER-1234\n", "HTTP/1.1 SECRET-CONTENT-MARKER-1234\n", "HTTP/SECRET-CONTENT-MARKER-1234\n"} {
+		_, _, _, err := readCurlResponseHeader(bufio.NewReader(strings.NewReader(line)))
+		if err == nil || strings.Contains(err.Error(), "SECRET-CONTENT-MARKER-1234") {
+			t.Fatalf("unsafe error: %v", err)
+		}
+		var out bytes.Buffer
+		slog.New(slog.NewTextHandler(&out, nil)).Error("upstream_realtime_request_failed", "error", err)
+		if strings.Contains(out.String(), "SECRET-CONTENT-MARKER-1234") {
+			t.Fatal(out.String())
 		}
 	}
 }

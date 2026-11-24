@@ -197,7 +197,6 @@ the loaded image.
 | `VOICE_TLS_CERT_DIR` | `./data/certs` | 自签证书目录 |
 | `VOICE_SKIP_SSL_VERIFY` | `false` | 仅 development 可临时用于上游证书排障 |
 | `VOICE_LOG_LEVEL` | `debug` | DEBUG may include gated full content text; `info` retains metadata only |
-| `VOICE_ZOE_FINAL_TURN_DEBUG_TEXT` | `true` | Legacy content diagnostics only; gateway-owned calls do not log turn text or upstream response bodies |
 | `VOICE_ZOE_URL`, `VOICE_ZOE_TOKEN_FILE` | unset | HTTPS Zoe destination and runner bearer file; see [Zoe integration](docs/zoe-transcript-forwarding.md) |
 | `VOICE_ZOE_GATEWAY_API_KEY_ID` | `0` | Enable gateway-owned mode and select the downstream owner namespace by existing API key ID |
 | `VOICE_LOG_FORMAT` | `json` | 想看文本日志时改为 `text` |

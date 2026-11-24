@@ -120,7 +120,6 @@ type Config struct {
 	VoiceViewerReadKey               string
 	VoiceEventShapeSampling          bool
 	VoiceEventShapeSamplingMaxFrames int
-	ZoeFinalTurnDebugText            bool
 }
 
 func env(name, def string) string {
@@ -264,7 +263,6 @@ func Load() Config {
 		ZoeURL:                           env("VOICE_ZOE_URL", ""),
 		ZoeTokenFile:                     env("VOICE_ZOE_TOKEN_FILE", ""),
 		ZoeGatewayAPIKeyID:               envInt("VOICE_ZOE_GATEWAY_API_KEY_ID", 0),
-		ZoeFinalTurnDebugText:            envBool("VOICE_ZOE_FINAL_TURN_DEBUG_TEXT", true),
 	}
 }
 

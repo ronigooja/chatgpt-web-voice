@@ -2230,7 +2230,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 				ownedAmbiguous = false
 			}
 			closeMediaOnFailure("upstream_request_failed")
-			s.logger.Error("upstream_realtime_request_failed", "account_id", account.ID, "attempt", attempt, "error", err)
+			s.logger.Error("upstream_realtime_request_failed", "account_id", account.ID, "attempt", attempt, "error_type", fmt.Sprintf("%T", err))
 			return nil, &ServiceError{
 				Message:    "realtime/wm network failed",
 				StatusCode: 502,
@@ -2285,9 +2285,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 					continue
 				}
 				closeMediaOnFailure("upstream_rejected")
-				if s.cfg.ZoeFinalTurnDebugText && req.owned == nil {
-					s.logger.Debug("voice_create_rejected", "upstream_status", status, "upstream_body", strings.ToValidUTF8(text, "�"), "account_id", account.ID, "attempt", attempt)
-				}
+				s.logger.Debug("voice_create_rejected", "upstream_status", status, "upstream_body_bytes", len(text), "account_id", account.ID, "attempt", attempt)
 				lastStatus, lastDetail = status, truncate(text, 500)
 				continue
 			}
@@ -2309,9 +2307,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 			if kind == "html" {
 				msg = "upstream blocked by Cloudflare or challenge page"
 			}
-			if s.cfg.ZoeFinalTurnDebugText {
-				s.logger.Debug("voice_create_rejected", "upstream_status", status, "upstream_body", strings.ToValidUTF8(text, "�"), "account_id", account.ID, "attempt", attempt)
-			}
+			s.logger.Debug("voice_create_rejected", "upstream_status", status, "upstream_body_bytes", len(text), "account_id", account.ID, "attempt", attempt)
 			return nil, &ServiceError{Message: msg, StatusCode: http.StatusBadGateway, Detail: truncate(text, 500)}
 		}
 		outcomeFinal = "unknown"

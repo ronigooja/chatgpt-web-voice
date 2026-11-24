@@ -86,7 +86,6 @@ func newOwnedTestRig(t *testing.T, upstreamStatus int) *ownedTestRig {
 	svc.logger = slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	svc.avasSidebandURL = "ws" + strings.TrimPrefix(ws.URL, "http") + "/"
 	svc.cfg.ZoeGatewayAPIKeyID = 42
-	svc.cfg.ZoeFinalTurnDebugText = true
 	svc.zoeToken = "synthetic-runner"
 	rig := &ownedTestRig{svc: svc, logs: logs, relay: &fakeRelay{}, upstream: up,
 		payload: ClientDialRequest{RequestID: "apple-id", OfferSDP: readTestdata(t, "wm_offer.sdp"), Voice: "cove"},

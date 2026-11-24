@@ -74,7 +74,7 @@ func TestEventShapeSamplerSkipsAudioFramesBeforeCap(t *testing.T) {
 
 func TestEventShapeSamplerUsesBoundedPathsAndPatchNormalization(t *testing.T) {
 	paths, finalish := collectShapePaths(map[string]any{"o": "append", "p": "/message/content/parts/12/text", "final": true, "text": "secret"})
-	if !finalish || len(paths) == 0 || !strings.Contains(strings.Join(paths, " "), "p=string=/message/content/parts/##/text") {
+	if !finalish || len(paths) == 0 || !strings.Contains(strings.Join(paths, " "), "p=string(len=11-100)") {
 		t.Fatalf("unexpected paths: %#v", paths)
 	}
 }
@@ -112,10 +112,10 @@ func TestEventShapeSamplerDisabledByDefaultHasNoOutput(t *testing.T) {
 func TestEventShapeSamplerRedactsIDLikeTypes(t *testing.T) {
 	var logs bytes.Buffer
 	s := newEventShapeSampler(slog.New(slog.NewTextHandler(&logs, nil)), "media-types", "wm", 1)
-	s.observe([]byte(`{"type":"0123456789abcdef0123456789abcdef0123456789","data":{"type":"550e8400-e29b-41d4-a716-446655440000"}}`), "datachannel", "b-to-a")
+	s.observe([]byte(`{"type":"SECRET-CONTENT-MARKER-1234","data":{"type":"INVALID TYPE"}}`), "datachannel", "b-to-a")
 	s.close()
 	got := logs.String()
-	if strings.Contains(got, "0123456789abcdef0123456789abcdef0123456789") || strings.Contains(got, "550e8400-e29b-41d4-a716-446655440000") {
+	if strings.Contains(got, "SECRET-CONTENT-MARKER-1234") || strings.Contains(got, "INVALID TYPE") {
 		t.Fatalf("ID-like type disclosed: %s", got)
 	}
 }
@@ -123,10 +123,10 @@ func TestEventShapeSamplerRedactsIDLikeTypes(t *testing.T) {
 func TestEventShapeSamplerSanitizesDynamicKeys(t *testing.T) {
 	var logs bytes.Buffer
 	s := newEventShapeSampler(slog.New(slog.NewTextHandler(&logs, nil)), "media-keys", "wm", 1)
-	s.observe([]byte(`{"type":"data_message","data":{"550e8400-e29b-41d4-a716-446655440000":"uuid secret","hello world用户":"user secret","role":"user"}}`), "datachannel", "b-to-a")
+	s.observe([]byte(`{"type":"data_message","data":{"SECRET-CONTENT-MARKER-1234":"uuid secret","550e8400-e29b-41d4-a716-446655440000":"uuid secret","hello world用户":"user secret","role":"user"}}`), "datachannel", "b-to-a")
 	s.close()
 	got := logs.String()
-	if strings.Contains(got, "550e8400-e29b-41d4-a716-446655440000") || strings.Contains(got, "hello world用户") || !strings.Contains(got, "role=string=user") {
+	if strings.Contains(got, "550e8400-e29b-41d4-a716-446655440000") || strings.Contains(got, "hello world用户") || strings.Contains(got, "SECRET-CONTENT-MARKER-1234") || !strings.Contains(got, "role=string(len=1-10)") {
 		t.Fatalf("dynamic key disclosed or normal key missing: %s", got)
 	}
 }
@@ -137,7 +137,7 @@ func TestEventShapeSamplerLogsNormalDeltaAndFinalish(t *testing.T) {
 	s.observe([]byte(`{"type":"data_message","data":{"type":"chat_message_delta","end_turn":true,"is_final":true}}`), "datachannel", "b-to-a")
 	s.close()
 	got := logs.String()
-	if !strings.Contains(got, "outer_type=data_message") || !strings.Contains(got, "inner_type=chat_message_delta") || !strings.Contains(got, "type=string=chat_message_delta") || !strings.Contains(got, "finalish_key_observed=true") {
+	if !strings.Contains(got, "outer_type=data_message") || !strings.Contains(got, "inner_type=chat_message_delta") || !strings.Contains(got, "type=string(len=11-100)") || !strings.Contains(got, "finalish_key_observed=true") {
 		t.Fatalf("normal delta/finalish shape missing: %s", got)
 	}
 }
@@ -148,12 +148,12 @@ func TestEventShapeSamplerDisclosesDeepRolesDirectionsBooleansAndSafePatchValues
 	s.observe([]byte(`{"type":"data_message","data":{"message":{"author":{"role":"user","assistant":{"role":"assistant"}},"content":{"parts":[{"content_type":"audio_transcription","direction":"in"}]},"end_turn":true,"patches":[{"p":"/message/status","v":"finished_successfully"},{"p":"/message/end_turn","v":false},{"p":"/message/content/parts/0/text","v":"a distinctive secret sentence"},{"p":"/message/metadata/foo","v":"secretvalue"}]}}}`), "datachannel", "b-to-a")
 	s.close()
 	got := logs.String()
-	for _, want := range []string{"role=string=user", "role=string=assistant", "content_type=string=audio_transcription", "direction=string=in", "end_turn=bool=true", "v=string=finished_successfully", "v=bool=false"} {
+	for _, want := range []string{"role=string(len=1-10)", "end_turn=bool", "v=bool"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing %q in %s", want, got)
 		}
 	}
-	for _, forbidden := range []string{"a distinctive secret sentence", "secretvalue"} {
+	for _, forbidden := range []string{"a distinctive secret sentence", "secretvalue", "finished_successfully", "audio_transcription"} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("secret disclosed: %s", got)
 		}

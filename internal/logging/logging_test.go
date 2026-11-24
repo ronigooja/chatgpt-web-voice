@@ -51,3 +51,15 @@ func TestHTTPMiddlewareRecoversPanic(t *testing.T) {
 		t.Fatalf("panic was not logged: %s", output.String())
 	}
 }
+
+func TestPanicAndRequestMetadataDoNotLogContent(t *testing.T) {
+	var out bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&out, nil))
+	req := httptest.NewRequest("GET", "/safe?message=SECRET-CONTENT-MARKER-1234", nil)
+	req.Header.Set("User-Agent", strings.Repeat("a", 120)+"SECRET-CONTENT-MARKER-1234")
+	req.Header.Set("X-Request-ID", strings.Repeat("b", 120)+"SECRET-CONTENT-MARKER-1234")
+	HTTPMiddleware(logger, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic("SECRET-CONTENT-MARKER-1234") })).ServeHTTP(httptest.NewRecorder(), req)
+	if strings.Contains(out.String(), "SECRET-CONTENT-MARKER-1234") || !strings.Contains(out.String(), "panic_type") {
+		t.Fatal(out.String())
+	}
+}
