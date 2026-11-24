@@ -96,6 +96,24 @@ test('compact event row marks delegation rows and tolerates missing fields', () 
   assert.equal(row.delivery, 'unknown');
 });
 
+test('creation row shows the creation label and an Instructions tag, keeping the raw type', () => {
+  const row = V.compactEventRow(ev(1, { direction: 'gateway_creation', type: 'text', group: 'instructions' }));
+  assert.equal(row.type, 'creation');
+  assert.equal(row.rawType, 'text');
+  assert.equal(row.tag, 'Instructions');
+  assert.equal(row.dirLabel, 'creation');
+});
+
+test('non-creation rows keep their type and have no tag', () => {
+  const row = V.compactEventRow(ev(2, { direction: 'upstream_to_client', type: 'text', group: 'conversation' }));
+  assert.equal(row.type, 'text');
+  assert.equal(row.rawType, 'text');
+  assert.equal(row.tag, '');
+  const turn = V.compactEventRow(ev(3, { type: 'turn.done', group: 'conversation' }));
+  assert.equal(turn.type, 'turn.done');
+  assert.equal(turn.tag, '');
+});
+
 test('formatClock returns HH:MM:SS for valid times and empty text otherwise', () => {
   assert.match(V.formatClock('2026-11-18T10:00:00Z'), /^\d{2}:\d{2}:\d{2}$/);
   assert.equal(V.formatClock('not a time'), '');
