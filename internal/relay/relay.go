@@ -10,6 +10,12 @@ import (
 // partially allocated component closed successfully.
 var ErrCreateClean = errors.New("relay creation left no live components")
 
+// ErrApplyOffer marks failure applying the client's offer to an allocated peer.
+var ErrApplyOffer = errors.New("relay client offer rejected")
+
+// ErrCreateAfterStart marks other construction failures after peer allocation.
+var ErrCreateAfterStart = errors.New("relay construction failed after allocation")
+
 // Route carries per-session network routing.
 type Route struct {
 	// ProxyURL, when it names a socks5/socks5h/http/https proxy, makes the

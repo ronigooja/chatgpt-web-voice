@@ -271,6 +271,7 @@ type Service struct {
 	// avasURL overrides the AVAS endpoint in tests.
 	avasURL         string
 	avasSidebandURL string
+	avasDial        func(websocket.Dialer, string, fhttp.Header) (avasSidebandConnection, *fhttp.Response, error)
 	// settingsUserURL overrides the account probe endpoint in tests.
 	settingsUserURL string
 	// conversationURLPrefix overrides the conversation metadata endpoint in tests.
@@ -677,24 +678,48 @@ func (s *Service) finalizeMedia(media relay.Session, mediaID mediaevidence.Ident
 	}
 	row, err := s.evidence.Close(mediaID, comps, reason)
 	if err != nil {
-		s.logger.Error("media_evidence_close_failed", "voice_session_id", mediaID.VoiceSessionID, "media_generation", mediaID.MediaGeneration, "error", err)
+		s.logger.Error("media_evidence_close_failed", "voice_session_id", mediaID.VoiceSessionID, "media_generation", mediaID.MediaGeneration, "error_class", "evidence_failed")
 		return
 	}
 	s.logger.Info("media_termination_recorded", "voice_session_id", mediaID.VoiceSessionID, "media_generation", mediaID.MediaGeneration, "state", row.State, "reason", reason)
 }
 
+func (s *Service) hasCleanClosure(id mediaevidence.Identity) bool {
+	if s.evidence == nil || id.VoiceSessionID == "" {
+		return false
+	}
+	row, err := s.evidence.Get(id.VoiceSessionID, id.MediaGeneration)
+	if err != nil || row.State != mediaevidence.StateTerminated || !row.Components.Clean() || row.EvidenceID == "" {
+		return false
+	}
+	ev, err := s.evidence.Evidence(id)
+	return err == nil && ev.EvidenceID == row.EvidenceID
+}
+
+func (s *Service) hasCleanOwnedClosure(owner string, id mediaevidence.Identity) bool {
+	evidence, ok := s.evidence.(ownedEvidenceStore)
+	if !ok {
+		return false
+	}
+	lookup, err := evidence.LookupTermination(owner, id)
+	return err == nil && lookup.Outcome == "released" && lookup.Evidence != nil && lookup.Evidence.Terminated
+}
+
 // closeTracked marks a tracked media session closing (so a crash mid-close is
 // recoverable as unknown) and closes it. Evidence is written by the close handler.
-func (s *Service) closeTracked(media relay.Session, mediaID mediaevidence.Identity, reason string, diagnostics ...slog.Attr) {
+func (s *Service) closeTracked(media relay.Session, mediaID mediaevidence.Identity, reason string, diagnostics ...slog.Attr) (marked bool) {
 	if media == nil {
-		return
+		return false
 	}
+	marked = true
 	if s.evidence != nil && mediaID.VoiceSessionID != "" {
 		if err := s.evidence.MarkClosing(mediaID, reason); err != nil {
-			s.logger.Warn("media_mark_closing_failed", "voice_session_id", mediaID.VoiceSessionID, "error", err)
+			s.logger.Warn("media_mark_closing_failed", "voice_session_id", mediaID.VoiceSessionID, "error_class", "db_write_failed")
+			marked = false
 		}
 	}
 	s.closeMedia(media, reason, diagnostics)
+	return marked
 }
 
 func (s *Service) closeMedia(media relay.Session, reason string, diagnostics []slog.Attr) {
@@ -1492,6 +1517,10 @@ func (p *avasSessionPayload) addOpeningContext(c OpeningContext) {
 }
 
 func (s *Service) postAVASResponse(token, offerSDP string, payload avasSessionPayload, proxy, deviceID string) (status int, contentType, answer, location string, err error) {
+	return s.postAVASCreation(token, offerSDP, payload, proxy, deviceID, nil)
+}
+
+func (s *Service) postAVASCreation(token, offerSDP string, payload avasSessionPayload, proxy, deviceID string, diag *creationDiagnostics) (status int, contentType, answer, location string, err error) {
 	body, err := json.Marshal(map[string]any{"sdp": offerSDP, "session": payload})
 	if err != nil {
 		return 0, "", "", "", err
@@ -1502,9 +1531,16 @@ func (s *Service) postAVASResponse(token, offerSDP string, payload avasSessionPa
 		return 0, "", "", "", err
 	}
 	req.Header = s.authHeaders(token, deviceID, map[string]string{"content-type": "application/json", "openai-alpha": "quicksilver=v2", "originator": "codex_cli_rs"})
+	diag.postStarted()
 	resp, err := client.Do(req)
 	if err != nil {
+		if diag != nil && resp != nil {
+			diag.lastStatus = resp.StatusCode
+		}
 		return 0, "", "", "", noResponseTransportError(resp, err)
+	}
+	if diag != nil {
+		diag.lastStatus = resp.StatusCode
 	}
 	defer resp.Body.Close()
 	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
@@ -1530,13 +1566,13 @@ func avasCallID(location string) string {
 	return strings.TrimSpace(part)
 }
 
-func (s *Service) startAVASSideband(ctx context.Context, media relay.Session, callID, token, proxy string, observerReady <-chan struct{}) (*avasSidebandWriter, error) {
+func (s *Service) startAVASSideband(ctx context.Context, media relay.Session, callID, token, proxy string, observerReady <-chan struct{}) (*avasSidebandWriter, creationErrorClass, error) {
 	injector, ok := media.(relay.SidebandEventInjector)
 	if !ok {
-		return nil, errors.New("avas sideband requires gateway media relay")
+		return nil, classInternal, errors.New("avas sideband requires gateway media relay")
 	}
 	if callID == "" {
-		return nil, errors.New("avas response omitted call id")
+		return nil, classMalformedResponse, errors.New("avas response omitted call id")
 	}
 	h := fhttp.Header{}
 	h.Set("Authorization", "Bearer "+token)
@@ -1548,11 +1584,24 @@ func (s *Service) startAVASSideband(ctx context.Context, media relay.Session, ca
 		dialer.Proxy = func(*fhttp.Request) (*url.URL, error) { return url.Parse(proxy) }
 	}
 	endpoint := firstNonEmpty(s.avasSidebandURL, "wss://api.openai.com/v1/live/") + callID
-	conn, _, err := dialer.Dial(endpoint, h)
-	if err != nil {
-		return nil, fmt.Errorf("avas sideband handshake: %w", err)
+	var conn avasSidebandConnection
+	var response *fhttp.Response
+	var err error
+	if s.avasDial != nil {
+		conn, response, err = s.avasDial(dialer, endpoint, h)
+	} else {
+		conn, response, err = dialer.Dial(endpoint, h)
 	}
-	return runAVASSideband(ctx, conn, injector, observerReady, s.logger.With("media_session_id", media.ID())), nil
+	if err != nil {
+		class := creationIOClass(err, classInternal)
+		if response != nil && response.StatusCode != http.StatusSwitchingProtocols {
+			class = creationHTTPClass(response.StatusCode)
+		} else if errors.Is(err, websocket.ErrBadHandshake) {
+			class = classMalformedResponse
+		}
+		return nil, class, fmt.Errorf("avas sideband handshake: %w", err)
+	}
+	return runAVASSideband(ctx, conn, injector, observerReady, s.logger.With("media_session_id", media.ID())), "", nil
 }
 
 func runAVASSideband(ctx context.Context, conn avasSidebandConnection, injector relay.SidebandEventInjector, observerReady <-chan struct{}, logger *slog.Logger) *avasSidebandWriter {
@@ -1846,6 +1895,7 @@ type CreateSessionRequest struct {
 	RequestID               string
 	owned                   *ownedCall
 	creationAttempt         string
+	diagnostics             *creationDiagnostics
 }
 
 func openingContextText(c OpeningContext) string {
@@ -1871,6 +1921,8 @@ func (s *Service) pickAccountForSession(preferredToken string, preferredAccountI
 
 // CreateSession POSTs offer SDP to /realtime/wm and returns answer SDP.
 func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult, createErr error) {
+	diag := req.diagnostics
+	diag.fail(stageValidation, classValidation)
 	if req.owned == nil && s.cfg.ZoeGatewayAPIKeyID > 0 {
 		return nil, &ServiceError{Message: "media admission is gateway-owned", StatusCode: 503}
 	}
@@ -2017,14 +2069,20 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 		var err error
 		creationAttempt, err = s.creationOutcomes.BeginVoiceCreationOutcome(owner, req.RequestID)
 		if err != nil || creationAttempt == "" {
-			s.logger.Error("voice_creation_outcome_pending_failed", "error", err)
+			diag.fail(stageClaim, classDBWriteFailed)
+			s.logger.Error("voice_creation_outcome_pending_failed", "error_class", "db_write_failed")
 			return nil, &ServiceError{Message: "voice creation outcome unavailable", StatusCode: http.StatusServiceUnavailable}
 		}
 	}
 	markOutcome := func(outcome, sessionID string, generation int64) bool {
 		if s.creationOutcomes != nil && strings.TrimSpace(req.RequestID) != "" {
-			if err := s.creationOutcomes.UpdateVoiceCreationOutcome(owner, req.RequestID, outcome, sessionID, generation, creationAttempt); err != nil {
-				s.logger.Error("voice_creation_outcome_update_failed", "outcome", outcome, "error", err)
+			err := s.creationOutcomes.UpdateVoiceCreationOutcome(owner, req.RequestID, outcome, sessionID, generation, creationAttempt)
+			diag.outcomeWritten(outcome, err)
+			if err != nil {
+				diag.fail(stageOutcomeWrite, classDBWriteFailed)
+				if diag == nil {
+					s.logger.Error("voice_creation_outcome_update_failed", "outcome", outcome, "error_class", "db_write_failed")
+				}
 				return false
 			}
 		}
@@ -2042,7 +2100,22 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 	freshCreate := bound == nil && durable == nil && strings.TrimSpace(req.VoiceSessionID) == "" &&
 		requestUpstream.ConversationID == "" && requestUpstream.ParentMessageID == "" && requestUpstream.UpstreamVoiceSessionID == ""
 	resourcesStarted := false // Monotonic across account retries.
+	upstreamAttempted := false
 	failedRelaysClean := freshCreate
+	finalizeCleanRejection := func() bool {
+		if !freshCreate || (s.relay != nil && !failedRelaysClean) {
+			return false
+		}
+		// Do not send established:false unless this attempt's durable outcome agrees.
+		outcomeDone = markOutcome("never_established", "", 0)
+		if outcomeDone {
+			outcomeFinal = "never_established"
+		}
+		return outcomeDone
+	}
+	cleanRejections := func() bool {
+		return s.cfg.VoiceUpstreamRoute == "avas" && allAttemptsCleanRejection && lastStatus >= 400 && lastStatus <= 599
+	}
 	transportReleaseEligible := false
 	var failedMediaID mediaevidence.Identity
 	var occupied bool
@@ -2071,11 +2144,14 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 	for attempt := 1; attempt <= s.cfg.MaxAccountAttempts; attempt++ {
 		token, account, err := s.pickAccountForSession(preferredToken, preferredAccountID, excluded)
 		if err != nil {
-			allAttemptsCleanRejection = false
+			diag.fail(stageAccount, classDBWriteFailed)
 			outcomeFinal = "unknown"
-			if _, unavailable := err.(*accounts.Error); unavailable && freshCreate && !resourcesStarted {
-				outcomeFinal = "never_established"
-				s.logger.Info("voice_create_outcome", "outcome", outcomeFinal, "reason", "no_usable_account")
+			if _, unavailable := err.(*accounts.Error); unavailable {
+				diag.fail(stageAccount, classNoAccount)
+				if freshCreate && !resourcesStarted {
+					outcomeFinal = "never_established"
+					s.logger.Info("voice_create_outcome", "outcome", outcomeFinal, "reason", "no_usable_account")
+				}
 			}
 			if preferredToken != "" || preferredAccountID > 0 {
 				s.ReleaseSession(owner, req.VoiceSessionID)
@@ -2097,13 +2173,18 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 			}
 		}
 		if err != nil {
-			allAttemptsCleanRejection = false
 			if ae, ok := err.(*accounts.Error); ok {
 				if req.owned != nil && occupied && !resourcesStarted {
+					diag.fail(stageAccount, classQuarantined)
 					return nil, mediaevidence.ErrAccountOccupied
+				}
+				diag.fail(stageAccount, classNoAccount)
+				if req.owned != nil && cleanRejections() {
+					finalizeCleanRejection()
 				}
 				return nil, &ServiceError{Message: ae.Message, StatusCode: 503}
 			}
+			diag.fail(stageAccount, classDBWriteFailed)
 			return nil, &ServiceError{Message: err.Error(), StatusCode: 503}
 		}
 		excluded[token] = struct{}{}
@@ -2144,6 +2225,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 		if req.owned != nil {
 			generation, err := s.evidence.NextGeneration(targetSessionID)
 			if err != nil {
+				diag.fail(stageAccount, classEvidence)
 				return nil, unavailableCall
 			}
 			mediaID = mediaevidence.Identity{VoiceSessionID: targetSessionID, MediaGeneration: generation, AccountID: account.ID,
@@ -2154,6 +2236,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 					attempt--
 					continue
 				}
+				diag.fail(stageAccount, classEvidence)
 				return nil, unavailableCall
 			}
 		}
@@ -2161,20 +2244,47 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 			var relayErr error
 			resourcesStarted = true
 			media, wmOffer, relayErr = s.relay.NewSession(context.Background(), offerSDP, s.relayRoute(account))
+			if diag != nil {
+				// A partially constructed relay can fail before returning a handle.
+				diag.relayStarted = diag.relayStarted || media != nil || errors.Is(relayErr, relay.ErrApplyOffer) || errors.Is(relayErr, relay.ErrCreateAfterStart)
+			}
 			if relayErr != nil {
+				stage, class := stageRelayConstruct, classInternal
+				if errors.Is(relayErr, relay.ErrCapacity) {
+					class = classCapacity
+				} else if errors.Is(relayErr, relay.ErrApplyOffer) {
+					stage, class = stageRelayOffer, classValidation
+				} else if !errors.Is(relayErr, relay.ErrCreateAfterStart) {
+					class = creationIOClass(relayErr, classInternal)
+				}
+				diag.fail(stage, class)
 				if req.owned != nil {
 					comps := mediaevidence.Components{}
 					if errors.Is(relayErr, relay.ErrCapacity) || errors.Is(relayErr, relay.ErrCreateClean) {
 						// No live resources and no upstream POST; don't fabricate evidence.
 						if s.evidence.(ownedEvidenceStore).AbandonOwnedReservation(mediaID) == nil {
-							outcomeFinal = "never_established"
+							if !upstreamAttempted {
+								outcomeFinal = "never_established"
+							}
+							if errors.Is(relayErr, relay.ErrApplyOffer) && diag != nil {
+								// An internally closed partial relay has no durable close evidence.
+								diag.closed(false)
+							}
 							return nil, unavailableCall
 						}
+						diag.fail(stageAccount, classEvidence)
 					}
-					_, _ = s.evidence.Close(mediaID, comps, "relay_session_create_failed")
+					if _, err := s.evidence.Close(mediaID, comps, "relay_session_create_failed"); err != nil {
+						diag.fail(stageAccount, classEvidence)
+					}
+					if diag != nil && diag.relayStarted {
+						diag.closed(false)
+					}
 				}
 				failedRelaysClean = false
-				s.logger.Error("relay_session_create_failed", "account_id", account.ID, "attempt", attempt, "error", relayErr)
+				if diag == nil {
+					s.logger.Error("relay_session_create_failed", "account_id", account.ID, "attempt", attempt, "error_class", class)
+				}
 				if errors.Is(relayErr, relay.ErrCapacity) {
 					return nil, &ServiceError{Message: "media relay capacity exhausted", StatusCode: 503}
 				}
@@ -2211,21 +2321,26 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 				}
 				mediaID = id
 				media.SetCloseHandler(finalize)
-				s.closeTracked(media, id, reason)
+				marked := s.closeTracked(media, id, reason, diag.closeAttrs()...)
+				if !marked && req.owned != nil {
+					failedRelaysClean = false
+				}
 				finalize(reason)
 				// Remove the exact binding only after closing while its handler can
 				// still find call state; sideband cleanup is owned above, not by lookup.
 				s.onMediaClosed(owner, targetSessionID, media, mediaevidence.Identity{}, reason)
-				if id.VoiceSessionID == "" {
-					failedRelaysClean = false
-				} else if row, err := s.evidence.Get(id.VoiceSessionID, id.MediaGeneration); err != nil ||
-					row.State != mediaevidence.StateTerminated || !row.Components.Clean() || row.EvidenceID == "" {
-					failedRelaysClean = false
-				} else if ev, err := s.evidence.Evidence(id); err != nil || ev.EvidenceID != row.EvidenceID {
+				var clean bool
+				if req.owned != nil {
+					clean = s.hasCleanOwnedClosure(owner, id)
+				} else {
+					clean = s.hasCleanClosure(id)
+				}
+				if !clean {
 					failedRelaysClean = false
 				} else {
 					failedMediaID = id
 				}
+				diag.closed(failedRelaysClean)
 				media = nil
 			})
 		}
@@ -2243,6 +2358,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 			avasPayload.Instructions = req.Instructions
 			if len(req.OpeningContext.Items) > 0 {
 				if _, err := validateOpeningContext(req.OpeningContext); err != nil {
+					diag.fail(stageValidation, classValidation)
 					return nil, err
 				}
 				avasPayload.addOpeningContext(req.OpeningContext)
@@ -2251,25 +2367,39 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 				creationPayload = avasCreationEvent(avasPayload)
 			}
 			resourcesStarted = true
+			upstreamAttempted = true
 			ownedAmbiguous = true
-			status, contentType, text, upstreamLocation, err = s.postAVASResponse(token, wmOffer, avasPayload, explicitProxy, account.DeviceID)
+			status, contentType, text, upstreamLocation, err = s.postAVASCreation(token, wmOffer, avasPayload, explicitProxy, account.DeviceID, diag)
 			if err == nil && status >= 400 && status <= 599 {
 				ownedAmbiguous = false
 			}
 		} else {
 			resourcesStarted = true
+			upstreamAttempted = true
 			status, contentType, text, retryAfter, err = s.postWMResponse(token, wmOffer, sessionJSON, explicitProxy, account.DeviceID)
 		}
-		health := s.reportOutcome(token, wmStarted, status, contentType, text, retryAfter, err)
+		health, healthOK := s.recordUpstreamOutcome(token, wmStarted, status, contentType, text, retryAfter, err)
+		if req.owned != nil && !healthOK {
+			allAttemptsCleanRejection = false
+		}
 		if err != nil {
 			allAttemptsCleanRejection = false
+			var curlErr *httpclient.CurlRequestError
+			if status != 0 || errors.As(err, &curlErr) && curlErr.ResponseBegan {
+				diag.fail(stageUpstreamResponse, creationIOClass(err, classMalformedResponse))
+			} else {
+				diag.fail(stageUpstreamPost, creationIOClass(err, classInternal))
+			}
 			var transportErr creationTransportError
-			transportReleaseEligible = attempt == 1 && status == 0 && errors.As(err, &transportErr)
+			// Local closure after an ambiguous POST cannot resolve an owned claim.
+			transportReleaseEligible = req.owned == nil && attempt == 1 && status == 0 && errors.As(err, &transportErr)
 			if transportReleaseEligible {
 				ownedAmbiguous = false
 			}
 			closeMediaOnFailure("upstream_request_failed")
-			s.logger.Error("upstream_realtime_request_failed", "account_id", account.ID, "attempt", attempt, "error_type", fmt.Sprintf("%T", err))
+			if diag == nil {
+				s.logger.Error("upstream_realtime_request_failed", "account_id", account.ID, "attempt", attempt, "error_class", creationIOClass(err, classInternal))
+			}
 			return nil, &ServiceError{
 				Message:    "realtime/wm network failed",
 				StatusCode: 502,
@@ -2279,6 +2409,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 
 		if status == 401 && classifyProbeBody(contentType, text) != "html" {
 			allAttemptsCleanRejection = false
+			diag.fail(stageUpstreamResponse, classHTTP4xx)
 			closeMediaOnFailure("upstream_unauthorized")
 			lastStatus = status
 			lastError = "account token invalid"
@@ -2306,6 +2437,11 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 
 		if s.cfg.VoiceUpstreamRoute == "avas" {
 			if status != http.StatusCreated || !strings.HasPrefix(strings.TrimLeft(text, " \t\r\n"), "v=0") {
+				class := creationHTTPClass(status)
+				if status == http.StatusCreated {
+					class = classMalformedResponse
+				}
+				diag.fail(stageUpstreamResponse, class)
 				// Only an upstream error status proves rejection. A successful
 				// or otherwise unexpected response may already have created a call.
 				if status < http.StatusBadRequest || status > 599 {
@@ -2320,8 +2456,8 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 					upstreamForWM.ConversationState = "new"
 					upstreamForWM.ConversationReason = "upstream_refused"
 					sessionJSON = buildSessionJSON(voice, options.VoiceMode, options.LanguageCode, upstreamForWM)
-					closeMediaOnFailure("upstream_refused")
-					continue
+				closeMediaOnFailure("upstream_refused")
+				continue
 				}
 				closeMediaOnFailure("upstream_rejected")
 				s.logger.Debug("voice_create_rejected", "upstream_status", status, "upstream_body_bytes", len(text), "account_id", account.ID, "attempt", attempt)
@@ -2354,16 +2490,18 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 			observerReady = make(chan struct{})
 			callID := avasCallID(upstreamLocation)
 			var err error
+			var class creationErrorClass
 			func() {
 				var sidebandCtx context.Context
 				sidebandCtx, avasCancel = context.WithCancel(context.Background())
-				avasSideband, err = s.startAVASSideband(sidebandCtx, media, callID, token, explicitProxy, observerReady)
+				avasSideband, class, err = s.startAVASSideband(sidebandCtx, media, callID, token, explicitProxy, observerReady)
 				if err != nil {
 					avasCancel()
 					avasCancel = nil
 				}
 			}()
 			if err != nil {
+				diag.fail(stageUpstreamSideband, class)
 				closeMediaOnFailure("sideband_failed")
 				return nil, &ServiceError{Message: "codex realtime sideband failed", StatusCode: 502, Detail: truncate(err.Error(), 300)}
 			}
@@ -2375,8 +2513,11 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 			clientAnswer, acceptErr := media.AcceptUpstreamAnswer(acceptCtx, text)
 			cancelAccept()
 			if acceptErr != nil {
+				diag.fail(stageAnswerNegotiation, creationIOClass(acceptErr, classInternal))
 				closeMediaOnFailure("accept_answer_failed")
-				s.logger.Error("relay_accept_answer_failed", "account_id", account.ID, "attempt", attempt, "error", acceptErr)
+				if diag == nil {
+					s.logger.Error("relay_accept_answer_failed", "account_id", account.ID, "attempt", attempt, "error_class", creationIOClass(acceptErr, classInternal))
+				}
 				return nil, &ServiceError{Message: "media relay negotiation failed", StatusCode: 502, Detail: truncate(acceptErr.Error(), 300)}
 			}
 			answerSDP = clientAnswer
@@ -2384,6 +2525,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 
 		if req.owned != nil {
 			if err := s.evidence.(ownedEvidenceStore).AttachOwnedRelay(mediaID, media.ID()); err != nil {
+				diag.fail(stageRelayAttach, classEvidence)
 				closeMediaOnFailure("evidence_register_failed")
 				return nil, unavailableCall
 			}
@@ -2479,7 +2621,9 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 			s.attachAVASSideband(voiceSessionID, media, avasSideband, avasCancel)
 		}
 		if !markOutcome("established", voiceSessionID, mediaID.MediaGeneration) && req.owned != nil {
-			s.closeTracked(media, mediaID, "failure")
+			if !s.closeTracked(media, mediaID, "failure", diag.closeAttrs()...) {
+				failedRelaysClean = false
+			}
 			call.forward.abort()
 			s.mu.Lock()
 			delete(s.ownedCalls, voiceSessionID)
@@ -2531,6 +2675,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 		if len(req.OpeningContext.Items) > 0 {
 			openingResult = &OpeningContextResult{Applied: false, Version: req.OpeningContext.Version, ItemCount: len(req.OpeningContext.Items)}
 			if chars, validationErr := validateOpeningContext(req.OpeningContext); validationErr != nil {
+				diag.fail(stageValidation, classValidation)
 				return nil, validationErr
 			} else if s.cfg.VoiceUpstreamRoute == "avas" {
 				openingResult = s.finalizeCreatedOpening(owner, voiceSessionID, createdBinding, req.OpeningContext, chars)
@@ -2572,20 +2717,12 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 		}, nil
 	}
 	if req.owned != nil && occupied && !resourcesStarted {
+		diag.fail(stageAccount, classQuarantined)
 		return nil, mediaevidence.ErrAccountOccupied
 	}
 
-	if s.cfg.VoiceUpstreamRoute == "avas" && allAttemptsCleanRejection && lastStatus != 0 {
-		creationRejected := false
-		if freshCreate && (s.relay == nil || failedRelaysClean) {
-			// Do not send established:false unless this attempt's durable
-			// outcome agrees. A stale attempt or failed write stays non-committal.
-			creationRejected = markOutcome("never_established", "", 0)
-			outcomeDone = creationRejected
-			if creationRejected {
-				outcomeFinal = "never_established"
-			}
-		}
+	if cleanRejections() {
+		creationRejected := finalizeCleanRejection()
 		msg := fmt.Sprintf("realtime/wm failed status=%d", lastStatus)
 		if classifyProbeBody("", fmt.Sprint(lastDetail)) == "html" {
 			msg = "upstream blocked by Cloudflare or challenge page"
@@ -2595,6 +2732,8 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 	code := 503
 	if lastStatus == 401 {
 		code = 401
+	} else if lastStatus == 0 {
+		diag.fail(stageAccount, classNoAccount)
 	}
 	return nil, &ServiceError{
 		Message:    orDefault(lastError, "no available web access_token"),

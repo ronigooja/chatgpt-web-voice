@@ -17,6 +17,7 @@ import (
 
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/mediaevidence"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/relay"
+	"github.com/dyhhhhhh/chatgpt-web-voice/internal/store"
 )
 
 type ownedEvidenceStore interface {
@@ -115,19 +116,24 @@ const zoeRequestTimeout = 2 * time.Second
 
 // No error or response body from this credentialed client is logged or echoed.
 func (s *Service) zoeJSON(ctx context.Context, method, path, bearer, instanceKey string, body, out any) int {
+	status, _ := s.zoeJSONClass(ctx, method, path, bearer, instanceKey, body, out)
+	return status
+}
+
+func (s *Service) zoeJSONClass(ctx context.Context, method, path, bearer, instanceKey string, body, out any) (int, creationErrorClass) {
 	ctx, cancel := context.WithTimeout(ctx, zoeRequestTimeout)
 	defer cancel()
 	var input io.Reader
 	if body != nil {
 		encoded, err := json.Marshal(body)
 		if err != nil {
-			return -1
+			return -1, classInternal
 		}
 		input = bytes.NewReader(encoded)
 	}
 	r, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(s.cfg.ZoeURL, "/")+path, input)
 	if err != nil {
-		return -1
+		return -1, classInternal
 	}
 	r.Header.Set("Authorization", "Bearer "+bearer)
 	if body != nil {
@@ -138,7 +144,7 @@ func (s *Service) zoeJSON(ctx context.Context, method, path, bearer, instanceKey
 	}
 	res, err := s.zoeHTTP.Do(r)
 	if err != nil {
-		return 0
+		return 0, creationIOClass(err, classInternal)
 	}
 	defer res.Body.Close()
 	// Lifecycle retries use HTTP status for retryable responses, never their
@@ -146,14 +152,15 @@ func (s *Service) zoeJSON(ctx context.Context, method, path, bearer, instanceKey
 	_, isStart := out.(*callStart)
 	if out != nil && (res.StatusCode < 300 || isStart && (res.StatusCode == 400 || res.StatusCode == 401 || res.StatusCode == 409 || res.StatusCode == 503)) {
 		d := json.NewDecoder(io.LimitReader(res.Body, (2<<20)+1))
-		if err := d.Decode(out); res.StatusCode < 300 && (err != nil || d.Decode(new(any)) != io.EOF) {
+		err := d.Decode(out)
+		if res.StatusCode < 300 && (err != nil || d.Decode(new(any)) != io.EOF) {
 			if ctx.Err() != nil || errors.Is(err, io.ErrUnexpectedEOF) {
-				return 0
+				return 0, creationIOClass(errors.Join(ctx.Err(), err), classMalformedResponse)
 			}
-			return -1
+			return -1, classMalformedResponse
 		}
 	}
-	return res.StatusCode
+	return res.StatusCode, creationHTTPClass(res.StatusCode)
 }
 
 func shortRetry(ctx context.Context, deadline time.Time, fn func(context.Context) int) int {
@@ -185,7 +192,7 @@ func ValidInstanceBearer(token string) bool {
 	}) == -1
 }
 
-func (s *Service) DialClient(ctx context.Context, key string, p ClientDialRequest) (*ClientDialResult, error) {
+func (s *Service) DialClient(ctx context.Context, key string, p ClientDialRequest) (_ *ClientDialResult, dialErr error) {
 	if !ValidInstanceBearer(key) {
 		return nil, &CallError{401, "unauthenticated"}
 	}
@@ -195,6 +202,14 @@ func (s *Service) DialClient(ctx context.Context, key string, p ClientDialReques
 	if _, err := normalizeSessionOptions(p.Voice, p.VoiceMode, p.LanguageCode); err != nil {
 		return nil, &CallError{400, "invalid_request"}
 	}
+	diag := &creationDiagnostics{stage: stageAdmission, class: classInternal}
+	var owner, requestID string
+	defer func() {
+		var call *CallError
+		if errors.As(dialErr, &call) && call.Status == http.StatusServiceUnavailable {
+			diag.log(s.logger, s.creationOutcomes, owner, requestID)
+		}
+	}()
 	claims, canClaim := s.creationOutcomes.(interface {
 		ClaimOwnedVoiceCreation(string, string) (string, error)
 	})
@@ -212,24 +227,34 @@ func (s *Service) DialClient(ctx context.Context, key string, p ClientDialReques
 	s.mu.Unlock()
 	defer s.ownedDials.Done()
 	var start callStart
-	status := s.zoeJSON(ctx, http.MethodPost, "/runner/v1/voice/calls", s.zoeToken, key, p, &start)
+	status, class := s.zoeJSONClass(ctx, http.MethodPost, "/runner/v1/voice/calls", s.zoeToken, key, p, &start)
 	code := start.Error.Code
 	if status != 200 && status != 201 {
 		switch {
 		case status == 401 && code == "unauthenticated" && start.Error.Details.Credential == "instance_key":
 			return nil, &CallError{401, "unauthenticated"}
-		case status == 400 && code == "invalid_request", status == 409 && (code == "idempotency_conflict" || code == "voice_lease_busy"), status == 503 && code == "voice_pool_quarantined":
+		case status == 400 && code == "invalid_request", status == 409 && (code == "idempotency_conflict" || code == "voice_lease_busy"):
+			return nil, &CallError{status, code}
+		case status == 503 && code == "voice_pool_quarantined":
+			diag.fail(stageZoeStart, classQuarantined)
 			return nil, &CallError{status, code}
 		default:
+			diag.fail(stageZoeStart, class)
 			return nil, unavailableCall
 		}
 	}
 	if strings.TrimSpace(start.VoiceSessionID) == "" || strings.TrimSpace(start.RequestID) == "" || start.Generation < 1 {
+		diag.fail(stageZoeStart, classMalformedResponse)
 		return nil, unavailableCall
 	}
-	owner := s.zoeCallOwner()
+	owner, requestID = s.zoeCallOwner(), start.RequestID
 	attempt, err := claims.ClaimOwnedVoiceCreation(owner, start.RequestID)
 	if err != nil || attempt == "" {
+		class := classDBWriteFailed
+		if errors.Is(err, store.ErrVoiceCreationAttemptStale) {
+			class = classReplay
+		}
+		diag.fail(stageClaim, class)
 		if status == 200 {
 			if replay := s.liveDialReplay(start); replay != nil {
 				return replay, nil
@@ -237,6 +262,8 @@ func (s *Service) DialClient(ctx context.Context, key string, p ClientDialReques
 		}
 		return nil, unavailableCall
 	}
+	diag.claimStarted = time.Now()
+	diag.outcomeWritten("pending", nil)
 	call := &ownedCall{owner: owner, zoeID: start.VoiceSessionID, generation: start.Generation, requestID: start.RequestID,
 		closed: make(chan struct{}), reported: make(chan struct{})}
 	// Before the create path takes ownership of this attempt, a malformed Zoe
@@ -246,16 +273,19 @@ func (s *Service) DialClient(ctx context.Context, key string, p ClientDialReques
 	_, openingErr := validateOpeningContext(start.Opening)
 	_, sdpErr := normalizeSDP(p.OfferSDP)
 	if !validManifest || (len(start.Opening.Items) > 0 && openingErr != nil) || sdpErr != nil {
-		if err := s.creationOutcomes.UpdateVoiceCreationOutcome(owner, start.RequestID, "never_established", "", 0, attempt); err != nil {
-			s.logger.Error("owned_creation_outcome_update_failed")
+		diag.fail(stageValidation, classValidation)
+		err := s.creationOutcomes.UpdateVoiceCreationOutcome(owner, start.RequestID, "never_established", "", 0, attempt)
+		diag.outcomeWritten("never_established", err)
+		if err != nil {
+			diag.fail(stageOutcomeWrite, classDBWriteFailed)
 		}
 		return nil, unavailableCall
 	}
 	res, err := s.CreateSession(CreateSessionRequest{Owner: owner, OfferSDP: p.OfferSDP, Voice: p.Voice, VoiceMode: p.VoiceMode,
-		LanguageCode: p.LanguageCode, RequestID: start.RequestID, Instructions: *start.Instructions, OpeningContext: start.Opening, owned: call, creationAttempt: attempt})
+		LanguageCode: p.LanguageCode, RequestID: start.RequestID, Instructions: *start.Instructions, OpeningContext: start.Opening,
+		owned: call, creationAttempt: attempt, diagnostics: diag})
 	if err != nil {
 		// media.md specifies read-only request-outcome reconciliation pre-bind.
-		s.logger.Error("owned_call_creation_failed")
 		if errors.Is(err, mediaevidence.ErrAccountOccupied) {
 			return nil, &CallError{503, "voice_pool_quarantined"}
 		}
@@ -263,7 +293,7 @@ func (s *Service) DialClient(ctx context.Context, key string, p ClientDialReques
 	}
 	// Complete the short binding exchange even if the dialing connection goes
 	// away; a correctly authenticated retry can retrieve the still-live answer.
-	return s.establishOwnedCall(context.WithoutCancel(ctx), call, res)
+	return s.establishOwnedCall(context.WithoutCancel(ctx), call, res, diag)
 }
 
 func (s *Service) liveDialReplay(start callStart) *ClientDialResult {
@@ -287,7 +317,7 @@ func (s *Service) liveDialReplay(start callStart) *ClientDialResult {
 	return nil
 }
 
-func (s *Service) establishOwnedCall(ctx context.Context, c *ownedCall, res *SessionResult) (*ClientDialResult, error) {
+func (s *Service) establishOwnedCall(ctx context.Context, c *ownedCall, res *SessionResult, diag *creationDiagnostics) (*ClientDialResult, error) {
 	var body struct {
 		lifecycleIdentity
 		Opening *openingReceipt `json:"opening_context,omitempty"`
@@ -296,19 +326,23 @@ func (s *Service) establishOwnedCall(ctx context.Context, c *ownedCall, res *Ses
 	if r := res.OpeningContext; r != nil {
 		body.Opening = &openingReceipt{r.Applied, r.Silent, r.Version, r.ContentHash}
 	}
+	class := classTimeout
 	status := shortRetry(ctx, time.Now().Add(shortRetryWindow), func(ctx context.Context) int {
 		var ack struct {
 			OK bool `json:"ok"`
 		}
-		status := s.zoeJSON(ctx, http.MethodPost, c.path("established"), s.zoeToken, "", body, &ack)
+		status, currentClass := s.zoeJSONClass(ctx, http.MethodPost, c.path("established"), s.zoeToken, "", body, &ack)
+		class = currentClass
 		if status == 200 && !ack.OK {
+			class = classMalformedResponse
 			return -1
 		}
 		return status
 	})
 	if status != 200 {
-		s.logger.Error("owned_call_establishment_failed", "status", status, "gateway_session_id", res.VoiceSessionID)
-		s.closeTracked(c.media, c.id, "failure")
+		diag.fail(stageBindingAck, class)
+		marked := s.closeTracked(c.media, c.id, "failure", diag.closeAttrs()...)
+		diag.closed(s.hasCleanOwnedClosure(c.owner, c.id) && marked)
 		c.state.forward.abort()
 		s.mu.Lock()
 		delete(s.ownedCalls, c.id.VoiceSessionID)
@@ -322,10 +356,14 @@ func (s *Service) establishOwnedCall(ctx context.Context, c *ownedCall, res *Ses
 	if c.finished {
 		s.startEndReport(c)
 		c.mu.Unlock()
+		diag.fail(stageBindingAck, classInternal)
+		diag.closed(s.hasCleanOwnedClosure(c.owner, c.id))
 		return nil, unavailableCall
 	}
 	if _, closed := c.media.Termination(); closed {
 		c.mu.Unlock()
+		diag.fail(stageBindingAck, classInternal)
+		diag.closed(s.hasCleanOwnedClosure(c.owner, c.id))
 		return nil, unavailableCall
 	}
 	answer := ClientDialResult{res.AnswerSDP, res.VoiceSessionID, c.zoeID, c.generation}

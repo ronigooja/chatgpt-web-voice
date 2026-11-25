@@ -42,18 +42,23 @@ func classifyUpstream(status int, contentType, body, retryAfter string, err erro
 // started is when the request began, so late results cannot overwrite newer
 // state. It returns the resulting health state (zero when nothing applied).
 func (s *Service) reportOutcome(token string, started time.Time, status int, contentType, body, retryAfter string, err error) accounts.HealthState {
+	state, _ := s.recordUpstreamOutcome(token, started, status, contentType, body, retryAfter, err)
+	return state
+}
+
+func (s *Service) recordUpstreamOutcome(token string, started time.Time, status int, contentType, body, retryAfter string, err error) (accounts.HealthState, bool) {
 	recorder, ok := s.pool.(outcomeRecorder)
 	if !ok {
-		return accounts.HealthState{}
+		return accounts.HealthState{}, true
 	}
 	outcome, relevant := classifyUpstream(status, contentType, body, retryAfter, err, time.Now())
 	if !relevant {
-		return accounts.HealthState{}
+		return accounts.HealthState{}, true
 	}
 	outcome.ObservedAt = started
 	state, recErr := recorder.RecordOutcome(token, outcome)
 	if recErr != nil {
-		s.logger.Error("account_outcome_record_failed", "error", recErr)
+		s.logger.Error("account_outcome_record_failed", "error_class", "db_write_failed")
 	}
-	return state
+	return state, recErr == nil
 }
