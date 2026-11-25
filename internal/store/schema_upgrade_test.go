@@ -90,6 +90,7 @@ func TestUpgradeFrom411251cPreservesRowsAndSupportsReceipts(t *testing.T) {
 			}
 			if table == "voice_creation_outcomes" {
 				wantColumns = append(wantColumns, []any{int64(8), "gateway_owned", "INTEGER", int64(1), "0", int64(0)})
+				wantColumns = append(wantColumns, []any{int64(9), "fenced", "INTEGER", int64(1), "0", int64(0)})
 			}
 			if table == "voice_media_sessions" {
 				wantColumns = append(wantColumns,

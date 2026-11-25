@@ -10,6 +10,7 @@ type ownedRequest struct{ owner, id string }
 // process lifetime; a restart discards only local activity, not reservations.
 type ownedRequestActivity struct {
 	creating, media, unverified bool
+	sidebandCleanup             int
 }
 
 func (s *Service) FenceCreationRequest(owner, requestID string) (result, evidenceID string, err error) {
@@ -32,7 +33,7 @@ func (s *Service) updateRequestActivity(request ownedRequest, update func(*owned
 	defer s.requestMu.Unlock()
 	if activity := s.requestActivity[request]; activity != nil {
 		update(activity)
-		if !activity.creating && !activity.media && !activity.unverified {
+		if !activity.creating && !activity.media && !activity.unverified && activity.sidebandCleanup == 0 {
 			delete(s.requestActivity, request)
 		}
 	}
@@ -59,4 +60,29 @@ func (s *Service) finishRequestMedia(c *ownedCall, media relay.Session) {
 
 func (c *ownedCall) requestCleanupUnverified(s *Service) {
 	s.updateRequestActivity(ownedRequest{c.owner, c.requestID}, func(a *ownedRequestActivity) { a.unverified = true })
+}
+
+// The ordinary evidence path waits only briefly for sideband workers. Keep
+// the fence busy until those workers actually exit, without holding up a dial.
+func (s *Service) trackRequestSidebandCleanup(c *ownedCall, w *avasSidebandWriter) <-chan struct{} {
+	done := make(chan struct{})
+	if w.done == nil {
+		c.requestCleanupUnverified(s)
+		close(done)
+		return done
+	}
+	request := ownedRequest{c.owner, c.requestID}
+	s.updateRequestActivity(request, func(a *ownedRequestActivity) { a.sidebandCleanup++ })
+	go func() {
+		defer close(done)
+		<-w.done
+		w.mu.Lock()
+		clean := w.closed && w.closeErr == nil
+		w.mu.Unlock()
+		s.updateRequestActivity(request, func(a *ownedRequestActivity) {
+			a.sidebandCleanup--
+			a.unverified = a.unverified || !clean
+		})
+	}()
+	return done
 }

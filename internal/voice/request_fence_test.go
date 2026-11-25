@@ -130,6 +130,26 @@ func TestRequestFenceRejectsInFlightCreateWithoutRelayHandle(t *testing.T) {
 	assertRequestFence(t, s, "gateway-request", "fenced_no_live_media")
 }
 
+func TestRequestFenceWaitsForSidebandCleanupAfterDialReturns(t *testing.T) {
+	s, db, _, _ := newOfflineOwnedCreation(t, 0)
+	request := ownedRequest{s.zoeCallOwner(), "cleanup"}
+	if _, err := db.ClaimOwnedVoiceCreation(request.owner, request.id); err != nil {
+		t.Fatal(err)
+	}
+	s.requestActivity = map[ownedRequest]*ownedRequestActivity{request: {creating: true}}
+	worker := make(chan struct{})
+	done := s.trackRequestSidebandCleanup(&ownedCall{owner: request.owner, requestID: request.id}, &avasSidebandWriter{closed: true, done: worker})
+	s.finishRequestCreate(request, false)
+	assertRequestFence(t, s, request.id, "busy")
+	close(worker)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cleanup watcher did not finish")
+	}
+	assertRequestFence(t, s, request.id, "fenced_no_live_media")
+}
+
 func TestRequestFenceSurvivesRestartWithoutReleasingAccount(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "restore.db")
 	open := func() (*Service, *store.DB, *mediaevidence.Store) {

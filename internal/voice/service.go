@@ -612,7 +612,7 @@ func (s *Service) bindVoiceSessionMedia(owner, sessionID, token string, account 
 					cancelSideband()
 				}
 				if sideband != nil && !sideband.closeAndWait() {
-					c.requestCleanupUnverified(s)
+					s.trackRequestSidebandCleanup(c, sideband)
 					if _, err := s.evidence.Close(mediaID, mediaevidence.Components{}, ownedEndReason(reason)); err != nil {
 						s.logger.Error("owned_call_unclean_sideband_evidence_failed", "gateway_session_id", sessionID)
 					}
@@ -2327,7 +2327,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 				}
 				if avasSideband != nil && !avasSideband.closeAndWait() {
 					if req.owned != nil {
-						req.owned.requestCleanupUnverified(s)
+						s.trackRequestSidebandCleanup(req.owned, avasSideband)
 					}
 					sidebandUnclean = true
 					failedRelaysClean = false
@@ -2657,7 +2657,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 		}
 		if avasSideband != nil {
 			if !s.attachAVASSideband(voiceSessionID, media, avasSideband, avasCancel) && req.owned != nil && !avasSideband.closeAndWait() {
-				req.owned.requestCleanupUnverified(s)
+				s.trackRequestSidebandCleanup(req.owned, avasSideband)
 			}
 		}
 		if !markOutcome("established", voiceSessionID, mediaID.MediaGeneration) && req.owned != nil {
