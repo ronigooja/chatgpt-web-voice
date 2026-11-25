@@ -61,6 +61,7 @@ type creationDiagnostics struct {
 	class             creationErrorClass
 	attempts          int
 	lastStatus        int
+	rejectionStatus   int
 	relayStarted      bool
 	relayCloseClean   *bool // nil until a failed attempt's close has been checked
 	claimStarted      time.Time
@@ -134,10 +135,14 @@ func (d *creationDiagnostics) log(logger *slog.Logger, claims CreationOutcomeSto
 	if d.relayCloseClean != nil {
 		closeClean = *d.relayCloseClean
 	}
-	logger.LogAttrs(context.Background(), slog.LevelWarn, "owned_call_creation_failed", append(d.closeAttrs(),
+	attrs := append(d.closeAttrs(),
 		slog.Int("upstream_attempt_count", d.attempts), slog.Any("upstream_last_status", status),
 		slog.Bool("relay_started", d.relayStarted), slog.Any("relay_close_clean", closeClean),
-		slog.Any("stored_outcome", outcome), slog.Bool("outcome_write_ok", d.outcomeWriteOK), slog.Any("elapsed_ms", elapsed))...)
+		slog.Any("stored_outcome", outcome), slog.Bool("outcome_write_ok", d.outcomeWriteOK), slog.Any("elapsed_ms", elapsed))
+	if d.rejectionStatus >= 400 && d.rejectionStatus <= 599 {
+		attrs = append(attrs, slog.Int("rejection_status", d.rejectionStatus))
+	}
+	logger.LogAttrs(context.Background(), slog.LevelWarn, "owned_call_creation_failed", attrs...)
 }
 
 // LogOwnedVoiceUnavailable covers a dial rejected before a voice service can be called.

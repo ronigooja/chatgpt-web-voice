@@ -1543,7 +1543,19 @@ func (s *Service) postAVASCreation(token, offerSDP string, payload avasSessionPa
 		diag.lastStatus = resp.StatusCode
 	}
 	defer resp.Body.Close()
-	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	const maxBody = 2 << 20
+	limit := int64(maxBody)
+	if diag != nil && resp.StatusCode >= 400 && resp.StatusCode <= 599 {
+		// A truncated body is not an explicit rejection with a complete response.
+		limit++
+	}
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, limit))
+	if len(raw) > maxBody {
+		raw = raw[:maxBody]
+		if readErr == nil {
+			readErr = errors.New("upstream rejection exceeds response limit")
+		}
+	}
 	return resp.StatusCode, resp.Header.Get("content-type"), string(raw), resp.Header.Get("Location"), readErr
 }
 
@@ -1566,7 +1578,7 @@ func avasCallID(location string) string {
 	return strings.TrimSpace(part)
 }
 
-func (s *Service) startAVASSideband(ctx context.Context, media relay.Session, callID, token, proxy string, observerReady <-chan struct{}) (*avasSidebandWriter, creationErrorClass, error) {
+func (s *Service) startAVASSideband(ctx context.Context, media relay.Session, callID, token, proxy string, observerReady <-chan struct{}, diag *creationDiagnostics) (*avasSidebandWriter, creationErrorClass, error) {
 	injector, ok := media.(relay.SidebandEventInjector)
 	if !ok {
 		return nil, classInternal, errors.New("avas sideband requires gateway media relay")
@@ -1596,6 +1608,9 @@ func (s *Service) startAVASSideband(ctx context.Context, media relay.Session, ca
 		class := creationIOClass(err, classInternal)
 		if response != nil && response.StatusCode != http.StatusSwitchingProtocols {
 			class = creationHTTPClass(response.StatusCode)
+			if diag != nil {
+				diag.rejectionStatus = response.StatusCode
+			}
 		} else if errors.Is(err, websocket.ErrBadHandshake) {
 			class = classMalformedResponse
 		}
@@ -2385,7 +2400,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 		if err != nil {
 			allAttemptsCleanRejection = false
 			var curlErr *httpclient.CurlRequestError
-			if status != 0 || errors.As(err, &curlErr) && curlErr.ResponseBegan {
+			if status != 0 || (errors.As(err, &curlErr) && curlErr.ResponseBegan) {
 				diag.fail(stageUpstreamResponse, creationIOClass(err, classMalformedResponse))
 			} else {
 				diag.fail(stageUpstreamPost, creationIOClass(err, classInternal))
@@ -2494,7 +2509,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 			func() {
 				var sidebandCtx context.Context
 				sidebandCtx, avasCancel = context.WithCancel(context.Background())
-				avasSideband, class, err = s.startAVASSideband(sidebandCtx, media, callID, token, explicitProxy, observerReady)
+				avasSideband, class, err = s.startAVASSideband(sidebandCtx, media, callID, token, explicitProxy, observerReady, diag)
 				if err != nil {
 					avasCancel()
 					avasCancel = nil

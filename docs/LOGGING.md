@@ -78,6 +78,8 @@ not the media-derived public outcome. `outcome_write_ok` is true only when this
 dial wrote the claim and no outcome write failed. `elapsed_ms` starts at
 successful claim acquisition. Unavailable status, close, claim and timing
 fields are null (or omitted by the log handler).
+`rejection_status` is present for an explicit Zoe or sideband 4xx/5xx response;
+AVAS POST status is already recorded in `upstream_last_status`.
 
 Audio facts remain in generation metadata. Optional audio file capture is disabled by default; see the README environment table. Captures contain sensitive call audio. WAV files use mono 16-bit PCM at 24 kHz, inferred from observed frame sizes and duration. No silence is inserted. A crash can leave a header with zero data size. Files are stored under `<dir>/<session>/gen<N>/`, for example `20261125T001500.123Z_session_gen1_in.wav`; file names use UTC and a sanitized session identifier. Oldest finished files are removed when the configured byte limit is exceeded; open files are never removed.
 

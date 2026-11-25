@@ -230,6 +230,7 @@ func (s *Service) DialClient(ctx context.Context, key string, p ClientDialReques
 	status, class := s.zoeJSONClass(ctx, http.MethodPost, "/runner/v1/voice/calls", s.zoeToken, key, p, &start)
 	code := start.Error.Code
 	if status != 200 && status != 201 {
+		diag.rejectionStatus = status
 		switch {
 		case status == 401 && code == "unauthenticated" && start.Error.Details.Credential == "instance_key":
 			return nil, &CallError{401, "unauthenticated"}
@@ -341,6 +342,7 @@ func (s *Service) establishOwnedCall(ctx context.Context, c *ownedCall, res *Ses
 	})
 	if status != 200 {
 		diag.fail(stageBindingAck, class)
+		diag.rejectionStatus = status
 		marked := s.closeTracked(c.media, c.id, "failure", diag.closeAttrs()...)
 		diag.closed(s.hasCleanOwnedClosure(c.owner, c.id) && marked)
 		c.state.forward.abort()

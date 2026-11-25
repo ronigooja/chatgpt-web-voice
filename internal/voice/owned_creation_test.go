@@ -205,6 +205,7 @@ func TestOwnedCreationFailureDiagnostics(t *testing.T) {
 		{name: "upstream timeout", accounts: 1, script: `printf '%s' '` + leak + `' >&2; exit 28`, stage: "upstream_post", class: "transport_timeout", outcome: "unknown", posts: 1, started: true, closure: unclean},
 		{name: "upstream empty response", accounts: 1, script: `printf '%s' '` + leak + `' >&2; exit 52`, stage: "upstream_post", class: "transport_eof", outcome: "unknown", posts: 1, started: true, closure: unclean},
 		{name: "upstream truncated rejection", accounts: 1, script: ownedRejection + `; exit 18`, stage: "upstream_response", class: "transport_eof", outcome: "unknown", posts: 1, status: 429, started: true, closure: unclean},
+		{name: "upstream oversized rejection", accounts: 1, script: ownedRejection + `; head -c 2097153 /dev/zero`, stage: "upstream_response", class: "malformed_response", outcome: "unknown", posts: 1, status: 429, started: true, closure: unclean},
 		{name: "upstream unexpected status", accounts: 1, script: `printf 'HTTP/1.1 200 OK\r\n\r\nv=0\r\n'`, stage: "upstream_response", class: "unexpected_status", outcome: "unknown", posts: 1, status: 200, started: true, closure: unclean},
 		{name: "upstream malformed SDP", accounts: 1, script: `printf 'HTTP/1.1 201 Created\r\n\r\n%s\n' '` + leak + `'`, stage: "upstream_response", class: "malformed_response", outcome: "unknown", posts: 1, status: 201, started: true, closure: unclean},
 		{name: "explicit 5xx at limit", accounts: 1, script: `printf 'HTTP/1.1 503 Service Unavailable\r\n\r\n%s\n' '` + leak + `'`, change: func(_ *testing.T, s *Service, _ *store.DB, _ *fakeRelay, _ *ClientDialRequest) { s.cfg.MaxAccountAttempts = 1 }, stage: "upstream_response", class: "http_5xx", outcome: "never_established", posts: 1, status: 503, started: true, closure: clean},
@@ -212,6 +213,9 @@ func TestOwnedCreationFailureDiagnostics(t *testing.T) {
 		{name: "explicit 429 without durable evidence", accounts: 1, script: ownedRejection, change: func(t *testing.T, _ *Service, db *store.DB, _ *fakeRelay, _ *ClientDialRequest) {
 			fixtureSQL(t, db, `CREATE TRIGGER fail_evidence BEFORE INSERT ON voice_termination_evidence BEGIN SELECT RAISE(FAIL, '`+leak+`'); END`)
 		}, stage: "account_reservation", class: "pool_no_account", outcome: "unknown", posts: 1, status: 429, started: true, closure: unclean},
+		{name: "explicit 429 with health write failure", accounts: 1, script: ownedRejection, change: func(t *testing.T, _ *Service, db *store.DB, _ *fakeRelay, _ *ClientDialRequest) {
+			fixtureSQL(t, db, `CREATE TRIGGER fail_health BEFORE UPDATE OF cooldown_until ON accounts BEGIN SELECT RAISE(FAIL, '`+leak+`'); END`)
+		}, stage: "account_reservation", class: "pool_no_account", outcome: "unknown", posts: 1, status: 429, started: true, closure: clean},
 		{name: "explicit 429 with incomplete teardown", accounts: 1, script: ownedRejection, change: func(_ *testing.T, s *Service, _ *store.DB, _ *fakeRelay, _ *ClientDialRequest) {
 			s.WithRelay(&creationFailureRelay{termination: &relay.Termination{PeerA: relay.ComponentResult{Closed: true}}})
 		}, stage: "account_reservation", class: "pool_no_account", outcome: "unknown", posts: 1, status: 429, started: true, closure: unclean},
@@ -293,6 +297,15 @@ func TestOwnedCreationFailureDiagnostics(t *testing.T) {
 				if got, exists := log[field]; !exists || got != want {
 					t.Errorf("%s=%v (present=%v), want %v", field, got, exists, want)
 				}
+			}
+			rejectionStatus := map[string]float64{"Zoe rejects": 401, "Zoe unavailable": 503, "Zoe quarantine": 503,
+				"sideband rejected": 403, "binding ack refused": 403}
+			if want, expected := rejectionStatus[tc.name]; expected {
+				if log["rejection_status"] != want {
+					t.Errorf("rejection_status=%v, want %v", log["rejection_status"], want)
+				}
+			} else if _, present := log["rejection_status"]; present {
+				t.Errorf("unexpected rejection_status=%v", log["rejection_status"])
 			}
 		})
 	}
