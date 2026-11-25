@@ -458,16 +458,16 @@ func (r *PionRelay) NewSession(ctx context.Context, clientOffer string, route Ro
 	session.logger.Info("relay session created")
 
 	fail := func(format string, err error) (Session, string, error) {
-		closeErr := session.Close()
-		return nil, "", errors.Join(fmt.Errorf(format+": %w", err), closeErr)
+		closeErr := session.CloseWithDiagnostics("closed", []slog.Attr{slog.String("creation_stage", "relay_construct"), slog.String("error_class", "internal")})
+		return nil, "", errors.Join(ErrCreateAfterStart, fmt.Errorf(format+": %w", err), closeErr)
 	}
 
 	if err := downstream.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: clientOffer}); err != nil {
 		// No peer B or tunnels exist yet; cleanly closing A proves non-admission.
-		if closeErr := session.Close(); closeErr == nil {
-			return nil, "", errors.Join(ErrCreateClean, fmt.Errorf("set client offer on peer A: %w", err))
+		if closeErr := session.CloseWithDiagnostics("closed", []slog.Attr{slog.String("creation_stage", "relay_apply_offer"), slog.String("error_class", "validation")}); closeErr == nil {
+			return nil, "", errors.Join(ErrApplyOffer, ErrCreateClean, fmt.Errorf("set client offer on peer A: %w", err))
 		} else {
-			return nil, "", errors.Join(fmt.Errorf("set client offer on peer A: %w", err), closeErr)
+			return nil, "", errors.Join(ErrApplyOffer, fmt.Errorf("set client offer on peer A: %w", err), closeErr)
 		}
 	}
 	toClient, err := webrtc.NewTrackLocalStaticRTP(opusCodec, "audio", "relay")
@@ -784,6 +784,20 @@ func (s *pionSession) CloseWithDiagnostics(reason string, diagnostics []slog.Att
 				diagnostics = []slog.Attr{slog.String("drop_cause_class", "unknown")}
 			}
 			attrs = append(attrs, diagnostics...)
+		} else {
+			// Explicit closes ignore drop observations but can carry a create error.
+			var stage, class slog.Attr
+			for _, attr := range diagnostics {
+				switch attr.Key {
+				case "creation_stage":
+					stage = attr
+				case "error_class":
+					class = attr
+				}
+			}
+			if stage.Key != "" && class.Key != "" {
+				attrs = append(attrs, stage, class)
+			}
 		}
 		if drop && s.diag != nil {
 			closingAttrs := append(append([]slog.Attr(nil), attrs...), slog.Int64("session_age_ms", elapsedMS(s.diag.now(), s.diag.start)))
@@ -844,7 +858,14 @@ func (s *pionSession) CloseWithDiagnostics(reason string, diagnostics []slog.Att
 		}
 		s.closeErr = errors.Join(errs...)
 		if s.closeErr != nil {
-			s.logger.LogAttrs(context.Background(), slog.LevelWarn, "relay session closed with errors", s.diag.sessionAttrs(append(attrs, slog.String("error_class", activityErrorNames[classifyActivityError(s.closeErr)]))...)...)
+			classKey := "error_class"
+			for _, attr := range attrs {
+				if attr.Key == classKey {
+					classKey = "close_error_class"
+					break
+				}
+			}
+			s.logger.LogAttrs(context.Background(), slog.LevelWarn, "relay session closed with errors", s.diag.sessionAttrs(append(attrs, slog.String(classKey, activityErrorNames[classifyActivityError(s.closeErr)]))...)...)
 		} else {
 			s.logger.LogAttrs(context.Background(), slog.LevelInfo, "relay session closed", s.diag.sessionAttrs(attrs...)...)
 		}

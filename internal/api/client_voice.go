@@ -55,6 +55,9 @@ func (s *Server) clientVoice(next func(clientVoiceService, string, http.Response
 		r.Header.Del("X-Zoe-Instance-Key")
 		svc, ok := s.voice.(clientVoiceService)
 		if !ok {
+			if r.Method == http.MethodPost && r.URL.Path == "/client/v1/voice/calls" {
+				voice.LogOwnedVoiceUnavailable()
+			}
 			writeDownstreamError(w, 503, "voice_unavailable", "voice unavailable")
 			return
 		}
