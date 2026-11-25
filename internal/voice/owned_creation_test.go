@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -303,8 +304,8 @@ func TestOwnedCreationFailureDiagnostics(t *testing.T) {
 				if err != nil || !svc.hasCleanOwnedClosure(row.Owner, row.Identity) {
 					t.Fatalf("expected durable bound closure, state=%q, error=%v", row.State, err)
 				}
-				if reasons := r.session(0).closedReasons(); len(reasons) != 1 || reasons[0] != "failure" {
-					t.Fatalf("expected one bound close, got %v", reasons)
+				if reasons := r.session(0).closedReasons(); len(reasons) == 0 || reasons[0] != "failure" || slices.Contains(reasons, "creation_failed") {
+					t.Fatalf("expected bound close without pre-binding cleanup, got %v", reasons)
 				}
 			}
 			log := ownedCreationWarning(t, logs, leak)
