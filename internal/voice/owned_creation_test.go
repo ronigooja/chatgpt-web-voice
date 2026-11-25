@@ -275,6 +275,20 @@ func TestOwnedCreationFailureDiagnostics(t *testing.T) {
 				t.Fatalf("expected 503, got %v", err)
 			}
 			assertOwnedClaim(t, db, tc.outcome)
+			if tc.name == "established write failed" {
+				var sessionID string
+				var generation int64
+				if err := db.Conn().QueryRow(`SELECT voice_session_id, media_generation FROM voice_media_sessions`).Scan(&sessionID, &generation); err != nil {
+					t.Fatal(err)
+				}
+				row, err := svc.evidence.Get(sessionID, generation)
+				if err != nil || !svc.hasCleanOwnedClosure(row.Owner, row.Identity) {
+					t.Fatalf("expected durable bound closure, state=%q, error=%v", row.State, err)
+				}
+				if reasons := r.session(0).closedReasons(); len(reasons) != 1 || reasons[0] != "failure" {
+					t.Fatalf("expected one bound close, got %v", reasons)
+				}
+			}
 			log := ownedCreationWarning(t, logs, leak)
 			var status, closure, outcome any
 			if tc.status != 0 {

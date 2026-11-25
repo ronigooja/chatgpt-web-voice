@@ -2636,9 +2636,11 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 			s.attachAVASSideband(voiceSessionID, media, avasSideband, avasCancel)
 		}
 		if !markOutcome("established", voiceSessionID, mediaID.MediaGeneration) && req.owned != nil {
-			if !s.closeTracked(media, mediaID, "failure", diag.closeAttrs()...) {
-				failedRelaysClean = false
-			}
+			// The bound close handler waits for the sideband and records closure.
+			// Do not run the pre-binding ambiguous-POST cleanup on this relay.
+			marked := s.closeTracked(media, mediaID, "failure", diag.closeAttrs()...)
+			diag.closed(marked && s.hasCleanOwnedClosure(owner, mediaID))
+			media = nil
 			call.forward.abort()
 			s.mu.Lock()
 			delete(s.ownedCalls, voiceSessionID)
