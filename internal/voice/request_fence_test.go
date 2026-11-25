@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	fhttp "github.com/bogdanfinn/fhttp"
+	"github.com/bogdanfinn/websocket"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/config"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/mediaevidence"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/relay"
@@ -148,6 +150,30 @@ func TestRequestFenceWaitsForSidebandCleanupAfterDialReturns(t *testing.T) {
 		t.Fatal("cleanup watcher did not finish")
 	}
 	assertRequestFence(t, s, request.id, "fenced_no_live_media")
+}
+
+func TestLateEstablishmentRejectionClosesRelayWithoutAnswer(t *testing.T) {
+	s, _, r, _ := newOfflineOwnedCreation(t, 1)
+	setOwnedCurl(t, s, ownedAccepted)
+	s.avasDial = func(websocket.Dialer, string, fhttp.Header) (avasSidebandConnection, *fhttp.Response, error) {
+		return &diagnosticReader{started: make(chan struct{}), stopped: make(chan struct{})}, nil, nil
+	}
+	start := s.zoeHTTP.Transport
+	s.zoeHTTP.Transport = ownedCreationRoundTrip(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path == "/runner/v1/voice/calls/zoe-call/established" {
+			assertRequestFence(t, s, "gateway-request", "busy")
+			return ownedCreationResponse(http.StatusConflict, `{"error":{"code":"voice_generation_stale"}}`), nil
+		}
+		return start.RoundTrip(req)
+	})
+	answer, err := s.DialClient(context.Background(), ownedTestKey, ClientDialRequest{RequestID: "client-request", OfferSDP: readTestdata(t, "wm_offer.sdp")})
+	if answer != nil || err != unavailableCall || r.count() != 1 {
+		t.Fatalf("stale establishment returned an answer or missed media cleanup: err=%v", err)
+	}
+	if term, closed := r.session(0).Termination(); !closed || !term.Clean() {
+		t.Fatal("stale establishment left the relay live")
+	}
+	assertRequestFence(t, s, "gateway-request", "released")
 }
 
 func TestRequestFenceSurvivesRestartWithoutReleasingAccount(t *testing.T) {
