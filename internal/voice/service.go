@@ -161,6 +161,11 @@ type avasSidebandSocket interface {
 	Close() error
 }
 
+type avasSidebandConnection interface {
+	avasSidebandSocket
+	ReadMessage() (int, []byte, error)
+}
+
 func (w *avasSidebandWriter) setOnClose(fn func(sidebandCloseDiagnostics)) {
 	if w == nil {
 		return
@@ -1547,6 +1552,10 @@ func (s *Service) startAVASSideband(ctx context.Context, media relay.Session, ca
 	if err != nil {
 		return nil, fmt.Errorf("avas sideband handshake: %w", err)
 	}
+	return runAVASSideband(ctx, conn, injector, observerReady, s.logger.With("media_session_id", media.ID())), nil
+}
+
+func runAVASSideband(ctx context.Context, conn avasSidebandConnection, injector relay.SidebandEventInjector, observerReady <-chan struct{}, logger *slog.Logger) *avasSidebandWriter {
 	writer := &avasSidebandWriter{conn: conn, done: make(chan struct{})}
 	readerDone := make(chan struct{})
 	var workers sync.WaitGroup
@@ -1583,7 +1592,7 @@ func (s *Service) startAVASSideband(ctx context.Context, media relay.Session, ca
 				return
 			}
 			if upstream := writer.diag.readFrame(time.Now(), data); upstream != nil {
-				logSidebandUpstreamError(s.logger, media.ID(), *upstream)
+				logSidebandUpstreamError(logger, *upstream)
 			}
 			_ = injector.InjectSidebandEvent(normalizeAVASEvent(data))
 		}
@@ -1592,7 +1601,7 @@ func (s *Service) startAVASSideband(ctx context.Context, media relay.Session, ca
 		workers.Wait()
 		close(writer.done)
 	}()
-	return writer, nil
+	return writer
 }
 
 type avasFrameSender interface{ send([]byte) error }

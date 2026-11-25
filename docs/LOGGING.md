@@ -15,9 +15,10 @@ samples run every 10 seconds while the session is open after peer-a first
 connects. Deltas use the previous periodic sample; missing samples, replaced
 pairs, and counter resets do not count as zero. Selected-pair packet ages refer
 to application packets. `sampler_lateness_ms` measures how late the last tick
-was handled, not transport delay. A snapshot can be unavailable even when gateway activity is
-known; a failure waits at most one second for stats before teardown. Gateway
-writes count successful local API calls, not remote delivery acknowledgments.
+was handled, not transport delay. A snapshot can be unavailable even when
+gateway activity is known; a failure waits at most one second for stats before
+teardown. Gateway writes count successful local API calls, not remote delivery
+acknowledgments.
 
 Candidate and pair rows use opaque candidate indexes. Remote rows identify type,
 protocol, address family and selection. Pair rows carry application counters and

@@ -16,9 +16,9 @@ import (
 
 func TestSidebandReadCauseClasses(t *testing.T) {
 	for _, tc := range []struct {
-		name         string
-		ctxErr, err  error
-		want         sidebandCause
+		name        string
+		ctxErr, err error
+		want        sidebandCause
 	}{
 		{"eof", nil, fmt.Errorf("wrap: %w", io.EOF), sidebandCause{class: "read_error_eof"}},
 		{"ws_close", nil, &websocket.CloseError{Code: 1011, Text: "private credential"}, sidebandCause{class: "read_error_ws_close", wsCode: 1011}},
@@ -42,7 +42,7 @@ type diagnosticSocket struct {
 
 func (*diagnosticSocket) SetWriteDeadline(time.Time) error { return nil }
 func (s *diagnosticSocket) WriteMessage(int, []byte) error { return s.err }
-func (s *diagnosticSocket) Close() error                  { s.closes++; return nil }
+func (s *diagnosticSocket) Close() error                   { s.closes++; return nil }
 
 func TestSidebandWriterFailureDoesNotInitiateClose(t *testing.T) {
 	conn := &diagnosticSocket{}
@@ -92,7 +92,7 @@ func TestSidebandUpstreamErrorPrivacyAndCloseEvidence(t *testing.T) {
 			if upstream == nil || upstream.codeClass != tc.code || upstream.messageLengthClass != tc.length {
 				t.Fatalf("wrong event classification: %+v", upstream)
 			}
-			logSidebandUpstreamError(logger, "test-session", *upstream)
+			logSidebandUpstreamError(logger.With("media_session_id", "test-session"), *upstream)
 			for _, expected := range []string{`"level":"WARN"`, `"upstream_event_type":"error"`, `"upstream_error_code_class":"` + tc.code + `"`} {
 				if !strings.Contains(logs.String(), expected) {
 					t.Errorf("event log missing %s", expected)
@@ -116,5 +116,52 @@ func TestSidebandUpstreamErrorPrivacyAndCloseEvidence(t *testing.T) {
 				t.Error("local cancellation should be logged at DEBUG with its cause")
 			}
 		})
+	}
+}
+
+type diagnosticReader struct {
+	diagnosticSocket
+	started chan struct{}
+	stopped chan struct{}
+}
+
+func (r *diagnosticReader) ReadMessage() (int, []byte, error) {
+	close(r.started)
+	<-r.stopped
+	return 0, nil, io.EOF
+}
+
+func (r *diagnosticReader) Close() error {
+	close(r.stopped)
+	return r.diagnosticSocket.Close()
+}
+
+type diagnosticInjector func([]byte) error
+
+func (f diagnosticInjector) InjectSidebandEvent(data []byte) error { return f(data) }
+
+func TestSidebandLocalCancellationStopsReaderAndWatcher(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	conn := &diagnosticReader{started: make(chan struct{}), stopped: make(chan struct{})}
+	ready := make(chan struct{})
+	close(ready)
+	w := runAVASSideband(ctx, conn, diagnosticInjector(func([]byte) error {
+		t.Error("read error unexpectedly forwarded a frame")
+		return nil
+	}), ready, slog.New(slog.DiscardHandler))
+	select {
+	case <-conn.started:
+	case <-time.After(time.Second):
+		t.Fatal("reader did not start")
+	}
+	cancel()
+	select {
+	case <-w.done:
+	case <-time.After(time.Second):
+		t.Fatal("reader and watcher did not stop")
+	}
+	if got := w.diag.closed(); got.cause.class != "context_canceled" || conn.closes != 1 {
+		t.Errorf("close was not recorded once as canceled: %+v (socket closes %d)", got, conn.closes)
 	}
 }

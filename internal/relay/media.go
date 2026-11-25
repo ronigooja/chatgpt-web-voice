@@ -139,13 +139,13 @@ type pionSession struct {
 	proxyUpstreamAPI *webrtc.API
 	configuration    webrtc.Configuration
 
-	id          string
-	done        chan struct{}
-	closeOnce   sync.Once
-	closeErr    error
-	failureOnce sync.Once
+	id                string
+	done              chan struct{}
+	closeOnce         sync.Once
+	closeErr          error
+	failureOnce       sync.Once
 	peerAFailedLogged atomic.Bool
-	releaseSlot func()
+	releaseSlot       func()
 
 	mu          sync.Mutex
 	onClose     func(string)
@@ -913,7 +913,7 @@ func (s *pionSession) closePeerConnection(peer string, connection *webrtc.PeerCo
 	err := connection.Close()
 	after := connection.ConnectionState().String()
 	if err != nil {
-		s.logger.Warn("relay peer close failed", "peer", peer, "state_before", before, "state_after", after, "error", err)
+		s.logger.Warn("relay peer close failed", "peer", peer, "state_before", before, "state_after", after, "error_class", activityErrorNames[classifyActivityError(err)])
 		return err
 	}
 	s.logger.Info("relay peer closed", "peer", peer, "state_before", before, "state_after", after)
@@ -1009,10 +1009,10 @@ func (s *pionSession) legEnded(l *leg, reason string) {
 func (s *pionSession) fail(reason string, err error) {
 	s.failureOnce.Do(func() {
 		if err != nil {
-			s.logger.LogAttrs(context.Background(), slog.LevelWarn, "relay session failed", s.diag.sessionAttrs(slog.String("reason", reason), slog.Any("error", err))...)
+			s.logger.LogAttrs(context.Background(), slog.LevelWarn, "relay session failed", s.diag.sessionAttrs(slog.String("reason", reason), slog.String("error_class", activityErrorNames[classifyActivityError(err)]))...)
 		}
 		if errClose := s.CloseWithReason(reason); errClose != nil {
-			s.logger.Debug("relay: close failed session", "error", errClose)
+			s.logger.Debug("relay: close failed session", "error_class", activityErrorNames[classifyActivityError(errClose)])
 		}
 	})
 }

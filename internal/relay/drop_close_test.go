@@ -9,7 +9,7 @@ import (
 func TestCloseDropLevelAndEvidence(t *testing.T) {
 	for _, tc := range []struct {
 		name, reason, closingLevel string
-		peerFailed                  bool
+		peerFailed                 bool
 	}{
 		{"sideband_loss", "media_lost", "WARN", false},
 		{"peer_failure_already_logged", "media_lost", "INFO", true},

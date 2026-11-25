@@ -36,10 +36,12 @@ func TestCandidateDiagnosticsDeltasAndFallback(t *testing.T) {
 	now = now.Add(10 * time.Second)
 	last := makeSample(now, 120, 25)
 	last.pairBaseline = baseline.stats.pairs
+	last.pairBaselineAt = baseline.at
 	d.lastSelectedSample.Store(&last)
 	now = now.Add(time.Second)
 	live := makeSample(now, 150, 25)
 	live.pairBaseline = last.stats.pairs
+	live.pairBaselineAt = last.at
 	failed := peerSnapshot{at: now, allowCandidateFallback: true, pairBaseline: last.stats.pairs}
 	failed.stats.addReport(webrtc.StatsReport{}, webrtc.ICECandidatePairStats{}, false, webrtc.DataChannelStats{}, false)
 	for _, tc := range []struct {
@@ -54,7 +56,10 @@ func TestCandidateDiagnosticsDeltasAndFallback(t *testing.T) {
 			}
 			if tc.name == "failed" {
 				assertDiag(t, log, "candidate_snapshot_age_ms", float64(1000))
+				assertDiag(t, log, "previous_candidate_pairs_age_ms", float64(11000))
 				assertDiag(t, log, "selected_pair.present", false)
+			} else {
+				assertDiag(t, log, "previous_candidate_pairs_age_ms", float64(1000))
 			}
 			assertDiag(t, log, "selected_pair_change_count", float64(2))
 			assertDiag(t, log, "last_selected_pair_change_age_ms", float64(11000))

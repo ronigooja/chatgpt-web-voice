@@ -263,11 +263,12 @@ func (s *peerStats) addReport(report webrtc.StatsReport, selected webrtc.ICECand
 }
 
 type peerSnapshot struct {
-	at       time.Time
-	reason   string
-	lateness int64
-	stats    peerStats
-	pairBaseline []pairStats
+	at                     time.Time
+	reason                 string
+	lateness               int64
+	stats                  peerStats
+	pairBaseline           []pairStats
+	pairBaselineAt         time.Time
 	allowCandidateFallback bool
 }
 
@@ -277,17 +278,17 @@ type namedPeerActivity struct {
 }
 
 type peerDiagnostics struct {
-	start time.Time
-	now   func() time.Time
-	done  <-chan struct{}
-	stats peerStatsProvider
-	gate  chan struct{}
-	last  atomic.Pointer[peerSnapshot]
+	start              time.Time
+	now                func() time.Time
+	done               <-chan struct{}
+	stats              peerStatsProvider
+	gate               chan struct{}
+	last               atomic.Pointer[peerSnapshot]
 	lastSelectedSample atomic.Pointer[peerSnapshot]
-	once  sync.Once
-	pairChangeMu sync.Mutex
-	pairChangeCount uint64
-	pairChangeAt int64
+	once               sync.Once
+	pairChangeMu       sync.Mutex
+	pairChangeCount    uint64
+	pairChangeAt       int64
 
 	client peerActivity
 	legsMu sync.Mutex
@@ -397,6 +398,7 @@ func (d *peerDiagnostics) sampleLoop(logger *slog.Logger, ticks <-chan time.Time
 			sample.lateness = lateness
 			if previous != nil {
 				sample.pairBaseline = previous.stats.pairs
+				sample.pairBaselineAt = previous.at
 			}
 			if sample.stats.pair != nil {
 				d.lastSelectedSample.Store(&sample)
@@ -415,6 +417,7 @@ func (d *peerDiagnostics) logDrop(logger *slog.Logger, message string, after fun
 	sample.allowCandidateFallback = true
 	if previous != nil {
 		sample.pairBaseline = previous.stats.pairs
+		sample.pairBaselineAt = previous.at
 	}
 	logger.LogAttrs(context.Background(), slog.LevelWarn, message, d.attrs(sample, previous, d.last.Load())...)
 	if after != nil {

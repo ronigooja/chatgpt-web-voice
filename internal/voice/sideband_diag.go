@@ -56,7 +56,7 @@ func parseSidebandUpstreamError(data []byte) *sidebandUpstreamError {
 	var event struct {
 		Type    string          `json:"type"`
 		Code    json.RawMessage `json:"code"`
-		Message string          `json:"message"`
+		Message json.RawMessage `json:"message"`
 		Error   json.RawMessage `json:"error"`
 	}
 	if json.Unmarshal(data, &event) != nil || event.Type != "error" {
@@ -64,22 +64,25 @@ func parseSidebandUpstreamError(data []byte) *sidebandUpstreamError {
 	}
 	var nested struct {
 		Code    json.RawMessage `json:"code"`
-		Message string          `json:"message"`
+		Message json.RawMessage `json:"message"`
 	}
+	var message string
+	_ = json.Unmarshal(event.Message, &message)
 	if json.Unmarshal(event.Error, &nested) == nil {
 		if len(nested.Code) != 0 {
 			event.Code = nested.Code
 		}
-		if nested.Message != "" {
-			event.Message = nested.Message
+		var detail string
+		if json.Unmarshal(nested.Message, &detail) == nil && detail != "" {
+			message = detail
 		}
 	} else {
 		var text string
 		if json.Unmarshal(event.Error, &text) == nil && text != "" {
-			event.Message = text
+			message = text
 		}
 	}
-	return &sidebandUpstreamError{codeClass: upstreamErrorCodeClass(event.Code), messageLengthClass: errorLengthClass(event.Message)}
+	return &sidebandUpstreamError{codeClass: upstreamErrorCodeClass(event.Code), messageLengthClass: errorLengthClass(message)}
 }
 
 func upstreamErrorCodeClass(raw json.RawMessage) string {
@@ -118,10 +121,10 @@ func errorLengthClass(s string) string {
 }
 
 type sidebandCloseDiagnostics struct {
-	cause, terminalRead          sidebandCause
-	lastReadAge                  any
-	readCount, writeCount        uint64
-	upstream                     *sidebandUpstreamError
+	cause, terminalRead   sidebandCause
+	lastReadAge           any
+	readCount, writeCount uint64
+	upstream              *sidebandUpstreamError
 }
 
 func (d sidebandCloseDiagnostics) attrs() []slog.Attr {
@@ -205,7 +208,7 @@ func logSidebandClose(logger *slog.Logger, mediaID string, diag sidebandCloseDia
 	logger.LogAttrs(context.Background(), slog.LevelDebug, "relay sideband closed", append([]slog.Attr{slog.String("media_session_id", mediaID)}, diag.attrs()...)...)
 }
 
-func logSidebandUpstreamError(logger *slog.Logger, mediaID string, upstream sidebandUpstreamError) {
-	attrs := []slog.Attr{slog.String("media_session_id", mediaID), slog.String("drop_cause_class", "upstream_error_event")}
+func logSidebandUpstreamError(logger *slog.Logger, upstream sidebandUpstreamError) {
+	attrs := []slog.Attr{slog.String("drop_cause_class", "upstream_error_event")}
 	logger.LogAttrs(context.Background(), slog.LevelWarn, "relay sideband upstream error event", append(attrs, upstream.attrs()...)...)
 }

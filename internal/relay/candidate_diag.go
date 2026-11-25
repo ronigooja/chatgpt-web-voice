@@ -84,6 +84,19 @@ func pairRows(pairs, baseline []pairStats, deltas bool) []map[string]any {
 	return rows
 }
 
+func (s peerSnapshot) pairBaselineAttrs(at time.Time) []slog.Attr {
+	var age any = diagUnavailable
+	source := diagUnavailable
+	if s.pairBaseline != nil {
+		source = "last_sample"
+		if !s.pairBaselineAt.IsZero() {
+			age = elapsedMS(at, s.pairBaselineAt)
+		}
+	}
+	return []slog.Attr{slog.String("previous_candidate_pairs_source", source), slog.Any("previous_candidate_pairs_age_ms", age),
+		slog.Any("previous_candidate_pairs", pairRows(s.pairBaseline, nil, false))}
+}
+
 func (d *peerDiagnostics) selectedPairChanged(pair *webrtc.ICECandidatePair) {
 	if pair == nil {
 		return
@@ -106,16 +119,19 @@ func (d *peerDiagnostics) candidateAttrs(sample peerSnapshot) []slog.Attr {
 	selected := &sample
 	var age any = diagUnavailable
 	if sample.allowCandidateFallback && sample.stats.pair == nil {
-		if last := d.lastSelectedSample.Load(); last != nil {
+		last := d.lastSelectedSample.Load()
+		if last == nil && sample.reason != "" {
+			last = d.last.Load()
+		}
+		if last != nil && last.stats.candidateReport {
 			selected, source = last, "last_sample"
 			age = elapsedMS(sample.at, last.at)
 		}
 	}
 	if !selected.stats.candidateReport {
-		return append(attrs, slog.String("candidates_source", diagUnavailable),
-			slog.String("candidate_pairs_source", diagUnavailable), slog.String("selected_candidate_ids_source", diagUnavailable),
-			slog.String("previous_candidate_pairs_source", baselineSource(sample.pairBaseline)),
-			slog.Any("previous_candidate_pairs", pairRows(sample.pairBaseline, nil, false)))
+		attrs = append(attrs, slog.String("candidates_source", diagUnavailable),
+			slog.String("candidate_pairs_source", diagUnavailable), slog.String("selected_candidate_ids_source", diagUnavailable))
+		return append(attrs, sample.pairBaselineAttrs(sample.at)...)
 	}
 	var localID, remoteID string
 	selectedSource := diagUnavailable
@@ -130,20 +146,12 @@ func (d *peerDiagnostics) candidateAttrs(sample peerSnapshot) []slog.Attr {
 			"selected": remoteID != "" && c.id == remoteID,
 		})
 	}
-	return append(attrs, slog.String("candidates_source", source), slog.String("candidate_pairs_source", source),
+	attrs = append(attrs, slog.String("candidates_source", source), slog.String("candidate_pairs_source", source),
 		slog.String("selected_candidate_ids_source", selectedSource), slog.Any("candidate_snapshot_age_ms", age),
 		slog.String("selected_local_candidate_id", candidateIndex(localID)),
 		slog.String("selected_remote_candidate_id", candidateIndex(remoteID)),
 		slog.Int("remote_candidate_count", len(candidates)), slog.Any("remote_candidates", candidates),
 		slog.Int("candidate_pair_count", len(selected.stats.pairs)),
-		slog.Any("candidate_pairs", pairRows(selected.stats.pairs, selected.pairBaseline, true)),
-		slog.String("previous_candidate_pairs_source", baselineSource(selected.pairBaseline)),
-		slog.Any("previous_candidate_pairs", pairRows(selected.pairBaseline, nil, false)))
-}
-
-func baselineSource(pairs []pairStats) string {
-	if pairs == nil {
-		return diagUnavailable
-	}
-	return "last_sample"
+		slog.Any("candidate_pairs", pairRows(selected.stats.pairs, selected.pairBaseline, true)))
+	return append(attrs, selected.pairBaselineAttrs(sample.at)...)
 }
