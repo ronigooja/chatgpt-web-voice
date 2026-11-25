@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -146,6 +147,7 @@ func (c trafficCounters) attrs(unit string, before *trafficCounters) []slog.Attr
 
 type pairStats struct {
 	id, state, protocol, family string
+	localID, remoteID           string
 	nominated                   bool
 	counters                    trafficCounters
 	lastSent, lastReceived      int64
@@ -162,13 +164,15 @@ type channelStats struct {
 	counters trafficCounters
 }
 
-// peerStats contains only diagnostic values. IDs identify counter series in
-// memory; neither IDs nor the original library report are logged.
+// peerStats contains only diagnostic values, never the original library report.
 type peerStats struct {
 	ice, dtls, sctp, dataState string
 	pair                       *pairStats
 	inbound                    *inboundRTPStats
 	channel                    *channelStats
+	candidates                 []remoteCandidateStats
+	pairs                      []pairStats
+	candidateReport            bool
 }
 
 type peerStatsProvider interface {
@@ -217,32 +221,28 @@ func (p pionPeerStats) collect() (peerStats, error) {
 }
 
 func (s *peerStats) addReport(report webrtc.StatsReport, selected webrtc.ICECandidatePairStats, hasPair bool, dc webrtc.DataChannelStats, hasChannel bool) {
+	s.candidateReport = true
+	s.pairs = make([]pairStats, 0)
 	if hasPair {
-		pair := &pairStats{
-			id: selected.ID, state: string(selected.State), nominated: selected.Nominated,
-			counters: trafficCounters{uint64(selected.PacketsSent), uint64(selected.PacketsReceived), selected.BytesSent, selected.BytesReceived},
-			lastSent: selected.LastPacketSentTimestamp.Time().UnixNano(), lastReceived: selected.LastPacketReceivedTimestamp.Time().UnixNano(),
-		}
+		pair := newPairStats(selected)
 		if candidate, ok := report[selected.RemoteCandidateID].(webrtc.ICECandidateStats); ok {
-			switch candidate.Protocol {
-			case "udp", "tcp":
-				pair.protocol = candidate.Protocol
-			}
-			if ip := net.ParseIP(candidate.IP); ip != nil {
-				if ip.To4() != nil {
-					pair.family = "ipv4"
-				} else {
-					pair.family = "ipv6"
-				}
-			}
+			pair.protocol, pair.family = candidateNetwork(candidate)
 		}
-		s.pair = pair
+		s.pair = &pair
 	}
 	if hasChannel {
 		s.channel = &channelStats{id: dc.ID, counters: trafficCounters{uint64(dc.MessagesSent), uint64(dc.MessagesReceived), dc.BytesSent, dc.BytesReceived}}
 	}
 	var inbound inboundRTPStats
 	for _, entry := range report {
+		switch v := entry.(type) {
+		case webrtc.ICECandidatePairStats:
+			s.pairs = append(s.pairs, newPairStats(v))
+		case webrtc.ICECandidateStats:
+			if v.Type == webrtc.StatsTypeRemoteCandidate {
+				s.candidates = append(s.candidates, newRemoteCandidateStats(v))
+			}
+		}
 		rtp, ok := entry.(webrtc.InboundRTPStreamStats)
 		if !ok || rtp.Kind != string(webrtc.MediaKindAudio) {
 			continue
@@ -258,6 +258,8 @@ func (s *peerStats) addReport(report webrtc.StatsReport, selected webrtc.ICECand
 		inbound.jitterMS = max(inbound.jitterMS, int64(rtp.Jitter*1000))
 		inbound.lastReceived = max(inbound.lastReceived, rtp.LastPacketReceivedTimestamp.Time().UnixNano())
 	}
+	sort.Slice(s.pairs, func(i, j int) bool { return s.pairs[i].id < s.pairs[j].id })
+	sort.Slice(s.candidates, func(i, j int) bool { return s.candidates[i].id < s.candidates[j].id })
 }
 
 type peerSnapshot struct {
@@ -265,6 +267,8 @@ type peerSnapshot struct {
 	reason   string
 	lateness int64
 	stats    peerStats
+	pairBaseline []pairStats
+	allowCandidateFallback bool
 }
 
 type namedPeerActivity struct {
@@ -279,7 +283,11 @@ type peerDiagnostics struct {
 	stats peerStatsProvider
 	gate  chan struct{}
 	last  atomic.Pointer[peerSnapshot]
+	lastSelectedSample atomic.Pointer[peerSnapshot]
 	once  sync.Once
+	pairChangeMu sync.Mutex
+	pairChangeCount uint64
+	pairChangeAt int64
 
 	client peerActivity
 	legsMu sync.Mutex
@@ -387,6 +395,12 @@ func (d *peerDiagnostics) sampleLoop(logger *slog.Logger, ticks <-chan time.Time
 				return
 			}
 			sample.lateness = lateness
+			if previous != nil {
+				sample.pairBaseline = previous.stats.pairs
+			}
+			if sample.stats.pair != nil {
+				d.lastSelectedSample.Store(&sample)
+			}
 			d.last.Store(&sample)
 			if logger.Enabled(context.Background(), slog.LevelDebug) {
 				logger.LogAttrs(context.Background(), slog.LevelDebug, "relay peer sample", d.attrs(sample, previous, &sample)...)
@@ -398,6 +412,10 @@ func (d *peerDiagnostics) sampleLoop(logger *slog.Logger, ticks <-chan time.Time
 func (d *peerDiagnostics) logDrop(logger *slog.Logger, message string, after func()) {
 	previous := d.last.Load()
 	sample := d.snapshot(peerStatsDeadline)
+	sample.allowCandidateFallback = true
+	if previous != nil {
+		sample.pairBaseline = previous.stats.pairs
+	}
 	logger.LogAttrs(context.Background(), slog.LevelWarn, message, d.attrs(sample, previous, d.last.Load())...)
 	if after != nil {
 		after()
@@ -440,6 +458,7 @@ func diagValue(s string) string {
 
 func (d *peerDiagnostics) attrs(sample peerSnapshot, previous, last *peerSnapshot) []slog.Attr {
 	attrs := d.gatewayAttrs(sample.at, last)
+	attrs = append(attrs, d.candidateAttrs(sample)...)
 	if sample.reason != "" {
 		return append(attrs, slog.String("snapshot", diagUnavailable), slog.String("snapshot_reason", sample.reason))
 	}

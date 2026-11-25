@@ -895,6 +895,13 @@ func (s *pionSession) closePeerConnection(peer string, connection *webrtc.PeerCo
 }
 
 func (s *pionSession) installPeerAHandler() {
+	if sctp := s.downstream.SCTP(); sctp != nil {
+		if dtls := sctp.Transport(); dtls != nil {
+			if transport := dtls.ICETransport(); transport != nil {
+				transport.OnSelectedCandidatePairChange(s.diag.selectedPairChanged)
+			}
+		}
+	}
 	s.downstream.OnConnectionStateChange(s.handlePeerAState)
 }
 
