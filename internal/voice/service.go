@@ -145,23 +145,35 @@ type sessionBinding struct {
 const avasContextMaxBytes = 8000
 
 type avasSidebandWriter struct {
-	conn     *websocket.Conn
+	conn     avasSidebandSocket
 	mu       sync.Mutex
 	closed   bool
-	onClose  func()
+	onClose  func(sidebandCloseDiagnostics)
 	done     chan struct{}
 	closeErr error
 	capture  func([]byte, string)
+	diag     sidebandDiagnostics
 }
 
-func (w *avasSidebandWriter) setOnClose(fn func()) {
+type avasSidebandSocket interface {
+	SetWriteDeadline(time.Time) error
+	WriteMessage(int, []byte) error
+	Close() error
+}
+
+type avasSidebandConnection interface {
+	avasSidebandSocket
+	ReadMessage() (int, []byte, error)
+}
+
+func (w *avasSidebandWriter) setOnClose(fn func(sidebandCloseDiagnostics)) {
 	if w == nil {
 		return
 	}
 	w.mu.Lock()
 	if w.closed {
 		w.mu.Unlock()
-		fn()
+		fn(w.diag.closed())
 		return
 	}
 	w.onClose = fn
@@ -190,9 +202,11 @@ func (w *avasSidebandWriter) sendAttempt(data []byte) (bool, error) {
 		return false, errors.New("avas sideband closed")
 	}
 	if err := w.conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		w.diag.wroteFrame(err)
 		return false, err
 	}
 	err := w.conn.WriteMessage(websocket.TextMessage, data)
+	w.diag.wroteFrame(err)
 	if err == nil {
 		delivery = "sent"
 	} else {
@@ -202,19 +216,25 @@ func (w *avasSidebandWriter) sendAttempt(data []byte) (bool, error) {
 }
 
 func (w *avasSidebandWriter) close() {
+	w.closeWithCause(sidebandCause{class: "local_shutdown"})
+}
+
+func (w *avasSidebandWriter) closeWithCause(cause sidebandCause) {
 	if w == nil {
 		return
 	}
 	w.mu.Lock()
-	var onClose func()
+	var onClose func(sidebandCloseDiagnostics)
+	var diagnostics sidebandCloseDiagnostics
 	if !w.closed {
 		w.closed = true
+		diagnostics = w.diag.finish(cause, time.Now())
 		w.closeErr = w.conn.Close()
 		onClose = w.onClose
 	}
 	w.mu.Unlock()
 	if onClose != nil {
-		onClose()
+		onClose(diagnostics)
 	}
 }
 
@@ -665,7 +685,7 @@ func (s *Service) finalizeMedia(media relay.Session, mediaID mediaevidence.Ident
 
 // closeTracked marks a tracked media session closing (so a crash mid-close is
 // recoverable as unknown) and closes it. Evidence is written by the close handler.
-func (s *Service) closeTracked(media relay.Session, mediaID mediaevidence.Identity, reason string) {
+func (s *Service) closeTracked(media relay.Session, mediaID mediaevidence.Identity, reason string, diagnostics ...slog.Attr) {
 	if media == nil {
 		return
 	}
@@ -674,15 +694,23 @@ func (s *Service) closeTracked(media relay.Session, mediaID mediaevidence.Identi
 			s.logger.Warn("media_mark_closing_failed", "voice_session_id", mediaID.VoiceSessionID, "error", err)
 		}
 	}
-	s.closeMedia(media, reason)
+	s.closeMedia(media, reason, diagnostics)
 }
 
-func (s *Service) closeMedia(media relay.Session, reason string) {
+func (s *Service) closeMedia(media relay.Session, reason string, diagnostics []slog.Attr) {
 	if media == nil {
 		return
 	}
-	if err := media.CloseWithReason(reason); err != nil {
-		s.logger.Warn("relay_media_close_failed", "media_session_id", media.ID(), "reason", reason, "error", err)
+	var err error
+	if withDiagnostics, ok := media.(interface {
+		CloseWithDiagnostics(string, []slog.Attr) error
+	}); ok && len(diagnostics) != 0 {
+		err = withDiagnostics.CloseWithDiagnostics(reason, diagnostics)
+	} else {
+		err = media.CloseWithReason(reason)
+	}
+	if err != nil {
+		s.logger.Warn("relay_media_close_failed", "media_session_id", media.ID(), "reason", reason, "error_class", "close_error")
 	}
 }
 
@@ -1524,6 +1552,10 @@ func (s *Service) startAVASSideband(ctx context.Context, media relay.Session, ca
 	if err != nil {
 		return nil, fmt.Errorf("avas sideband handshake: %w", err)
 	}
+	return runAVASSideband(ctx, conn, injector, observerReady, s.logger.With("media_session_id", media.ID())), nil
+}
+
+func runAVASSideband(ctx context.Context, conn avasSidebandConnection, injector relay.SidebandEventInjector, observerReady <-chan struct{}, logger *slog.Logger) *avasSidebandWriter {
 	writer := &avasSidebandWriter{conn: conn, done: make(chan struct{})}
 	readerDone := make(chan struct{})
 	var workers sync.WaitGroup
@@ -1532,14 +1564,17 @@ func (s *Service) startAVASSideband(ctx context.Context, media relay.Session, ca
 		defer workers.Done()
 		select {
 		case <-ctx.Done():
-			writer.close()
+			writer.closeWithCause(classifySidebandReadError(ctx.Err(), nil))
 		case <-readerDone:
 		}
 	}()
 	go func() {
 		defer workers.Done()
 		defer close(readerDone)
-		defer writer.close()
+		var readErr error
+		defer func() {
+			writer.closeWithCause(classifySidebandReadError(ctx.Err(), readErr))
+		}()
 		select {
 		case <-ctx.Done():
 			return
@@ -1553,7 +1588,11 @@ func (s *Service) startAVASSideband(ctx context.Context, media relay.Session, ca
 			}
 			_, data, err := conn.ReadMessage()
 			if err != nil {
+				readErr = err
 				return
+			}
+			if upstream := writer.diag.readFrame(time.Now(), data); upstream != nil {
+				logSidebandUpstreamError(logger, *upstream)
 			}
 			_ = injector.InjectSidebandEvent(normalizeAVASEvent(data))
 		}
@@ -1562,7 +1601,7 @@ func (s *Service) startAVASSideband(ctx context.Context, media relay.Session, ca
 		workers.Wait()
 		close(writer.done)
 	}()
-	return writer, nil
+	return writer
 }
 
 type avasFrameSender interface{ send([]byte) error }
@@ -2582,7 +2621,7 @@ func (s *Service) attachAVASSideband(sessionID string, media relay.Session, side
 		sideband.close()
 		return
 	}
-	sideband.setOnClose(func() {
+	sideband.setOnClose(func(diagnostics sidebandCloseDiagnostics) {
 		s.mu.Lock()
 		var owned *ownedCall
 		if current := s.bindings[sessionID]; current != nil && current.media == media && current.avasSideband == sideband {
@@ -2592,8 +2631,11 @@ func (s *Service) attachAVASSideband(sessionID string, media relay.Session, side
 			}
 		}
 		s.mu.Unlock()
+		if diagnostics.cause.isLocal() || owned == nil {
+			logSidebandClose(s.logger, media.ID(), diagnostics)
+		}
 		if owned != nil {
-			go s.closeTracked(media, owned.id, "media_lost")
+			go s.closeTracked(media, owned.id, "media_lost", diagnostics.attrs()...)
 		}
 	})
 }

@@ -26,7 +26,7 @@ func (l *lockedLog) String() string {
 	return l.buf.String()
 }
 
-func TestClientDataChannelCloseIsNormal(t *testing.T) {
+func TestClientDataChannelCloseReportsDrop(t *testing.T) {
 	logs := &lockedLog{}
 	r := newRelay(t, 1)
 	r.logger = slog.New(slog.NewTextHandler(logs, nil))
@@ -49,7 +49,7 @@ func TestClientDataChannelCloseIsNormal(t *testing.T) {
 		t.Fatalf("termination = %+v, ok = %v", term, ok)
 	}
 	log := logs.String()
-	for _, want := range []string{`level=INFO msg="relay session closing"`, `level=INFO msg="relay session closed"`, "reason=client_data_channel_closed"} {
+	for _, want := range []string{`level=WARN msg="relay session closing"`, `level=INFO msg="relay session closed"`, "reason=client_data_channel_closed", "drop_cause_class=client_data_channel_closed"} {
 		if !strings.Contains(log, want) {
 			t.Errorf("log missing %q: %s", want, log)
 		}

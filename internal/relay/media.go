@@ -38,6 +38,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -138,12 +139,13 @@ type pionSession struct {
 	proxyUpstreamAPI *webrtc.API
 	configuration    webrtc.Configuration
 
-	id          string
-	done        chan struct{}
-	closeOnce   sync.Once
-	closeErr    error
-	failureOnce sync.Once
-	releaseSlot func()
+	id                string
+	done              chan struct{}
+	closeOnce         sync.Once
+	closeErr          error
+	failureOnce       sync.Once
+	peerAFailedLogged atomic.Bool
+	releaseSlot       func()
 
 	mu          sync.Mutex
 	onClose     func(string)
@@ -761,10 +763,34 @@ func (s *pionSession) SetCloseHandler(handler func(string)) {
 func (s *pionSession) Close() error { return s.CloseWithReason("closed") }
 
 func (s *pionSession) CloseWithReason(reason string) error {
+	return s.CloseWithDiagnostics(reason, nil)
+}
+
+// CloseWithDiagnostics attaches observations only if this call wins the close.
+func (s *pionSession) CloseWithDiagnostics(reason string, diagnostics []slog.Attr) error {
 	first := false
 	s.closeOnce.Do(func() {
 		first = true
-		s.logger.Info("relay session closing", "reason", reason)
+		closingLevel := slog.LevelInfo
+		drop := reason == "media_lost" || reason == "client_data_channel_closed"
+		if drop && !s.peerAFailedLogged.Load() {
+			closingLevel = slog.LevelWarn
+		}
+		attrs := []slog.Attr{slog.String("reason", reason)}
+		if reason == "client_data_channel_closed" {
+			attrs = append(attrs, slog.String("drop_cause_class", "client_data_channel_closed"))
+		} else if reason == "media_lost" {
+			if len(diagnostics) == 0 {
+				diagnostics = []slog.Attr{slog.String("drop_cause_class", "unknown")}
+			}
+			attrs = append(attrs, diagnostics...)
+		}
+		if drop && s.diag != nil {
+			closingAttrs := append(append([]slog.Attr(nil), attrs...), slog.Int64("session_age_ms", elapsedMS(s.diag.now(), s.diag.start)))
+			s.logger.LogAttrs(context.Background(), closingLevel, "relay session closing", closingAttrs...)
+		} else {
+			s.logger.LogAttrs(context.Background(), closingLevel, "relay session closing", attrs...)
+		}
 		close(s.done)
 		s.captureMu.RLock()
 		if s.captureStore != nil {
@@ -818,9 +844,9 @@ func (s *pionSession) CloseWithReason(reason string) error {
 		}
 		s.closeErr = errors.Join(errs...)
 		if s.closeErr != nil {
-			s.logger.LogAttrs(context.Background(), slog.LevelWarn, "relay session closed with errors", s.diag.sessionAttrs(slog.String("reason", reason), slog.Any("error", s.closeErr))...)
+			s.logger.LogAttrs(context.Background(), slog.LevelWarn, "relay session closed with errors", s.diag.sessionAttrs(append(attrs, slog.String("error_class", activityErrorNames[classifyActivityError(s.closeErr)]))...)...)
 		} else {
-			s.logger.LogAttrs(context.Background(), slog.LevelInfo, "relay session closed", s.diag.sessionAttrs(slog.String("reason", reason))...)
+			s.logger.LogAttrs(context.Background(), slog.LevelInfo, "relay session closed", s.diag.sessionAttrs(attrs...)...)
 		}
 		s.mu.Lock()
 		s.termination = result
@@ -887,7 +913,7 @@ func (s *pionSession) closePeerConnection(peer string, connection *webrtc.PeerCo
 	err := connection.Close()
 	after := connection.ConnectionState().String()
 	if err != nil {
-		s.logger.Warn("relay peer close failed", "peer", peer, "state_before", before, "state_after", after, "error", err)
+		s.logger.Warn("relay peer close failed", "peer", peer, "state_before", before, "state_after", after, "error_class", activityErrorNames[classifyActivityError(err)])
 		return err
 	}
 	s.logger.Info("relay peer closed", "peer", peer, "state_before", before, "state_after", after)
@@ -895,6 +921,13 @@ func (s *pionSession) closePeerConnection(peer string, connection *webrtc.PeerCo
 }
 
 func (s *pionSession) installPeerAHandler() {
+	if sctp := s.downstream.SCTP(); sctp != nil {
+		if dtls := sctp.Transport(); dtls != nil {
+			if transport := dtls.ICETransport(); transport != nil {
+				transport.OnSelectedCandidatePairChange(s.diag.selectedPairChanged)
+			}
+		}
+	}
 	s.downstream.OnConnectionStateChange(s.handlePeerAState)
 }
 
@@ -910,6 +943,7 @@ func (s *pionSession) handlePeerAState(state webrtc.PeerConnectionState) {
 		go s.diag.logDrop(logger, "relay peer disconnected", nil)
 	case webrtc.PeerConnectionStateFailed:
 		go s.diag.logDrop(logger, "relay peer failed", func() {
+			s.peerAFailedLogged.Store(true)
 			s.fail("peer_a_failed", errors.New("peer-a failed"))
 		})
 	case webrtc.PeerConnectionStateClosed:
@@ -975,10 +1009,10 @@ func (s *pionSession) legEnded(l *leg, reason string) {
 func (s *pionSession) fail(reason string, err error) {
 	s.failureOnce.Do(func() {
 		if err != nil {
-			s.logger.LogAttrs(context.Background(), slog.LevelWarn, "relay session failed", s.diag.sessionAttrs(slog.String("reason", reason), slog.Any("error", err))...)
+			s.logger.LogAttrs(context.Background(), slog.LevelWarn, "relay session failed", s.diag.sessionAttrs(slog.String("reason", reason), slog.String("error_class", activityErrorNames[classifyActivityError(err)]))...)
 		}
 		if errClose := s.CloseWithReason(reason); errClose != nil {
-			s.logger.Debug("relay: close failed session", "error", errClose)
+			s.logger.Debug("relay: close failed session", "error_class", activityErrorNames[classifyActivityError(errClose)])
 		}
 	})
 }
