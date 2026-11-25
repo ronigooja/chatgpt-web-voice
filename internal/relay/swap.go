@@ -113,6 +113,7 @@ func (s *pionSession) SendResultText(text string) (bool, error) {
 		return false, errSwapNotReady
 	}
 	err = l.channel.SendText(payload)
+	l.activity.dataWrite.sent(err, len(payload))
 	delivery := "sent"
 	if err != nil {
 		delivery = "unknown"
@@ -136,6 +137,7 @@ func (s *pionSession) SendPendingText(text string) error {
 		return err
 	}
 	err = l.channel.SendText(payload)
+	l.activity.dataWrite.sent(err, len(payload))
 	delivery := "sent"
 	if err != nil {
 		delivery = "unknown"
@@ -196,7 +198,7 @@ func (s *pionSession) CommitUpstreamSwap() (LegTermination, error) {
 
 	// From here the new leg carries audio and events. The old leg's tracks and
 	// channel are ignored by their readers, then closed.
-	retired := s.bridge.swapUpstream(next.channel)
+	retired := s.bridge.swapUpstream(next)
 	_ = retired
 	res := s.closeLeg(old, "swapped")
 	s.logger.Info("relay upstream leg swapped", "retired", old.name, "active", next.name, "clean", res.Clean())
