@@ -598,10 +598,16 @@ func (s *Service) bindVoiceSessionMedia(owner, sessionID, token string, account 
 				s.mu.Lock()
 				b := s.bindings[sessionID]
 				var sideband *avasSidebandWriter
+				var cancelSideband context.CancelFunc
 				if b != nil && b.media == media {
-					sideband = b.avasSideband
+					sideband, cancelSideband = b.avasSideband, b.avasCancel
 				}
 				s.mu.Unlock()
+				if cancelSideband != nil {
+					// The reader can still be waiting for the observer rather than the socket.
+					sideband.close()
+					cancelSideband()
+				}
 				if sideband != nil && !sideband.closeAndWait() {
 					if _, err := s.evidence.Close(mediaID, mediaevidence.Components{}, ownedEndReason(reason)); err != nil {
 						s.logger.Error("owned_call_unclean_sideband_evidence_failed", "gateway_session_id", sessionID)
