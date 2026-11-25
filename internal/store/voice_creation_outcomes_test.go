@@ -7,6 +7,44 @@ import (
 	"testing"
 )
 
+func TestRequestFenceMigrationPreservesExistingOwnedRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "before-request-fence.db")
+	sqlite, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = sqlite.Exec(`CREATE TABLE voice_creation_outcomes (
+		request_id TEXT NOT NULL, owner TEXT NOT NULL, outcome TEXT NOT NULL,
+		voice_session_id TEXT, media_generation INTEGER, created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL, attempt_id TEXT NOT NULL DEFAULT '', gateway_owned INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY(owner, request_id));
+		INSERT INTO voice_creation_outcomes VALUES
+		('owned', 'owner', 'established', 'session', 3, '2026-01-01', '2026-01-02', 'attempt', 1),
+		('unresolved', 'owner', 'unknown', NULL, NULL, '2026-01-01', '2026-01-02', 'unresolved-attempt', 1)`)
+	if err := errors.Join(err, sqlite.Close()); err != nil {
+		t.Fatal(err)
+	}
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	row, err := db.GetVoiceCreationOutcome("owner", "owned")
+	if err != nil || row.Outcome != "established" || row.AttemptID != "attempt" || row.VoiceSessionID.String != "session" ||
+		row.MediaGeneration.Int64 != 3 || row.CreatedAt != "2026-01-01" || row.UpdatedAt != "2026-01-02" {
+		t.Fatalf("outcome changed during migration: %+v, %v", row, err)
+	}
+	if outcome, _, err := db.FenceVoiceCreation("owner", "unresolved"); err != nil || outcome != VoiceCreationFencedNoLiveMedia {
+		t.Fatalf("existing unresolved claim was not fenced: %q %v", outcome, err)
+	}
+	if err := db.UpdateVoiceCreationOutcome("owner", "unresolved", "never_established", "", 0, "unresolved-attempt"); !errors.Is(err, ErrVoiceCreationAttemptStale) {
+		t.Fatalf("fenced claim was still mutable: %v", err)
+	}
+	if _, err := db.BeginVoiceCreationOutcome("owner", "unresolved"); !errors.Is(err, ErrVoiceCreationFenced) {
+		t.Fatalf("fenced claim could be reopened: %v", err)
+	}
+}
+
 func TestOwnedAttemptFenceSurvivesLegacyCleanupAndReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "fence.db")
 	db, err := Open(path)

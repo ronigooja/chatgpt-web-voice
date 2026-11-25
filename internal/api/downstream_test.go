@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -24,6 +26,99 @@ import (
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/store"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/voice"
 )
+
+func TestRequestFenceOwnerScopingAndContentFreeLogs(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "fence.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	svc := voice.New(config.Config{ZoeGatewayAPIKeyID: 1}, nil, nil).WithCreationOutcomes(db)
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	keys := apikeys.NewStore(db)
+	first, err := keys.Create("one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := keys.Create("two")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	New(Dependencies{Voice: svc, APIKeys: keys}).RegisterDownstream(mux)
+	h := logging.HTTPMiddleware(logger, auth.NewAPIKeyManager(keys, logger).Require(mux))
+	const requestID = "private_request_value"
+	path := "/v1/voice/requests/" + url.PathEscape(requestID) + "/fence"
+	post := func(key, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req.RemoteAddr = "203.0.113.23:51445"
+		req.Header.Set("User-Agent", "private_agent_value")
+		req.Header.Set("X-Request-ID", "private_header_value")
+		if key != "" {
+			req.Header.Set("Authorization", "Bearer "+key)
+		}
+		resp := httptest.NewRecorder()
+		h.ServeHTTP(resp, req)
+		return resp
+	}
+	for _, key := range []string{"", "private_invalid_credential"} {
+		if resp := post(key, ""); resp.Code != 401 {
+			t.Fatalf("unauthenticated status: %d", resp.Code)
+		}
+	}
+	if resp := post(first.Secret, "private_body_value"); resp.Code != 400 {
+		t.Fatalf("nonempty body status: %d", resp.Code)
+	}
+	claim, err := db.ClaimOwnedVoiceCreation("api_key:1", requestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateVoiceCreationOutcome("api_key:1", requestID, "never_established", "", 0, claim); err != nil {
+		t.Fatal(err)
+	}
+	getOutcome := func(key string) *httptest.ResponseRecorder {
+		return performDownstreamRequest(t, h, http.MethodGet, "/v1/voice/requests/"+requestID+"/outcome", key, nil)
+	}
+	if resp := getOutcome(second.Secret); resp.Code != 404 {
+		t.Fatalf("other owner saw outcome: %d", resp.Code)
+	}
+	logs.Reset()
+	for _, tc := range []struct{ key, result string }{
+		{second.Secret, "fenced_no_live_media"}, {second.Secret, "fenced_no_live_media"}, {first.Secret, "never_established"},
+	} {
+		resp := post(tc.key, "")
+		var body map[string]string
+		if err := json.Unmarshal(resp.Body.Bytes(), &body); resp.Code != 200 || err != nil || len(body) != 2 || body["result"] != tc.result || body["request_id"] != requestID {
+			t.Fatalf("fence response status=%d result=%q decode=%v", resp.Code, body["result"], err)
+		}
+	}
+	if _, err := db.ClaimOwnedVoiceCreation("api_key:1", requestID); !errors.Is(err, store.ErrVoiceCreationAttemptStale) {
+		t.Fatalf("other owner changed the original claim: %v", err)
+	}
+	if _, err := db.ClaimOwnedVoiceCreation("api_key:2", requestID); !errors.Is(err, store.ErrVoiceCreationFenced) {
+		t.Fatalf("missing claim was not fenced: %v", err)
+	}
+	if _, err := db.Conn().Exec(`CREATE TRIGGER fail_fence BEFORE INSERT ON voice_creation_outcomes BEGIN SELECT RAISE(FAIL, 'private_db_error https://sensitive.invalid'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if resp := post(first.Secret, "private_body_value"); resp.Code != 400 {
+		t.Fatalf("invalid request status: %d", resp.Code)
+	}
+	if resp := post("private_invalid_credential", ""); resp.Code != 401 {
+		t.Fatalf("invalid credential status: %d", resp.Code)
+	}
+	path = "/v1/voice/requests/private_pending/fence"
+	if resp := post(first.Secret, ""); resp.Code != 503 {
+		t.Fatalf("failed fence status: %d", resp.Code)
+	}
+	for _, sensitive := range []string{requestID, "private_pending", "private_agent_value", "private_header_value", "private_db_error", "private_body_value", "private_invalid_credential", "203.0.113.23", "51445", "https://sensitive.invalid", first.Secret, second.Secret} {
+		if strings.Contains(logs.String(), sensitive) {
+			t.Fatal("fence logs contain sensitive input")
+		}
+	}
+}
 
 func TestRealHTTPMuxNoUsablePoolPersistsNeverEstablished(t *testing.T) {
 	for _, state := range []string{"empty", "expired", "cooling", "disabled"} {

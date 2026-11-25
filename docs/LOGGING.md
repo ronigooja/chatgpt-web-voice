@@ -81,6 +81,11 @@ fields are null (or omitted by the log handler).
 `rejection_status` is present for an explicit Zoe or sideband 4xx/5xx response;
 AVAS POST status is already recorded in `upstream_last_status`.
 
+Request-fence access logs use a static route and a server-generated correlation
+ID; they omit caller request IDs, user agents, remote addresses, and bodies.
+`voice_request_fence_failed` records only the `fence_unavailable` error class.
+`busy` is a normal retryable response, not an upstream error or proof of release.
+
 Audio facts remain in generation metadata. Optional audio file capture is disabled by default; see the README environment table. Captures contain sensitive call audio. WAV files use mono 16-bit PCM at 24 kHz, inferred from observed frame sizes and duration. No silence is inserted. A crash can leave a header with zero data size. Files are stored under `<dir>/<session>/gen<N>/`, for example `20261125T001500.123Z_session_gen1_in.wav`; file names use UTC and a sanitized session identifier. Oldest finished files are removed when the configured byte limit is exceeded; open files are never removed.
 
 Frames dropped when the capture queue is full are not replaced by silence, so a file may be shorter than the wall-clock span between its timestamp and the next file’s timestamp. The 24000 Hz sample rate is inferred from observed audio frames.
