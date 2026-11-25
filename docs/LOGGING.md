@@ -17,7 +17,8 @@ pairs, and counter resets do not count as zero. Selected-pair packet ages refer
 to application packets. `sampler_lateness_ms` measures how late the last tick
 was handled, not transport delay. Candidate details are limited to protocol and
 address family. A snapshot can be unavailable even when gateway activity is
-known; a failure waits at most one second for stats before teardown.
+known; a failure waits at most one second for stats before teardown. Gateway
+writes count successful local API calls, not remote delivery acknowledgments.
 
 Audio facts remain in generation metadata. Optional audio file capture is disabled by default; see the README environment table. Captures contain sensitive call audio. WAV files use mono 16-bit PCM at 24 kHz, inferred from observed frame sizes and duration. No silence is inserted. A crash can leave a header with zero data size. Files are stored under `<dir>/<session>/gen<N>/`, for example `20261125T001500.123Z_session_gen1_in.wav`; file names use UTC and a sanitized session identifier. Oldest finished files are removed when the configured byte limit is exceeded; open files are never removed.
 

@@ -166,9 +166,9 @@ type channelStats struct {
 // memory; neither IDs nor the original library report are logged.
 type peerStats struct {
 	ice, dtls, sctp, dataState string
-	pair                      *pairStats
-	inbound                   *inboundRTPStats
-	channel                   *channelStats
+	pair                       *pairStats
+	inbound                    *inboundRTPStats
+	channel                    *channelStats
 }
 
 type peerStatsProvider interface {

@@ -165,7 +165,8 @@ func TestPeerDiagnosticWarningsAndFailureOrdering(t *testing.T) {
 			sink := make(peerLogSink, 12)
 			logger := slog.New(slog.NewJSONHandler(sink, nil)).With("media_session_id", "test-session")
 			s := &pionSession{logger: logger, done: make(chan struct{})}
-			s.diag = newPeerDiagnostics(s.done, time.Now)
+			const baseMS = 1700000000000
+			s.diag = newPeerDiagnostics(s.done, func() time.Time { return time.UnixMilli(baseMS + 200) })
 			s.diag.addLeg("peer-b7")
 			started, release := make(chan struct{}), make(chan struct{})
 			defer func() {
@@ -184,10 +185,11 @@ func TestPeerDiagnosticWarningsAndFailureOrdering(t *testing.T) {
 				sample := peerStats{ice: state.String(), dtls: "connected", sctp: "connected", dataState: "open"}
 				sample.addReport(webrtc.StatsReport{
 					candidateID: webrtc.ICECandidateStats{Protocol: "udp", IP: ip, Port: port, URL: url},
-					"audio": webrtc.InboundRTPStreamStats{Kind: "audio", PacketsReceived: 52, PacketsLost: -2, Jitter: .007, BytesReceived: 1400},
+					"audio": webrtc.InboundRTPStreamStats{Kind: "audio", PacketsReceived: 52, PacketsLost: -2, Jitter: .007, BytesReceived: 1400, LastPacketReceivedTimestamp: baseMS + 100},
 				}, webrtc.ICECandidatePairStats{
 					ID: candidateID, RemoteCandidateID: candidateID, State: webrtc.StatsICECandidatePairStateSucceeded,
 					Nominated: true, PacketsSent: 53, PacketsReceived: 54, BytesSent: 200, BytesReceived: 204,
+					LastPacketSentTimestamp: baseMS + 160, LastPacketReceivedTimestamp: baseMS + 90,
 				}, true, webrtc.DataChannelStats{ID: secret, Label: secret, MessagesSent: 2, MessagesReceived: 3}, true)
 				captured.Store(!s.diag.closed())
 				return sample, nil
@@ -198,13 +200,17 @@ func TestPeerDiagnosticWarningsAndFailureOrdering(t *testing.T) {
 				t.Fatal("session closed before the snapshot completed")
 			}
 			close(release)
-			line := receiveDiag(t, sink)
+			log := decodeDiag(t, receiveDiag(t, sink))
+			delete(log, "time") // A wall-clock log timestamp can randomly contain the test port digits.
+			line, err := json.Marshal(log)
+			if err != nil {
+				t.Fatal(err)
+			}
 			for _, private := range []string{candidateID, ip, "55201", url, secret} {
-				if strings.Contains(line, private) {
+				if strings.Contains(string(line), private) {
 					t.Errorf("diagnostics exposed %q: %s", private, line)
 				}
 			}
-			log := decodeDiag(t, line)
 			for key, want := range map[string]any{
 				"level": "WARN", "msg": "relay peer " + state.String(), "peer": "peer-a",
 				"state": state.String(), "media_session_id": "test-session", "snapshot": "available",
@@ -214,10 +220,10 @@ func TestPeerDiagnosticWarningsAndFailureOrdering(t *testing.T) {
 				"selected_pair.packets_sent": float64(53), "selected_pair.packets_received": float64(54),
 				"selected_pair.bytes_sent": float64(200), "selected_pair.bytes_received": float64(204),
 				"selected_pair.packets_sent_delta": diagUnavailable, "selected_pair.bytes_received_delta": diagUnavailable,
-				"selected_pair.application_last_packet_sent_age_ms": diagUnavailable,
-				"selected_pair.application_last_packet_received_age_ms": diagUnavailable,
+				"selected_pair.application_last_packet_sent_age_ms": float64(40),
+				"selected_pair.application_last_packet_received_age_ms": float64(110),
 				"inbound_rtp.packets_received": float64(52), "inbound_rtp.packets_lost": float64(-2), "inbound_rtp.jitter_ms": float64(7),
-				"inbound_rtp.last_packet_received_age_ms": diagUnavailable,
+				"inbound_rtp.last_packet_received_age_ms": float64(100),
 				"datachannel.messages_sent": float64(2), "datachannel.messages_received": float64(3),
 				"datachannel.bytes_sent_delta": diagUnavailable, "datachannel.messages_received_delta": diagUnavailable,
 				"gateway_activity.peer_a.rtp.last_read_age_ms": diagUnavailable,
