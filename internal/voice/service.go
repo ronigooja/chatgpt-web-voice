@@ -2471,8 +2471,8 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 					upstreamForWM.ConversationState = "new"
 					upstreamForWM.ConversationReason = "upstream_refused"
 					sessionJSON = buildSessionJSON(voice, options.VoiceMode, options.LanguageCode, upstreamForWM)
-				closeMediaOnFailure("upstream_refused")
-				continue
+					closeMediaOnFailure("upstream_refused")
+					continue
 				}
 				closeMediaOnFailure("upstream_rejected")
 				s.logger.Debug("voice_create_rejected", "upstream_status", status, "upstream_body_bytes", len(text), "account_id", account.ID, "attempt", attempt)

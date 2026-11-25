@@ -157,12 +157,12 @@ func TestOwnedCreationFailureDiagnostics(t *testing.T) {
 		})
 	}
 	const (
-		none = 0
-		clean = 1
+		none    = 0
+		clean   = 1
 		unclean = 2
 	)
 	for _, tc := range []struct {
-		name, script   string
+		name, script  string
 		accounts      int
 		change        func(*testing.T, *Service, *store.DB, *fakeRelay, *ClientDialRequest)
 		stage, class  string
@@ -173,16 +173,26 @@ func TestOwnedCreationFailureDiagnostics(t *testing.T) {
 		badWrite      bool
 	}{
 		{name: "unready", change: func(_ *testing.T, s *Service, _ *store.DB, _ *fakeRelay, _ *ClientDialRequest) { s.zoeToken = "" }, stage: "admission", class: "internal"},
-		{name: "stopping", change: func(_ *testing.T, s *Service, _ *store.DB, _ *fakeRelay, _ *ClientDialRequest) { s.ownedStopping = true }, stage: "admission", class: "internal"},
+		{name: "stopping", change: func(_ *testing.T, s *Service, _ *store.DB, _ *fakeRelay, _ *ClientDialRequest) {
+			s.ownedStopping = true
+		}, stage: "admission", class: "internal"},
 		{name: "Zoe rejects", change: func(_ *testing.T, s *Service, _ *store.DB, _ *fakeRelay, _ *ClientDialRequest) { setZoe(s, 401, leak) }, stage: "zoe_start", class: "http_4xx"},
 		{name: "Zoe unavailable", change: func(_ *testing.T, s *Service, _ *store.DB, _ *fakeRelay, _ *ClientDialRequest) { setZoe(s, 503, leak) }, stage: "zoe_start", class: "http_5xx"},
-		{name: "Zoe quarantine", change: func(_ *testing.T, s *Service, _ *store.DB, _ *fakeRelay, _ *ClientDialRequest) { setZoe(s, 503, `{"error":{"code":"voice_pool_quarantined"}}`) }, stage: "zoe_start", class: "pool_quarantined"},
+		{name: "Zoe quarantine", change: func(_ *testing.T, s *Service, _ *store.DB, _ *fakeRelay, _ *ClientDialRequest) {
+			setZoe(s, 503, `{"error":{"code":"voice_pool_quarantined"}}`)
+		}, stage: "zoe_start", class: "pool_quarantined"},
 		{name: "Zoe unexpected status", change: func(_ *testing.T, s *Service, _ *store.DB, _ *fakeRelay, _ *ClientDialRequest) { setZoe(s, 302, leak) }, stage: "zoe_start", class: "unexpected_status"},
 		{name: "Zoe malformed JSON", change: func(_ *testing.T, s *Service, _ *store.DB, _ *fakeRelay, _ *ClientDialRequest) { setZoe(s, 201, leak) }, stage: "zoe_start", class: "malformed_response"},
 		{name: "Zoe missing identity", change: func(_ *testing.T, s *Service, _ *store.DB, _ *fakeRelay, _ *ClientDialRequest) { setZoe(s, 201, `{}`) }, stage: "zoe_start", class: "malformed_response"},
-		{name: "Zoe canceled", change: func(_ *testing.T, s *Service, _ *store.DB, _ *fakeRelay, _ *ClientDialRequest) { setZoeError(s, context.Canceled) }, stage: "zoe_start", class: "context_canceled"},
-		{name: "Zoe TLS", change: func(_ *testing.T, s *Service, _ *store.DB, _ *fakeRelay, _ *ClientDialRequest) { setZoeError(s, &tls.CertificateVerificationError{Err: errors.New(leak)}) }, stage: "zoe_start", class: "tls"},
-		{name: "Zoe refused", change: func(_ *testing.T, s *Service, _ *store.DB, _ *fakeRelay, _ *ClientDialRequest) { setZoeError(s, syscall.ECONNREFUSED) }, stage: "zoe_start", class: "transport_refused"},
+		{name: "Zoe canceled", change: func(_ *testing.T, s *Service, _ *store.DB, _ *fakeRelay, _ *ClientDialRequest) {
+			setZoeError(s, context.Canceled)
+		}, stage: "zoe_start", class: "context_canceled"},
+		{name: "Zoe TLS", change: func(_ *testing.T, s *Service, _ *store.DB, _ *fakeRelay, _ *ClientDialRequest) {
+			setZoeError(s, &tls.CertificateVerificationError{Err: errors.New(leak)})
+		}, stage: "zoe_start", class: "tls"},
+		{name: "Zoe refused", change: func(_ *testing.T, s *Service, _ *store.DB, _ *fakeRelay, _ *ClientDialRequest) {
+			setZoeError(s, syscall.ECONNREFUSED)
+		}, stage: "zoe_start", class: "transport_refused"},
 		{name: "claim write", change: func(t *testing.T, _ *Service, db *store.DB, _ *fakeRelay, _ *ClientDialRequest) {
 			fixtureSQL(t, db, `CREATE TRIGGER fail_claim BEFORE INSERT ON voice_creation_outcomes BEGIN SELECT RAISE(FAIL, '`+leak+`'); END`)
 		}, stage: "creation_claim", class: "db_write_failed"},
@@ -199,16 +209,24 @@ func TestOwnedCreationFailureDiagnostics(t *testing.T) {
 		{name: "reservation evidence", accounts: 1, change: func(t *testing.T, _ *Service, db *store.DB, _ *fakeRelay, _ *ClientDialRequest) {
 			fixtureSQL(t, db, `CREATE TRIGGER fail_reserve BEFORE INSERT ON voice_media_sessions BEGIN SELECT RAISE(FAIL, '`+leak+`'); END`)
 		}, stage: "account_reservation", class: "evidence_failed", outcome: "unknown"},
-		{name: "capacity", accounts: 1, change: func(_ *testing.T, _ *Service, _ *store.DB, r *fakeRelay, _ *ClientDialRequest) { r.newErr = relay.ErrCapacity }, stage: "relay_construct", class: "capacity", outcome: "never_established"},
-		{name: "relay construction", accounts: 1, change: func(_ *testing.T, _ *Service, _ *store.DB, r *fakeRelay, _ *ClientDialRequest) { r.newErr = errors.Join(relay.ErrCreateAfterStart, errors.New(leak)) }, stage: "relay_construct", class: "internal", outcome: "unknown", started: true, closure: unclean},
-		{name: "relay offer", accounts: 1, change: func(_ *testing.T, _ *Service, _ *store.DB, r *fakeRelay, _ *ClientDialRequest) { r.newErr = errors.Join(relay.ErrApplyOffer, relay.ErrCreateClean, errors.New(leak)) }, stage: "relay_apply_offer", class: "validation", outcome: "never_established", started: true, closure: unclean},
+		{name: "capacity", accounts: 1, change: func(_ *testing.T, _ *Service, _ *store.DB, r *fakeRelay, _ *ClientDialRequest) {
+			r.newErr = relay.ErrCapacity
+		}, stage: "relay_construct", class: "capacity", outcome: "never_established"},
+		{name: "relay construction", accounts: 1, change: func(_ *testing.T, _ *Service, _ *store.DB, r *fakeRelay, _ *ClientDialRequest) {
+			r.newErr = errors.Join(relay.ErrCreateAfterStart, errors.New(leak))
+		}, stage: "relay_construct", class: "internal", outcome: "unknown", started: true, closure: unclean},
+		{name: "relay offer", accounts: 1, change: func(_ *testing.T, _ *Service, _ *store.DB, r *fakeRelay, _ *ClientDialRequest) {
+			r.newErr = errors.Join(relay.ErrApplyOffer, relay.ErrCreateClean, errors.New(leak))
+		}, stage: "relay_apply_offer", class: "validation", outcome: "never_established", started: true, closure: unclean},
 		{name: "upstream timeout", accounts: 1, script: `printf '%s' '` + leak + `' >&2; exit 28`, stage: "upstream_post", class: "transport_timeout", outcome: "unknown", posts: 1, started: true, closure: unclean},
 		{name: "upstream empty response", accounts: 1, script: `printf '%s' '` + leak + `' >&2; exit 52`, stage: "upstream_post", class: "transport_eof", outcome: "unknown", posts: 1, started: true, closure: unclean},
 		{name: "upstream truncated rejection", accounts: 1, script: ownedRejection + `; exit 18`, stage: "upstream_response", class: "transport_eof", outcome: "unknown", posts: 1, status: 429, started: true, closure: unclean},
 		{name: "upstream oversized rejection", accounts: 1, script: ownedRejection + `; head -c 2097153 /dev/zero`, stage: "upstream_response", class: "malformed_response", outcome: "unknown", posts: 1, status: 429, started: true, closure: unclean},
 		{name: "upstream unexpected status", accounts: 1, script: `printf 'HTTP/1.1 200 OK\r\n\r\nv=0\r\n'`, stage: "upstream_response", class: "unexpected_status", outcome: "unknown", posts: 1, status: 200, started: true, closure: unclean},
 		{name: "upstream malformed SDP", accounts: 1, script: `printf 'HTTP/1.1 201 Created\r\n\r\n%s\n' '` + leak + `'`, stage: "upstream_response", class: "malformed_response", outcome: "unknown", posts: 1, status: 201, started: true, closure: unclean},
-		{name: "explicit 5xx at limit", accounts: 1, script: `printf 'HTTP/1.1 503 Service Unavailable\r\n\r\n%s\n' '` + leak + `'`, change: func(_ *testing.T, s *Service, _ *store.DB, _ *fakeRelay, _ *ClientDialRequest) { s.cfg.MaxAccountAttempts = 1 }, stage: "upstream_response", class: "http_5xx", outcome: "never_established", posts: 1, status: 503, started: true, closure: clean},
+		{name: "explicit 5xx at limit", accounts: 1, script: `printf 'HTTP/1.1 503 Service Unavailable\r\n\r\n%s\n' '` + leak + `'`, change: func(_ *testing.T, s *Service, _ *store.DB, _ *fakeRelay, _ *ClientDialRequest) {
+			s.cfg.MaxAccountAttempts = 1
+		}, stage: "upstream_response", class: "http_5xx", outcome: "never_established", posts: 1, status: 503, started: true, closure: clean},
 		{name: "explicit 429 then exhaustion", accounts: 1, script: ownedRejection, stage: "account_reservation", class: "pool_no_account", outcome: "never_established", posts: 1, status: 429, started: true, closure: clean},
 		{name: "explicit 429 without durable evidence", accounts: 1, script: ownedRejection, change: func(t *testing.T, _ *Service, db *store.DB, _ *fakeRelay, _ *ClientDialRequest) {
 			fixtureSQL(t, db, `CREATE TRIGGER fail_evidence BEFORE INSERT ON voice_termination_evidence BEGIN SELECT RAISE(FAIL, '`+leak+`'); END`)

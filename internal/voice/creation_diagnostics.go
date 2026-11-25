@@ -36,23 +36,23 @@ const (
 )
 
 const (
-	classTimeout            creationErrorClass = "transport_timeout"
-	classRefused            creationErrorClass = "transport_refused"
-	classEOF                creationErrorClass = "transport_eof"
-	classTLS                creationErrorClass = "tls"
-	classHTTP4xx            creationErrorClass = "http_4xx"
-	classHTTP5xx            creationErrorClass = "http_5xx"
+	classTimeout           creationErrorClass = "transport_timeout"
+	classRefused           creationErrorClass = "transport_refused"
+	classEOF               creationErrorClass = "transport_eof"
+	classTLS               creationErrorClass = "tls"
+	classHTTP4xx           creationErrorClass = "http_4xx"
+	classHTTP5xx           creationErrorClass = "http_5xx"
 	classMalformedResponse creationErrorClass = "malformed_response"
 	classUnexpectedStatus  creationErrorClass = "unexpected_status"
-	classCanceled           creationErrorClass = "context_canceled"
-	classDBWriteFailed      creationErrorClass = "db_write_failed"
-	classEvidence           creationErrorClass = "evidence_failed"
-	classNoAccount          creationErrorClass = "pool_no_account"
-	classQuarantined        creationErrorClass = "pool_quarantined"
-	classCapacity           creationErrorClass = "capacity"
-	classValidation         creationErrorClass = "validation"
-	classInternal           creationErrorClass = "internal"
-	classReplay             creationErrorClass = "claim_conflict"
+	classCanceled          creationErrorClass = "context_canceled"
+	classDBWriteFailed     creationErrorClass = "db_write_failed"
+	classEvidence          creationErrorClass = "evidence_failed"
+	classNoAccount         creationErrorClass = "pool_no_account"
+	classQuarantined       creationErrorClass = "pool_quarantined"
+	classCapacity          creationErrorClass = "capacity"
+	classValidation        creationErrorClass = "validation"
+	classInternal          creationErrorClass = "internal"
+	classReplay            creationErrorClass = "claim_conflict"
 )
 
 // Owned by the dialing goroutine. No request or error strings are stored here.
