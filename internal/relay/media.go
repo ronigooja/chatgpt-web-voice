@@ -276,7 +276,6 @@ type dataChannelPipe struct {
 type dataChannelBridge struct {
 	done           <-chan struct{}
 	logger         *slog.Logger
-	onClientClose  func()
 	clientActivity *peerActivity
 	downToUp       *dataChannelPipe
 	upToDown       *dataChannelPipe
@@ -284,6 +283,7 @@ type dataChannelBridge struct {
 	closeErr       error
 	downstreamMu   sync.Mutex
 	downstream     *webrtc.DataChannel
+	onClientClose  func() // guarded by downstreamMu
 	upstreamMu     sync.Mutex
 	upstream       *webrtc.DataChannel
 
@@ -446,7 +446,7 @@ func (r *PionRelay) NewSession(ctx context.Context, clientOffer string, route Ro
 	session.diag = newPeerDiagnostics(session.done, time.Now)
 	session.diag.stats = pionPeerStats{pc: downstream, bridge: session.bridge}
 	session.bridge.clientActivity = &session.diag.client
-	session.bridge.onClientClose = func() { _ = session.CloseWithReason("client_data_channel_closed") }
+	session.bridge.setClientCloseHandler(func() { _ = session.CloseWithReason("client_data_channel_closed") })
 	session.bridge.setObserver(session.observeEvent)
 	session.bridge.capture = session.capture
 	if session.shapeSampler != nil {
@@ -1107,6 +1107,12 @@ func (b *dataChannelBridge) attachDownstream(channel *webrtc.DataChannel) {
 	b.bindSource(channel, b.downToUp)
 }
 
+func (b *dataChannelBridge) setClientCloseHandler(handler func()) {
+	b.downstreamMu.Lock()
+	b.onClientClose = handler
+	b.downstreamMu.Unlock()
+}
+
 func (b *dataChannelBridge) attachUpstream(l *leg) {
 	channel := l.channel
 	b.upstreamMu.Lock()
@@ -1252,8 +1258,11 @@ func (b *dataChannelBridge) bindSource(channel *webrtc.DataChannel, destination 
 		case <-b.done:
 			return
 		default:
-			if b.onClientClose != nil {
-				b.onClientClose()
+			b.downstreamMu.Lock()
+			handler := b.onClientClose
+			b.downstreamMu.Unlock()
+			if handler != nil {
+				handler()
 			} else {
 				destination.reportError(fmt.Errorf("%s DataChannel closed", destination.name))
 			}

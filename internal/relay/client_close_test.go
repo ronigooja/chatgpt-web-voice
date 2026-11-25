@@ -86,7 +86,7 @@ func TestUpstreamDataChannelCloseIsFailure(t *testing.T) {
 
 func TestClientDataChannelCloseWithoutHookIsFailure(t *testing.T) {
 	g := connect(t, newRelay(t, 1))
-	g.session.(*pionSession).bridge.onClientClose = nil
+	g.session.(*pionSession).bridge.setClientCloseHandler(nil)
 	reason := make(chan string, 1)
 	g.session.SetCloseHandler(func(s string) { reason <- s })
 	if err := g.events.Close(); err != nil {
