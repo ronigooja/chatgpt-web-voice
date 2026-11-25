@@ -102,6 +102,7 @@ func (l *sessionLimiter) release() {
 // readiness. A session has one active leg; a swap builds a second one first.
 type leg struct {
 	name        string
+	activity    *peerActivity
 	pc          *webrtc.PeerConnection
 	toUpstream  *webrtc.TrackLocalStaticRTP
 	channel     *webrtc.DataChannel
@@ -128,6 +129,7 @@ type leg struct {
 type pionSession struct {
 	downstream *webrtc.PeerConnection
 	bridge     *dataChannelBridge
+	diag       *peerDiagnostics
 	logger     *slog.Logger
 	toClient   *webrtc.TrackLocalStaticRTP
 
@@ -257,31 +259,33 @@ type dataChannelMessage struct {
 }
 
 type dataChannelPipe struct {
-	name        string
-	done        <-chan struct{}
-	queue       chan dataChannelMessage
-	ready       chan struct{}
-	readyOnce   sync.Once
-	writable    chan struct{}
-	destination *webrtc.DataChannel
-	mu          sync.RWMutex
-	onError     func(error)
-	onOpen      func()
-	logger      *slog.Logger
+	name          string
+	done          <-chan struct{}
+	queue         chan dataChannelMessage
+	ready         chan struct{}
+	readyOnce     sync.Once
+	writable      chan struct{}
+	destination   *webrtc.DataChannel
+	writeActivity *trafficActivity // guarded by mu with destination
+	mu            sync.RWMutex
+	onError       func(error)
+	onOpen        func()
+	logger        *slog.Logger
 }
 
 type dataChannelBridge struct {
-	done          <-chan struct{}
-	logger        *slog.Logger
-	onClientClose func()
-	downToUp      *dataChannelPipe
-	upToDown      *dataChannelPipe
-	closeOnce     sync.Once
-	closeErr      error
-	downstreamMu  sync.Mutex
-	downstream    *webrtc.DataChannel
-	upstreamMu    sync.Mutex
-	upstream      *webrtc.DataChannel
+	done           <-chan struct{}
+	logger         *slog.Logger
+	clientActivity *peerActivity
+	downToUp       *dataChannelPipe
+	upToDown       *dataChannelPipe
+	closeOnce      sync.Once
+	closeErr       error
+	downstreamMu   sync.Mutex
+	downstream     *webrtc.DataChannel
+	onClientClose  func() // guarded by downstreamMu
+	upstreamMu     sync.Mutex
+	upstream       *webrtc.DataChannel
 
 	observeMu    sync.RWMutex
 	observe      func([]byte)
@@ -439,7 +443,10 @@ func (r *PionRelay) NewSession(ctx context.Context, clientOffer string, route Ro
 	session.bridge = newDataChannelBridge(session.done, session.logger, func(err error) {
 		session.fail("data_channel_failed", err)
 	}, session.markActiveChannelOpen)
-	session.bridge.onClientClose = func() { _ = session.CloseWithReason("client_data_channel_closed") }
+	session.diag = newPeerDiagnostics(session.done, time.Now)
+	session.diag.stats = pionPeerStats{pc: downstream, bridge: session.bridge}
+	session.bridge.clientActivity = &session.diag.client
+	session.bridge.setClientCloseHandler(func() { _ = session.CloseWithReason("client_data_channel_closed") })
 	session.bridge.setObserver(session.observeEvent)
 	session.bridge.capture = session.capture
 	if session.shapeSampler != nil {
@@ -497,7 +504,7 @@ func (r *PionRelay) NewSession(ctx context.Context, clientOffer string, route Ro
 	session.legMu.Lock()
 	session.active = first
 	session.legMu.Unlock()
-	session.bridge.attachUpstream(first.channel)
+	session.bridge.attachUpstream(first)
 	return session, offer, nil
 }
 
@@ -529,6 +536,7 @@ func (s *pionSession) buildLeg(ctx context.Context, route Route) (*leg, string, 
 	s.legMu.Unlock()
 	l := &leg{
 		name:        name,
+		activity:    s.diag.addLeg(name),
 		pc:          pc,
 		proxyDialer: dialer,
 		proxyScheme: proxyScheme(route.ProxyURL),
@@ -810,9 +818,9 @@ func (s *pionSession) CloseWithReason(reason string) error {
 		}
 		s.closeErr = errors.Join(errs...)
 		if s.closeErr != nil {
-			s.logger.Warn("relay session closed with errors", "reason", reason, "error", s.closeErr)
+			s.logger.LogAttrs(context.Background(), slog.LevelWarn, "relay session closed with errors", s.diag.sessionAttrs(slog.String("reason", reason), slog.Any("error", s.closeErr))...)
 		} else {
-			s.logger.Info("relay session closed", "reason", reason)
+			s.logger.LogAttrs(context.Background(), slog.LevelInfo, "relay session closed", s.diag.sessionAttrs(slog.String("reason", reason))...)
 		}
 		s.mu.Lock()
 		s.termination = result
@@ -887,30 +895,34 @@ func (s *pionSession) closePeerConnection(peer string, connection *webrtc.PeerCo
 }
 
 func (s *pionSession) installPeerAHandler() {
-	s.downstream.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		logger := s.logger.With("peer", "peer-a", "state", state.String())
-		switch state {
-		case webrtc.PeerConnectionStateConnecting:
-			logger.Info("relay peer connecting")
-		case webrtc.PeerConnectionStateConnected:
-			logger.Info("relay peer connected")
-		case webrtc.PeerConnectionStateDisconnected:
-			logger.Warn("relay peer disconnected")
-		case webrtc.PeerConnectionStateFailed:
-			logger.Warn("relay peer failed")
-			go s.fail("peer_a_failed", errors.New("peer-a failed"))
-		case webrtc.PeerConnectionStateClosed:
-			select {
-			case <-s.done:
-				return
-			default:
-				logger.Info("relay peer closed by remote")
-				go s.fail("peer_a_closed", errors.New("peer-a closed"))
-			}
+	s.downstream.OnConnectionStateChange(s.handlePeerAState)
+}
+
+func (s *pionSession) handlePeerAState(state webrtc.PeerConnectionState) {
+	logger := s.logger.With("peer", "peer-a", "state", state.String())
+	switch state {
+	case webrtc.PeerConnectionStateConnecting:
+		logger.Info("relay peer connecting")
+	case webrtc.PeerConnectionStateConnected:
+		logger.Info("relay peer connected")
+		s.diag.startSampler(s.logger.With("peer", "peer-a"))
+	case webrtc.PeerConnectionStateDisconnected:
+		go s.diag.logDrop(logger, "relay peer disconnected", nil)
+	case webrtc.PeerConnectionStateFailed:
+		go s.diag.logDrop(logger, "relay peer failed", func() {
+			s.fail("peer_a_failed", errors.New("peer-a failed"))
+		})
+	case webrtc.PeerConnectionStateClosed:
+		select {
+		case <-s.done:
+			return
 		default:
-			logger.Debug("relay peer state changed")
+			logger.Info("relay peer closed by remote")
+			go s.fail("peer_a_closed", errors.New("peer-a closed"))
 		}
-	})
+	default:
+		logger.Debug("relay peer state changed")
+	}
 }
 
 // installLegHandlers wires peer B state changes for one leg. A failure of the
@@ -963,7 +975,7 @@ func (s *pionSession) legEnded(l *leg, reason string) {
 func (s *pionSession) fail(reason string, err error) {
 	s.failureOnce.Do(func() {
 		if err != nil {
-			s.logger.Warn("relay session failed", "reason", reason, "error", err)
+			s.logger.LogAttrs(context.Background(), slog.LevelWarn, "relay session failed", s.diag.sessionAttrs(slog.String("reason", reason), slog.Any("error", err))...)
 		}
 		if errClose := s.CloseWithReason(reason); errClose != nil {
 			s.logger.Debug("relay: close failed session", "error", errClose)
@@ -976,18 +988,25 @@ func (s *pionSession) relayClientRTP(source *webrtc.TrackRemote) {
 	for {
 		packet, _, err := source.ReadRTP()
 		if err != nil {
+			s.diag.client.rtpRead.failure(time.Now(), classifyActivityError(err))
 			if !isClosedMediaError(err, s.done) {
 				s.logger.Debug("relay: RTP read stopped", "direction", "a-to-b", "error", err)
 			}
 			return
 		}
+		s.diag.client.rtpRead.success(time.Now())
 		normalizeRTPPacket(packet)
 		l := s.activeLeg()
 		if l == nil || l.toUpstream == nil {
 			continue
 		}
-		if err := l.toUpstream.WriteRTP(packet); err != nil && !isClosedMediaError(err, s.done) {
-			s.logger.Debug("relay: RTP write failed", "direction", "a-to-b", "leg", l.name, "error", err)
+		if err := l.toUpstream.WriteRTP(packet); err != nil {
+			l.activity.rtpWrite.failure(time.Now(), classifyActivityError(err))
+			if !isClosedMediaError(err, s.done) {
+				s.logger.Debug("relay: RTP write failed", "direction", "a-to-b", "leg", l.name, "error", err)
+			}
+		} else {
+			l.activity.rtpWrite.success(time.Now())
 		}
 	}
 }
@@ -999,22 +1018,26 @@ func (s *pionSession) relayUpstreamRTP(l *leg, source int, track *webrtc.TrackRe
 	for {
 		packet, _, err := track.ReadRTP()
 		if err != nil {
+			l.activity.rtpRead.failure(time.Now(), classifyActivityError(err))
 			if !isClosedMediaError(err, s.done) {
 				s.logger.Debug("relay: RTP read stopped", "direction", "b-to-a", "leg", l.name, "error", err)
 			}
 			return
 		}
+		l.activity.rtpRead.success(time.Now())
 		if s.activeLeg() != l {
 			continue
 		}
 		normalizeRTPPacket(packet)
 		s.toClientRewrite.rewrite(source, packet)
 		if err := s.toClient.WriteRTP(packet); err != nil {
+			s.diag.client.rtpWrite.failure(time.Now(), classifyActivityError(err))
 			if !isClosedMediaError(err, s.done) {
 				s.logger.Debug("relay: RTP write stopped", "direction", "b-to-a", "leg", l.name, "error", err)
 			}
 			return
 		}
+		s.diag.client.rtpWrite.success(time.Now())
 	}
 }
 
@@ -1080,11 +1103,18 @@ func (b *dataChannelBridge) attachDownstream(channel *webrtc.DataChannel) {
 	}
 	b.downstream = channel
 	b.downstreamMu.Unlock()
-	b.upToDown.setDestination(channel)
+	b.upToDown.setDestination(channel, &b.clientActivity.dataWrite)
 	b.bindSource(channel, b.downToUp)
 }
 
-func (b *dataChannelBridge) attachUpstream(channel *webrtc.DataChannel) {
+func (b *dataChannelBridge) setClientCloseHandler(handler func()) {
+	b.downstreamMu.Lock()
+	b.onClientClose = handler
+	b.downstreamMu.Unlock()
+}
+
+func (b *dataChannelBridge) attachUpstream(l *leg) {
+	channel := l.channel
 	b.upstreamMu.Lock()
 	if b.upstream != nil {
 		b.upstreamMu.Unlock()
@@ -1095,8 +1125,8 @@ func (b *dataChannelBridge) attachUpstream(channel *webrtc.DataChannel) {
 	}
 	b.upstream = channel
 	b.upstreamMu.Unlock()
-	b.downToUp.setDestination(channel)
-	b.bindUpstreamSource(channel)
+	b.downToUp.setDestination(channel, &l.activity.dataWrite)
+	b.bindUpstreamSource(l)
 }
 
 // setObserver installs the upstream-event observer used by bindUpstreamSource.
@@ -1129,9 +1159,11 @@ func (b *dataChannelBridge) current() *webrtc.DataChannel {
 // bindUpstreamSource forwards events from channel to the client, but only while
 // channel is still the bridge's current upstream channel. After a swap the
 // retired channel is ignored, and its closing is not an error.
-func (b *dataChannelBridge) bindUpstreamSource(channel *webrtc.DataChannel) {
+func (b *dataChannelBridge) bindUpstreamSource(l *leg) {
+	channel, read := l.channel, &l.activity.dataRead
 	destination := b.upToDown
 	channel.OnMessage(func(message webrtc.DataChannelMessage) {
+		read.message(time.Now(), len(message.Data))
 		if !b.owns(channel) {
 			return
 		}
@@ -1159,12 +1191,14 @@ func (b *dataChannelBridge) bindUpstreamSource(channel *webrtc.DataChannel) {
 		}
 	})
 	channel.OnError(func(err error) {
+		read.failure(time.Now(), classifyActivityError(err))
 		if !b.owns(channel) {
 			return
 		}
 		destination.reportError(fmt.Errorf("%s DataChannel error: %w", destination.name, err))
 	})
 	channel.OnClose(func() {
+		read.failure(time.Now(), activityClosed)
 		select {
 		case <-b.done:
 			return
@@ -1180,18 +1214,20 @@ func (b *dataChannelBridge) bindUpstreamSource(channel *webrtc.DataChannel) {
 // swapUpstream makes next the bridge's upstream channel and returns the retired
 // one. Events already queued for the old channel are dropped on the floor by the
 // pipe's destination switch; new client events go to next.
-func (b *dataChannelBridge) swapUpstream(next *webrtc.DataChannel) *webrtc.DataChannel {
+func (b *dataChannelBridge) swapUpstream(next *leg) *webrtc.DataChannel {
 	b.upstreamMu.Lock()
 	old := b.upstream
-	b.upstream = next
+	b.upstream = next.channel
 	b.upstreamMu.Unlock()
-	b.downToUp.replaceDestination(next)
+	b.downToUp.replaceDestination(next.channel, &next.activity.dataWrite)
 	b.bindUpstreamSource(next)
 	return old
 }
 
 func (b *dataChannelBridge) bindSource(channel *webrtc.DataChannel, destination *dataChannelPipe) {
+	read := &b.clientActivity.dataRead
 	channel.OnMessage(func(message webrtc.DataChannelMessage) {
+		read.message(time.Now(), len(message.Data))
 		payload := append([]byte(nil), message.Data...)
 		if message.IsString {
 			b.observeMu.RLock()
@@ -1213,15 +1249,20 @@ func (b *dataChannelBridge) bindSource(channel *webrtc.DataChannel, destination 
 		}
 	})
 	channel.OnError(func(err error) {
+		read.failure(time.Now(), classifyActivityError(err))
 		destination.reportError(fmt.Errorf("%s DataChannel error: %w", destination.name, err))
 	})
 	channel.OnClose(func() {
+		read.failure(time.Now(), activityClosed)
 		select {
 		case <-b.done:
 			return
 		default:
-			if b.onClientClose != nil {
-				b.onClientClose()
+			b.downstreamMu.Lock()
+			handler := b.onClientClose
+			b.downstreamMu.Unlock()
+			if handler != nil {
+				handler()
 			} else {
 				destination.reportError(fmt.Errorf("%s DataChannel closed", destination.name))
 			}
@@ -1258,9 +1299,10 @@ func (b *dataChannelBridge) close() error {
 }
 
 // replaceDestination points the pipe at a new, already-open channel.
-func (p *dataChannelPipe) replaceDestination(channel *webrtc.DataChannel) {
+func (p *dataChannelPipe) replaceDestination(channel *webrtc.DataChannel, write *trafficActivity) {
 	p.mu.Lock()
 	p.destination = channel
+	p.writeActivity = write
 	p.mu.Unlock()
 	channel.SetBufferedAmountLowThreshold(mediaDataBufferedMaxSize / 2)
 	channel.OnBufferedAmountLow(func() {
@@ -1271,9 +1313,10 @@ func (p *dataChannelPipe) replaceDestination(channel *webrtc.DataChannel) {
 	})
 }
 
-func (p *dataChannelPipe) setDestination(channel *webrtc.DataChannel) {
+func (p *dataChannelPipe) setDestination(channel *webrtc.DataChannel, write *trafficActivity) {
 	p.mu.Lock()
 	p.destination = channel
+	p.writeActivity = write
 	p.mu.Unlock()
 	markReady := func() {
 		p.readyOnce.Do(func() { close(p.ready) })
@@ -1304,7 +1347,7 @@ func (p *dataChannelPipe) run() {
 		select {
 		case message := <-p.queue:
 			p.mu.RLock()
-			destination := p.destination
+			destination, write := p.destination, p.writeActivity
 			p.mu.RUnlock()
 			if destination == nil {
 				p.reportError(fmt.Errorf("%s DataChannel destination unavailable", p.name))
@@ -1319,6 +1362,7 @@ func (p *dataChannelPipe) run() {
 			} else {
 				err = destination.Send(message.data)
 			}
+			write.sent(err, len(message.data))
 			if err != nil {
 				p.reportError(fmt.Errorf("send %s DataChannel message: %w", p.name, err))
 				return
