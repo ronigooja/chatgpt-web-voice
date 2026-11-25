@@ -84,7 +84,7 @@ func TestPeerDiagnosticsActivity(t *testing.T) {
 	log := logDiagAttrs(t, d.sessionAttrs())
 	for key, want := range map[string]any{
 		"session_age_ms": float64(50), "sampler_lateness_ms": diagUnavailable,
-		"last_periodic_snapshot_age_ms": diagUnavailable,
+		"last_periodic_snapshot_age_ms":                diagUnavailable,
 		"gateway_activity.peer_a.rtp.last_read_age_ms": float64(50), "gateway_activity.peer_a.rtp.last_read_packets": float64(2),
 		"gateway_activity.peer_a.rtp.last_read_error_class": "error", "gateway_activity.peer_a.rtp.last_read_error_age_ms": float64(38),
 		"gateway_activity.peer_a.rtp.last_write_error_class": "not_open", "gateway_activity.peer_a.rtp.last_write_age_ms": diagUnavailable,
@@ -185,7 +185,7 @@ func TestPeerDiagnosticWarningsAndFailureOrdering(t *testing.T) {
 				sample := peerStats{ice: state.String(), dtls: "connected", sctp: "connected", dataState: "open"}
 				sample.addReport(webrtc.StatsReport{
 					candidateID: webrtc.ICECandidateStats{Protocol: "udp", IP: ip, Port: port, URL: url},
-					"audio": webrtc.InboundRTPStreamStats{Kind: "audio", PacketsReceived: 52, PacketsLost: -2, Jitter: .007, BytesReceived: 1400, LastPacketReceivedTimestamp: baseMS + 100},
+					"audio":     webrtc.InboundRTPStreamStats{Kind: "audio", PacketsReceived: 52, PacketsLost: -2, Jitter: .007, BytesReceived: 1400, LastPacketReceivedTimestamp: baseMS + 100},
 				}, webrtc.ICECandidatePairStats{
 					ID: candidateID, RemoteCandidateID: candidateID, State: webrtc.StatsICECandidatePairStateSucceeded,
 					Nominated: true, PacketsSent: 53, PacketsReceived: 54, BytesSent: 200, BytesReceived: 204,
@@ -220,15 +220,15 @@ func TestPeerDiagnosticWarningsAndFailureOrdering(t *testing.T) {
 				"selected_pair.packets_sent": float64(53), "selected_pair.packets_received": float64(54),
 				"selected_pair.bytes_sent": float64(200), "selected_pair.bytes_received": float64(204),
 				"selected_pair.packets_sent_delta": diagUnavailable, "selected_pair.bytes_received_delta": diagUnavailable,
-				"selected_pair.application_last_packet_sent_age_ms": float64(40),
+				"selected_pair.application_last_packet_sent_age_ms":     float64(40),
 				"selected_pair.application_last_packet_received_age_ms": float64(110),
-				"inbound_rtp.packets_received": float64(52), "inbound_rtp.packets_lost": float64(-2), "inbound_rtp.jitter_ms": float64(7),
+				"inbound_rtp.packets_received":                          float64(52), "inbound_rtp.packets_lost": float64(-2), "inbound_rtp.jitter_ms": float64(7),
 				"inbound_rtp.last_packet_received_age_ms": float64(100),
-				"datachannel.messages_sent": float64(2), "datachannel.messages_received": float64(3),
+				"datachannel.messages_sent":               float64(2), "datachannel.messages_received": float64(3),
 				"datachannel.bytes_sent_delta": diagUnavailable, "datachannel.messages_received_delta": diagUnavailable,
-				"gateway_activity.peer_a.rtp.last_read_age_ms": diagUnavailable,
+				"gateway_activity.peer_a.rtp.last_read_age_ms":                diagUnavailable,
 				"gateway_activity.peer_b7.datachannel.last_write_error_class": diagUnavailable,
-				"last_periodic_snapshot_age_ms": diagUnavailable, "sampler_lateness_ms": diagUnavailable, "previous_sample_age_ms": diagUnavailable,
+				"last_periodic_snapshot_age_ms":                               diagUnavailable, "sampler_lateness_ms": diagUnavailable, "previous_sample_age_ms": diagUnavailable,
 			} {
 				assertDiag(t, log, key, want)
 			}
