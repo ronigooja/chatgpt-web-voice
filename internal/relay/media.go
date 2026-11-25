@@ -783,8 +783,22 @@ func (s *pionSession) CloseWithDiagnostics(reason string, diagnostics []slog.Att
 			if len(diagnostics) == 0 {
 				diagnostics = []slog.Attr{slog.String("drop_cause_class", "unknown")}
 			}
+			attrs = append(attrs, diagnostics...)
+		} else {
+			// Explicit closes ignore drop observations but can carry a create error.
+			var stage, class slog.Attr
+			for _, attr := range diagnostics {
+				switch attr.Key {
+				case "creation_stage":
+					stage = attr
+				case "error_class":
+					class = attr
+				}
+			}
+			if stage.Key != "" && class.Key != "" {
+				attrs = append(attrs, stage, class)
+			}
 		}
-		attrs = append(attrs, diagnostics...)
 		if drop && s.diag != nil {
 			closingAttrs := append(append([]slog.Attr(nil), attrs...), slog.Int64("session_age_ms", elapsedMS(s.diag.now(), s.diag.start)))
 			s.logger.LogAttrs(context.Background(), closingLevel, "relay session closing", closingAttrs...)
@@ -845,7 +859,7 @@ func (s *pionSession) CloseWithDiagnostics(reason string, diagnostics []slog.Att
 		s.closeErr = errors.Join(errs...)
 		if s.closeErr != nil {
 			classKey := "error_class"
-			for _, attr := range diagnostics {
+			for _, attr := range attrs {
 				if attr.Key == classKey {
 					classKey = "close_error_class"
 					break

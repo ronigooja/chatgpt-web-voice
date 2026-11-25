@@ -53,3 +53,24 @@ func TestCloseDropLevelAndEvidence(t *testing.T) {
 		})
 	}
 }
+
+func TestCloseCreationDiagnosticsDoNotImportDropCause(t *testing.T) {
+	sink := make(peerLogSink, 2)
+	s := &pionSession{done: make(chan struct{}), logger: slog.New(slog.NewJSONHandler(sink, nil)), bridge: &dataChannelBridge{}}
+	s.diag = newPeerDiagnostics(s.done, time.Now)
+	if err := s.CloseWithDiagnostics("failure", []slog.Attr{
+		slog.String("creation_stage", "outcome_write"),
+		slog.String("error_class", "db_write_failed"),
+		slog.String("drop_cause_class", "read_error_eof"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, message := range []string{"relay session closing", "relay session closed"} {
+		line := decodeDiag(t, receiveDiag(t, sink))
+		assertDiag(t, line, "msg", message)
+		assertDiag(t, line, "level", "INFO")
+		assertDiag(t, line, "creation_stage", "outcome_write")
+		assertDiag(t, line, "error_class", "db_write_failed")
+		assertDiag(t, line, "drop_cause_class", nil)
+	}
+}
