@@ -14,6 +14,7 @@ var ErrVoiceCreationAttemptStale = errors.New("voice creation attempt is stale o
 var ErrVoiceCreationFenced = errors.New("voice creation request is fenced")
 
 const VoiceCreationFencedNoLiveMedia = "fenced_no_live_media"
+const VoiceCreationFenceBusy = "busy"
 
 type VoiceCreationOutcome struct {
 	RequestID       string
@@ -168,8 +169,8 @@ func voiceCreationOutcomeSnapshot(q creationOutcomeQuery, owner, requestID strin
 }
 
 // FenceVoiceCreation preserves decided outcomes and atomically tombstones an
-// absent or unresolved claim. The caller serializes this operation with local
-// create admission and ensures the request has no live or in-flight media.
+// absent or unresolved claim only if no matching reservation is unresolved.
+// The caller serializes with local create admission and media cleanup.
 func (db *DB) FenceVoiceCreation(owner, requestID string) (outcome, evidenceID string, err error) {
 	db.Lock()
 	defer db.Unlock()
@@ -178,11 +179,23 @@ func (db *DB) FenceVoiceCreation(owner, requestID string) (outcome, evidenceID s
 		return "", "", err
 	}
 	defer tx.Rollback()
+	var unresolved bool
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM voice_media_sessions
+		WHERE owner=? AND state<>'terminated' AND
+		(creation_request_id=? OR (creation_request_id='' AND zoe_generation>0)))`, owner, requestID).Scan(&unresolved); err != nil {
+		return "", "", err
+	}
+	if unresolved {
+		return VoiceCreationFenceBusy, "", nil
+	}
 	outcome, evidenceID, err = voiceCreationOutcomeSnapshot(tx, owner, requestID)
 	if err != nil && !errors.Is(err, ErrVoiceCreationOutcomeNotFound) {
 		return "", "", err
 	}
 	if outcome != "unknown" {
+		if outcome == "open" {
+			return VoiceCreationFenceBusy, "", nil
+		}
 		return outcome, evidenceID, nil
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)

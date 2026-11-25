@@ -22,9 +22,14 @@ func (s *Store) ReserveOwned(owner, requestID, attemptID string, id Identity, zo
 	now := ts(s.now())
 	s.db.Lock()
 	defer s.db.Unlock()
+	tx, err := s.db.Conn().Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	var fenced bool
 	var attempt, outcome string
-	err := s.db.Conn().QueryRow(`SELECT fenced, attempt_id, outcome FROM voice_creation_outcomes
+	err = tx.QueryRow(`SELECT fenced, attempt_id, outcome FROM voice_creation_outcomes
 		WHERE owner=? AND request_id=? AND gateway_owned=1`, owner, requestID).Scan(&fenced, &attempt, &outcome)
 	if errors.Is(err, sql.ErrNoRows) {
 		return store.ErrVoiceCreationAttemptStale
@@ -38,18 +43,18 @@ func (s *Store) ReserveOwned(owner, requestID, attemptID string, id Identity, zo
 	if attempt == "" || attempt != attemptID || outcome != "pending" {
 		return store.ErrVoiceCreationAttemptStale
 	}
-	res, err := s.db.Conn().Exec(`INSERT INTO voice_media_sessions
-		(voice_session_id, media_generation, owner, account_id, lease_id, lease_generation, state, created_at, updated_at, zoe_session_id, zoe_generation)
-		SELECT ?,?,?,?,?,?,'active',?,?,?,?
+	res, err := tx.Exec(`INSERT INTO voice_media_sessions
+		(voice_session_id, media_generation, owner, account_id, lease_id, lease_generation, state, created_at, updated_at, zoe_session_id, zoe_generation, creation_request_id)
+		SELECT ?,?,?,?,?,?,'active',?,?,?,?,?
 		WHERE NOT EXISTS (SELECT 1 FROM voice_media_sessions WHERE state <> 'terminated' AND (account_id=? OR current_account_id=?))`,
-		id.VoiceSessionID, id.MediaGeneration, owner, id.AccountID, id.LeaseID, id.LeaseGeneration, now, now, zoeID, zoeGeneration, id.AccountID, id.AccountID)
+		id.VoiceSessionID, id.MediaGeneration, owner, id.AccountID, id.LeaseID, id.LeaseGeneration, now, now, zoeID, zoeGeneration, requestID, id.AccountID, id.AccountID)
 	if err != nil {
 		return err
 	}
 	if n, err := res.RowsAffected(); err != nil || n == 0 {
 		return ErrAccountOccupied
 	}
-	return nil
+	return tx.Commit()
 }
 
 func (s *Store) AttachOwnedRelay(id Identity, relayID string) error {

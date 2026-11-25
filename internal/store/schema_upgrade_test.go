@@ -95,7 +95,8 @@ func TestUpgradeFrom411251cPreservesRowsAndSupportsReceipts(t *testing.T) {
 			if table == "voice_media_sessions" {
 				wantColumns = append(wantColumns,
 					[]any{int64(21), "zoe_session_id", "TEXT", int64(1), "''", int64(0)},
-					[]any{int64(22), "zoe_generation", "INTEGER", int64(1), "0", int64(0)})
+					[]any{int64(22), "zoe_generation", "INTEGER", int64(1), "0", int64(0)},
+					[]any{int64(23), "creation_request_id", "TEXT", int64(1), "''", int64(0)})
 			}
 			if got := upgradeRows(t, db.Conn(), "PRAGMA table_info("+table+")"); !reflect.DeepEqual(got, wantColumns) {
 				t.Errorf("%s columns after migration = %v; want %v", table, got, wantColumns)
@@ -109,7 +110,7 @@ func TestUpgradeFrom411251cPreservesRowsAndSupportsReceipts(t *testing.T) {
 		got := upgradeRows(t, db.Conn(), objectsQuery)
 		var oldObjects [][]any
 		for _, row := range got {
-			if !strings.Contains(fmt.Sprint(row[1]), "voice_result_receipts") {
+			if !strings.Contains(fmt.Sprint(row[1]), "voice_result_receipts") && row[1] != "idx_voice_media_unresolved_request" {
 				oldObjects = append(oldObjects, row)
 			}
 		}

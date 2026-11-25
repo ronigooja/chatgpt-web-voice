@@ -54,6 +54,9 @@ func TestRequestFenceWinsAgainstLateClaimOrReservation(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("late claim fixture did not enter start")
 	}
+	if _, err := db.GetVoiceCreationOutcome(s.zoeCallOwner(), "gateway-request"); !errors.Is(err, store.ErrVoiceCreationOutcomeNotFound) {
+		t.Fatalf("claim became visible before the start reply: %v", err)
+	}
 	assertRequestFence(t, s, "gateway-request", "fenced_no_live_media")
 	assertRequestFence(t, s, "gateway-request", "fenced_no_live_media")
 	close(returnStart)
@@ -89,17 +92,18 @@ func TestRequestFenceWinsAgainstLateClaimOrReservation(t *testing.T) {
 
 type blockedFenceRelay struct {
 	entered, finish chan struct{}
+	err             error
 }
 
 func (r *blockedFenceRelay) NewSession(context.Context, string, relay.Route) (relay.Session, string, error) {
 	close(r.entered)
 	<-r.finish
-	return nil, "", errors.Join(relay.ErrCreateAfterStart, relay.ErrCreateLocalClosed)
+	return nil, "", r.err
 }
 
 func TestRequestFenceRejectsInFlightCreateWithoutRelayHandle(t *testing.T) {
 	s, _, _, _ := newOfflineOwnedCreation(t, 1)
-	r := &blockedFenceRelay{entered: make(chan struct{}), finish: make(chan struct{})}
+	r := &blockedFenceRelay{entered: make(chan struct{}), finish: make(chan struct{}), err: errors.Join(relay.ErrCreateAfterStart, relay.ErrCreateLocalClosed)}
 	s.WithRelay(r)
 	dial := ClientDialRequest{RequestID: "client-request", OfferSDP: readTestdata(t, "wm_offer.sdp")}
 	done := make(chan error, 1)
@@ -120,6 +124,54 @@ func TestRequestFenceRejectsInFlightCreateWithoutRelayHandle(t *testing.T) {
 		t.Fatal("constructor did not start")
 	}
 	assertRequestFence(t, s, "gateway-request", "busy")
+	close(r.finish)
+	select {
+	case err := <-done:
+		if err != unavailableCall {
+			t.Fatalf("unexpected dial result: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("dial did not finish cleanup")
+	}
+	assertRequestFence(t, s, "gateway-request", "busy") // Local cleanup did not resolve the reservation.
+}
+
+func TestRequestFenceCanceledCreateTracksCleanup(t *testing.T) {
+	s, db, _, _ := newOfflineOwnedCreation(t, 1)
+	r := &blockedFenceRelay{entered: make(chan struct{}), finish: make(chan struct{}), err: relay.ErrCreateClean}
+	s.WithRelay(r)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dial := ClientDialRequest{RequestID: "client-request", OfferSDP: readTestdata(t, "wm_offer.sdp")}
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.DialClient(ctx, ownedTestKey, dial)
+		done <- err
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-r.finish:
+		default:
+			close(r.finish)
+		}
+	})
+	select {
+	case <-r.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("constructor did not start")
+	}
+	cancel()
+	assertRequestFence(t, s, "gateway-request", "busy")
+	request := ownedRequest{s.zoeCallOwner(), "gateway-request"}
+	s.requestMu.Lock()
+	inFlight := s.requestActivity[request] != nil && s.requestActivity[request].creating
+	s.requestMu.Unlock()
+	if !inFlight {
+		t.Fatal("cancellation dropped in-flight tracking before cleanup")
+	}
+	// Keep the outcome unresolved even after clean abandonment, so the final
+	// result must come from the fence and not from a previously decided claim.
+	fixtureSQL(t, db, `CREATE TRIGGER fail_outcome BEFORE UPDATE OF outcome ON voice_creation_outcomes BEGIN SELECT RAISE(FAIL, 'fixture'); END`)
 	close(r.finish)
 	select {
 	case err := <-done:
@@ -201,19 +253,22 @@ func TestRequestFenceSurvivesRestartWithoutReleasingAccount(t *testing.T) {
 	if err := ev.ReserveOwned(owner, "interrupted", attempt, id, "interrupted-zoe", 1); err != nil {
 		t.Fatal(err)
 	}
+	if claim, err := db.GetVoiceCreationOutcome(owner, "interrupted"); err != nil || claim.VoiceSessionID.Valid {
+		t.Fatal("reservation fixture must not be linked from the claim")
+	}
+	assertRequestFence(t, s, "interrupted", "busy")
+	assertRequestFence(t, s, "unrelated", "fenced_no_live_media")
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
 	s, db, _ = open()
-	assertRequestFence(t, s, "interrupted", "fenced_no_live_media")
+	assertRequestFence(t, s, "interrupted", "busy")
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
 	s, db, ev = open()
-	assertRequestFence(t, s, "interrupted", "fenced_no_live_media")
-	if _, err := db.ClaimOwnedVoiceCreation(owner, "interrupted"); !errors.Is(err, store.ErrVoiceCreationFenced) {
-		t.Fatal(err)
-	}
+	assertRequestFence(t, s, "interrupted", "busy")
+	assertRequestFence(t, s, "unrelated", "fenced_no_live_media")
 	if row, err := ev.Get(id.VoiceSessionID, id.MediaGeneration); err != nil || row.State != mediaevidence.StateUnknown || row.EvidenceID != "" {
 		t.Fatalf("fence changed account reservation: state=%q, err=%v", row.State, err)
 	}
@@ -224,5 +279,33 @@ func TestRequestFenceSurvivesRestartWithoutReleasingAccount(t *testing.T) {
 	id.VoiceSessionID, id.LeaseID = "second-media", "second-lease"
 	if err := ev.ReserveOwned(owner, "second", second, id, "second-zoe", 2); !errors.Is(err, mediaevidence.ErrAccountOccupied) {
 		t.Fatalf("second reservation did not preserve account fence: %v", err)
+	}
+}
+
+func TestRequestFenceAfterUnlinkedReservationTerminates(t *testing.T) {
+	s, db, _, _ := newOfflineOwnedCreation(t, 1)
+	owner, request := s.zoeCallOwner(), "not-established"
+	attempt, err := db.ClaimOwnedVoiceCreation(owner, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := mediaevidence.NewStore(db)
+	id := mediaevidence.Identity{VoiceSessionID: "media", MediaGeneration: 1, AccountID: 1, LeaseID: "test-lease", LeaseGeneration: 1}
+	if err := ev.ReserveOwned(owner, request, attempt, id, "zoe", 1); err != nil {
+		t.Fatal(err)
+	}
+	assertRequestFence(t, s, request, "busy")
+	if err := ev.MarkClosing(id, "failure"); err != nil {
+		t.Fatal(err)
+	}
+	assertRequestFence(t, s, request, "busy")
+	if _, err := ev.Close(id, mediaevidence.Components{PeerAClosed: true, PeerBClosed: true, DataChannelsClosed: true, TunnelsClosed: true}, "failure"); err != nil {
+		t.Fatal(err)
+	}
+	assertRequestFence(t, s, request, "fenced_no_live_media")
+	assertRequestFence(t, s, request, "fenced_no_live_media")
+	id.VoiceSessionID, id.LeaseID = "late-media", "late-lease"
+	if err := ev.ReserveOwned(owner, request, attempt, id, "zoe", 1); !errors.Is(err, store.ErrVoiceCreationFenced) {
+		t.Fatalf("fenced request reserved after termination: %v", err)
 	}
 }

@@ -1,6 +1,9 @@
 package voice
 
-import "github.com/dyhhhhhh/chatgpt-web-voice/internal/relay"
+import (
+	"github.com/dyhhhhhh/chatgpt-web-voice/internal/relay"
+	"github.com/dyhhhhhh/chatgpt-web-voice/internal/store"
+)
 
 type ownedRequest struct{ owner, id string }
 
@@ -14,7 +17,7 @@ type ownedRequestActivity struct {
 }
 
 func (s *Service) FenceCreationRequest(owner, requestID string) (result, evidenceID string, err error) {
-	store, ok := s.creationOutcomes.(interface {
+	claims, ok := s.creationOutcomes.(interface {
 		FenceVoiceCreation(string, string) (string, string, error)
 	})
 	if !ok || !s.GatewayOwnsCalls() {
@@ -23,9 +26,9 @@ func (s *Service) FenceCreationRequest(owner, requestID string) (result, evidenc
 	s.requestMu.Lock()
 	defer s.requestMu.Unlock()
 	if s.requestActivity[ownedRequest{owner, requestID}] != nil {
-		return "busy", "", nil
+		return store.VoiceCreationFenceBusy, "", nil
 	}
-	return store.FenceVoiceCreation(owner, requestID)
+	return claims.FenceVoiceCreation(owner, requestID)
 }
 
 func (s *Service) updateRequestActivity(request ownedRequest, update func(*ownedRequestActivity)) {

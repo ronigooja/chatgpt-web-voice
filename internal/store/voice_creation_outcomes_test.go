@@ -7,6 +7,47 @@ import (
 	"testing"
 )
 
+func TestMediaRequestIdentityMigrationFailsClosedForUnattributableReservations(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "upgrade.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	_, err = db.conn.Exec(`DROP INDEX idx_voice_media_unresolved_request;
+		ALTER TABLE voice_media_sessions DROP COLUMN creation_request_id;
+		INSERT INTO voice_media_sessions (voice_session_id,media_generation,owner,account_id,lease_id,lease_generation,state,created_at,updated_at,zoe_session_id,zoe_generation)
+		VALUES ('exact',1,'owner',1,'lease1',1,'active','now','now','zoe1',1),
+		       ('unlinked',2,'owner',2,'lease2',1,'unknown','now','now','zoe2',1);
+		INSERT INTO voice_creation_outcomes (owner,request_id,outcome,voice_session_id,media_generation,gateway_owned)
+		VALUES ('owner','exact-request','established','exact',1,1);`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for session, want := range map[string]string{"exact": "exact-request", "unlinked": ""} {
+		var request string
+		if err := db.conn.QueryRow(`SELECT creation_request_id FROM voice_media_sessions WHERE voice_session_id=?`, session).Scan(&request); err != nil || request != want {
+			t.Fatalf("unexpected migration identity for %s: %q, %v", session, request, err)
+		}
+	}
+	for _, tc := range []struct{ owner, request, want string }{
+		{"owner", "exact-request", VoiceCreationFenceBusy},
+		{"owner", "not-linked", VoiceCreationFenceBusy},
+		{"other", "not-linked", VoiceCreationFencedNoLiveMedia},
+	} {
+		if result, _, err := db.FenceVoiceCreation(tc.owner, tc.request); err != nil || result != tc.want {
+			t.Fatalf("migration fence returned %q, %v; want %q", result, err, tc.want)
+		}
+	}
+}
+
 func TestRequestFenceMigrationPreservesExistingOwnedRows(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "before-request-fence.db")
 	sqlite, err := sql.Open("sqlite", path)
