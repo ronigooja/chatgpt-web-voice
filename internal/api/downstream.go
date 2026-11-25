@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"unicode/utf8"
@@ -131,6 +132,39 @@ func (s *Server) downstreamOutcome(w http.ResponseWriter, r *http.Request) {
 	}
 	response := map[string]string{"request_id": requestID, "outcome": row}
 	if row == "released" {
+		response["evidence_id"] = evidenceID
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) downstreamRequestFence(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	owner := auth.APIKeyOwner(r.Context())
+	if owner == "" {
+		writeDownstreamError(w, http.StatusUnauthorized, "invalid_api_key", "valid Bearer API key required")
+		return
+	}
+	requestID := r.PathValue("request_id")
+	var firstByte [1]byte
+	if _, err := io.ReadFull(r.Body, firstByte[:]); err != io.EOF || requestID == "" || len(requestID) > 128 || !utf8.ValidString(requestID) || requestID != strings.TrimSpace(requestID) {
+		writeDownstreamError(w, http.StatusBadRequest, "invalid_request", "valid request id and empty body required")
+		return
+	}
+	provider, ok := s.voice.(interface {
+		FenceCreationRequest(string, string) (string, string, error)
+	})
+	if !ok {
+		writeDownstreamError(w, http.StatusServiceUnavailable, "voice_unavailable", "request fence unavailable")
+		return
+	}
+	result, evidenceID, err := provider.FenceCreationRequest(owner, requestID)
+	if err != nil {
+		logging.FromContext(r.Context()).Warn("voice_request_fence_failed", "error_class", "fence_unavailable")
+		writeDownstreamError(w, http.StatusServiceUnavailable, "voice_unavailable", "request fence unavailable")
+		return
+	}
+	response := map[string]string{"request_id": requestID, "result": result}
+	if result == "released" {
 		response["evidence_id"] = evidenceID
 	}
 	writeJSON(w, http.StatusOK, response)

@@ -124,6 +124,7 @@ func (s *Server) RegisterDownstream(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/voice/config", s.voiceConfig)
 	mux.HandleFunc("POST /v1/voice/sessions", s.legacyVoiceRoute(s.downstreamSession))
 	mux.HandleFunc("GET /v1/voice/requests/{request_id}/outcome", s.downstreamOutcome)
+	mux.HandleFunc("POST /v1/voice/requests/{request_id}/fence", s.downstreamRequestFence)
 	mux.HandleFunc("GET /v1/voice/sessions/{gateway_session_id}/termination-evidence", s.downstreamTerminationEvidence)
 	mux.HandleFunc("POST /v1/voice/sessions/{id}/context", s.downstreamSessionContext)
 	mux.HandleFunc("POST /v1/voice/sessions/{id}/result-deliveries", s.downstreamResultDelivery)

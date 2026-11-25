@@ -459,6 +459,9 @@ func (r *PionRelay) NewSession(ctx context.Context, clientOffer string, route Ro
 
 	fail := func(format string, err error) (Session, string, error) {
 		closeErr := session.CloseWithDiagnostics("closed", []slog.Attr{slog.String("creation_stage", "relay_construct"), slog.String("error_class", "internal")})
+		if closeErr == nil {
+			closeErr = ErrCreateLocalClosed
+		}
 		return nil, "", errors.Join(ErrCreateAfterStart, fmt.Errorf(format+": %w", err), closeErr)
 	}
 

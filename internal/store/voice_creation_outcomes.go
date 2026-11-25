@@ -11,6 +11,9 @@ import (
 
 var ErrVoiceCreationOutcomeNotFound = errors.New("voice creation outcome not found")
 var ErrVoiceCreationAttemptStale = errors.New("voice creation attempt is stale or missing")
+var ErrVoiceCreationFenced = errors.New("voice creation request is fenced")
+
+const VoiceCreationFencedNoLiveMedia = "fenced_no_live_media"
 
 type VoiceCreationOutcome struct {
 	RequestID       string
@@ -48,13 +51,24 @@ func (db *DB) beginVoiceCreationOutcome(owner, requestID string, owned bool) (st
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	conflict := ` ON CONFLICT(owner, request_id) DO NOTHING`
 	if !owned {
-		conflict = ` ON CONFLICT(owner, request_id) DO UPDATE SET outcome='pending', attempt_id=excluded.attempt_id, voice_session_id=NULL, media_generation=NULL, updated_at=excluded.updated_at WHERE voice_creation_outcomes.gateway_owned=0`
+		conflict = ` ON CONFLICT(owner, request_id) DO UPDATE SET outcome='pending', attempt_id=excluded.attempt_id, voice_session_id=NULL, media_generation=NULL, updated_at=excluded.updated_at WHERE voice_creation_outcomes.gateway_owned=0 AND voice_creation_outcomes.fenced=0`
 	}
+	db.Lock()
+	defer db.Unlock()
 	res, err := db.conn.Exec(`INSERT INTO voice_creation_outcomes (request_id, owner, outcome, attempt_id, created_at, updated_at, gateway_owned) VALUES (?, ?, 'pending', ?, ?, ?, ?)`+conflict, requestID, owner, attemptID, now, now, owned)
 	if err != nil {
 		return "", fmt.Errorf("create voice outcome: %w", err)
 	}
-	if n, err := res.RowsAffected(); err != nil || n != 1 {
+	if n, err := res.RowsAffected(); err != nil {
+		return "", err
+	} else if n != 1 {
+		var fenced bool
+		if err := db.conn.QueryRow(`SELECT fenced FROM voice_creation_outcomes WHERE owner=? AND request_id=?`, owner, requestID).Scan(&fenced); err != nil {
+			return "", err
+		}
+		if fenced {
+			return "", ErrVoiceCreationFenced
+		}
 		return "", ErrVoiceCreationAttemptStale
 	}
 	return attemptID, nil
@@ -73,7 +87,7 @@ func (db *DB) UpdateVoiceCreationOutcome(owner, requestID, outcome, sessionID st
 	if generation > 0 {
 		gen = generation
 	}
-	result, err := db.conn.Exec(`UPDATE voice_creation_outcomes SET outcome=?, voice_session_id=?, media_generation=?, updated_at=? WHERE owner=? AND request_id=? AND attempt_id=?`, outcome, sid, gen, now, owner, requestID, attemptID)
+	result, err := db.conn.Exec(`UPDATE voice_creation_outcomes SET outcome=?, voice_session_id=?, media_generation=?, updated_at=? WHERE owner=? AND request_id=? AND attempt_id=? AND fenced=0`, outcome, sid, gen, now, owner, requestID, attemptID)
 	if err != nil {
 		return fmt.Errorf("update voice outcome: %w", err)
 	}
@@ -117,9 +131,17 @@ func (db *DB) MediaOutcome(voiceSessionID string, generation int64) (string, err
 // VoiceCreationOutcomeSnapshot derives both public fields from one SQLite read
 // snapshot, joining evidence by the complete owner/session/lease identity.
 func (db *DB) VoiceCreationOutcomeSnapshot(owner, requestID string) (outcome, evidenceID string, err error) {
+	return voiceCreationOutcomeSnapshot(db.conn, owner, requestID)
+}
+
+type creationOutcomeQuery interface {
+	QueryRow(string, ...any) *sql.Row
+}
+
+func voiceCreationOutcomeSnapshot(q creationOutcomeQuery, owner, requestID string) (outcome, evidenceID string, err error) {
 	var stored string
 	var state, evidence sql.NullString
-	err = db.conn.QueryRow(`SELECT c.outcome, m.state, e.evidence_id
+	err = q.QueryRow(`SELECT c.outcome, m.state, e.evidence_id
 		FROM voice_creation_outcomes c
 		LEFT JOIN voice_media_sessions m ON c.voice_session_id=m.voice_session_id AND c.media_generation=m.media_generation AND c.owner=m.owner
 		LEFT JOIN voice_termination_evidence e ON e.evidence_id=m.evidence_id
@@ -143,6 +165,38 @@ func (db *DB) VoiceCreationOutcomeSnapshot(owner, requestID string) (outcome, ev
 	default:
 		return "unknown", "", nil
 	}
+}
+
+// FenceVoiceCreation preserves decided outcomes and atomically tombstones an
+// absent or unresolved claim. The caller serializes this operation with local
+// create admission and ensures the request has no live or in-flight media.
+func (db *DB) FenceVoiceCreation(owner, requestID string) (outcome, evidenceID string, err error) {
+	db.Lock()
+	defer db.Unlock()
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return "", "", err
+	}
+	defer tx.Rollback()
+	outcome, evidenceID, err = voiceCreationOutcomeSnapshot(tx, owner, requestID)
+	if err != nil && !errors.Is(err, ErrVoiceCreationOutcomeNotFound) {
+		return "", "", err
+	}
+	if outcome != "unknown" {
+		return outcome, evidenceID, nil
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = tx.Exec(`INSERT INTO voice_creation_outcomes (owner, request_id, outcome, created_at, updated_at, gateway_owned, fenced)
+		VALUES (?, ?, 'unknown', ?, ?, 1, 1)
+		ON CONFLICT(owner, request_id) DO UPDATE SET fenced=1, gateway_owned=1, updated_at=excluded.updated_at
+		WHERE voice_creation_outcomes.fenced=0`, owner, requestID, now, now)
+	if err != nil {
+		return "", "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", "", err
+	}
+	return VoiceCreationFencedNoLiveMedia, "", nil
 }
 
 // DeleteOldVoiceCreationOutcomes is exposed for startup-cleanup tests and

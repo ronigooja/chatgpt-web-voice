@@ -7,19 +7,37 @@ import (
 	"fmt"
 	"regexp"
 	"time"
+
+	"github.com/dyhhhhhh/chatgpt-web-voice/internal/store"
 )
 
 var ErrAccountOccupied = errors.New("account already has unresolved media")
 
 // ReserveOwned claims the account before the gateway touches the relay or AVAS.
 // A crash after reservation leaves the account unavailable, not reusable.
-func (s *Store) ReserveOwned(owner string, id Identity, zoeID string, zoeGeneration int64) error {
+func (s *Store) ReserveOwned(owner, requestID, attemptID string, id Identity, zoeID string, zoeGeneration int64) error {
 	if err := id.valid(); err != nil {
 		return err
 	}
 	now := ts(s.now())
 	s.db.Lock()
 	defer s.db.Unlock()
+	var fenced bool
+	var attempt, outcome string
+	err := s.db.Conn().QueryRow(`SELECT fenced, attempt_id, outcome FROM voice_creation_outcomes
+		WHERE owner=? AND request_id=? AND gateway_owned=1`, owner, requestID).Scan(&fenced, &attempt, &outcome)
+	if errors.Is(err, sql.ErrNoRows) {
+		return store.ErrVoiceCreationAttemptStale
+	}
+	if err != nil {
+		return err
+	}
+	if fenced {
+		return store.ErrVoiceCreationFenced
+	}
+	if attempt == "" || attempt != attemptID || outcome != "pending" {
+		return store.ErrVoiceCreationAttemptStale
+	}
 	res, err := s.db.Conn().Exec(`INSERT INTO voice_media_sessions
 		(voice_session_id, media_generation, owner, account_id, lease_id, lease_generation, state, created_at, updated_at, zoe_session_id, zoe_generation)
 		SELECT ?,?,?,?,?,?,'active',?,?,?,?

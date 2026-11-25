@@ -172,6 +172,13 @@ func (db *DB) migrate() error {
 	if err := db.cleanupVoiceCreationOutcomes(); err != nil {
 		return err
 	}
+	if has, err := db.hasColumn("voice_creation_outcomes", "fenced"); err != nil {
+		return err
+	} else if !has {
+		if _, err := db.conn.Exec(`ALTER TABLE voice_creation_outcomes ADD COLUMN fenced INTEGER NOT NULL DEFAULT 0 CHECK (fenced IN (0, 1))`); err != nil {
+			return fmt.Errorf("add voice creation request fence: %w", err)
+		}
+	}
 	// Created after legacy account-table rebuilds.
 	if _, err := db.conn.Exec(`CREATE TABLE IF NOT EXISTS bridge_accounts (
 		remote_id TEXT PRIMARY KEY,
