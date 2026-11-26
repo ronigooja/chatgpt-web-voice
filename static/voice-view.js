@@ -25,16 +25,18 @@
 
   var GROUPS = [
     { id: 'conversation', label: 'Conversation' },
-    { id: 'delegation', label: 'Delegation' },
     { id: 'creation', label: 'Creation' },
-    { id: 'context', label: 'Context writes' },
+    { id: 'delegation', label: 'Delegation' },
     { id: 'client', label: 'Client messages' },
-    { id: 'session', label: 'Session & usage' },
+    { id: 'context', label: 'Context writes' },
+    { id: 'usage', label: 'Usage' },
+    { id: 'session', label: 'Session' },
     { id: 'other', label: 'Other' }
   ];
   var GROUP_IDS = GROUPS.map(function (g) { return g.id; });
   var PRESETS = [
     { id: 'conversation', label: 'Conversation only', groups: ['conversation'] },
+    { id: 'client', label: 'Client messages only', groups: ['client'] },
     { id: 'delegation', label: 'Delegation only', groups: ['delegation'] },
     { id: 'everything', label: 'Everything', groups: GROUP_IDS }
   ];
@@ -47,7 +49,9 @@
     'output_text.delta': true,
     'output_audio_transcript.delta': true
   };
-  var DELEGATION_MARKER = /"delegation_item_id"\s*:/;
+  var CONTEXT_WRITE_TYPES = { 'session.context.append': true, 'delegation.context.append': true };
+  var CONTEXT_ACK_TYPES = { 'session.context.appended': true, 'delegation.context.appended': true };
+  var USER_SOURCE_KINDS = { user_text: true, ui_input_received: true };
 
   function toSeq(value) {
     var n = Number(value);
@@ -73,6 +77,23 @@
   function prettyPayload(text) {
     var value = parseJSON(text);
     return value !== null ? JSON.stringify(value, null, 2) : String(text == null ? '' : text);
+  }
+
+  // Display only: expands string `data` holding JSON (up to 3 levels) so no escaped quotes remain.
+  function unwrapPayloadData(value, depth) {
+    if (!value || typeof value !== 'object' || value.type !== 'data_message' || typeof value.data !== 'string' || depth >= 3) return value;
+    var inner = parseJSON(value.data);
+    if (inner === null || typeof inner !== 'object') return value;
+    var out = {};
+    Object.keys(value).forEach(function (key) { out[key] = value[key]; });
+    out.data = unwrapPayloadData(inner, depth + 1);
+    return out;
+  }
+
+  function displayPayload(text) {
+    var value = parseJSON(text);
+    var unwrapped = unwrapPayloadData(value, 0);
+    return unwrapped === value ? prettyPayload(text) : readableJSON(unwrapped);
   }
 
   // Display only: indented JSON where string values show real line breaks instead of \n.
@@ -140,28 +161,32 @@
     return obj && typeof obj.type === 'string' && obj.type && obj.type !== 'data_message' ? obj.type : type;
   }
 
-  function groupOf(direction, type, payload) {
+  function isContextWriteType(type) {
+    return CONTEXT_WRITE_TYPES[type] === true;
+  }
+
+  // Exactly one group per event. source_kind (the original message source) decides between
+  // Client messages and Context writes; the payload and delegation_item_id never do.
+  function groupOf(direction, type, sourceKind) {
     if (direction === 'gateway_creation') return 'creation';
-    if (type.indexOf('delegation') >= 0) return 'delegation';
-    var contextWrite = type === 'session.context.append' || type === 'session.context.appended';
-    if (contextWrite && DELEGATION_MARKER.test(String(payload || ''))) return 'delegation';
-    if (contextWrite) return 'context';
+    if (type === 'delegation.created') return 'delegation';
+    if (isContextWriteType(type)) return USER_SOURCE_KINDS[sourceKind] === true ? 'client' : 'context';
+    if (CONTEXT_ACK_TYPES[type] === true) return 'context';
     if (direction === 'client_to_upstream') return 'client';
-    if (direction === 'gateway_to_upstream') return 'context';
-    if (CONVERSATION_TYPES[type] || /^(input|output)_transcript\./.test(type)) return 'conversation';
+    if (CONVERSATION_TYPES[type] === true || /^(input|output)_transcript\./.test(type)) return 'conversation';
+    if (type.indexOf('session.usage.') === 0) return 'usage';
     if (type.indexOf('session.') === 0) return 'session';
     return 'other';
   }
 
-  // Exactly one group per event. Direction-based groups are checked first so that
-  // gateway writes about delegations land in Delegation, not Context writes.
   function classifyEvent(raw) {
     var direction = String((raw && raw.direction) || '');
     var payload = raw && raw.payload !== undefined && raw.payload !== null ? raw.payload : '';
     if (typeof payload !== 'string') payload = JSON.stringify(payload);
     var wire = String((raw && raw.type) || '');
     var type = innerType(wire, payload) || wire;
-    return { type: type, group: groupOf(direction, type, payload) };
+    var sourceKind = String((raw && raw.source_kind) || '');
+    return { type: type, group: groupOf(direction, type, sourceKind) };
   }
 
   function eventMatches(ev, filter) {
@@ -171,12 +196,12 @@
     return searchMatches(ev, f.q);
   }
 
-  // Case-insensitive substring match over type, direction, source and payload text.
+  // Case-insensitive substring match over type, direction, source, source_kind and payload text.
   // Payload text is only compared, never parsed for execution.
   function searchMatches(ev, q) {
     var needle = String(q || '').trim().toLowerCase();
     if (!needle) return true;
-    var hay = (ev.type + ' ' + ev.direction + ' ' + ev.source + ' ' + ev.payload).toLowerCase();
+    var hay = (ev.type + ' ' + ev.direction + ' ' + ev.source + ' ' + (ev.source_kind || '') + ' ' + ev.payload).toLowerCase();
     return hay.indexOf(needle) >= 0;
   }
 
@@ -232,40 +257,24 @@
     return { groups: groups, type: get('type') || '', q: get('q') || '' };
   }
 
-  // Delegation panel rows. delegation.created carries handoff/target/text in item;
-  // gateway writes (delegation.context.append or session.context.append) expose
-  // delegation_item_id, found at top level or under item.
+  // Delegation rows: the Delegation group holds only delegation.created, whose handoff, target and text sit in item.
   function delegationRows(list) {
     return (Array.isArray(list) ? list : []).filter(function (ev) {
       return ev && ev.group === 'delegation';
     }).map(function (ev) {
       var obj = Captions.parseEventPayload(ev.payload) || {};
       var item = obj.item && typeof obj.item === 'object' ? obj.item : {};
-      var created = ev.type === 'delegation.created';
-      var row = {
+      return {
         seq: ev.seq,
         at: ev.at,
         type: ev.type,
-        kind: created ? 'created' : 'write',
         delivery: ev.delivery,
         truncated: ev.truncated,
-        handoff: '',
-        target: '',
-        delegationItemId: '',
-        text: ''
+        handoff: String(item.handoff_id || ''),
+        target: String(item.target || ''),
+        delegationItemId: String(item.id || ''),
+        text: Captions.delegationText(item.content)
       };
-      if (created) {
-        row.handoff = String(item.handoff_id || '');
-        row.target = String(item.target || '');
-        row.delegationItemId = String(item.id || '');
-        row.text = Captions.delegationText(item.content);
-      } else {
-        row.handoff = String(obj.handoff_id || item.handoff_id || '');
-        row.target = String(obj.target || item.target || '');
-        row.delegationItemId = String(obj.delegation_item_id || item.delegation_item_id || '');
-        row.text = Captions.delegationText(obj.content || item.content);
-      }
-      return row;
     });
   }
 
@@ -294,7 +303,8 @@
       if (payload === null || payload === undefined) payload = '';
       else if (typeof payload !== 'string') payload = JSON.stringify(payload);
       var direction = String(ev.direction || '');
-      var cls = classifyEvent({ direction: direction, type: ev.type, payload: payload });
+      var sourceKind = String(ev.source_kind || '');
+      var cls = classifyEvent({ direction: direction, type: ev.type, payload: payload, source_kind: sourceKind });
       return {
         seq: toEventSeq(ev.seq),
         at: String(ev.at || ''),
@@ -302,6 +312,7 @@
         type: cls.type,
         group: cls.group,
         source: String(ev.source || ''),
+        source_kind: sourceKind,
         payload: payload,
         size: toInt(ev.size),
         truncated: ev.truncated === true,
@@ -451,6 +462,7 @@
       type: creation ? 'creation' : rawType,
       rawType: rawType,
       tag: creation ? 'Creation' : '',
+      sourceKind: String(e.source_kind || ''),
       size: formatBytes(e.size),
       delivery: String(e.delivery || 'unknown'),
       group: String(e.group || 'other'),
@@ -471,22 +483,17 @@
     };
   }
 
-  // The single definition of delegation counts. Every delegation count in the UI comes from here:
-  // "created" is the number of delegation.created events; "writes" are the other group members
-  // (delegation.context.append, and session.context.append* that carry delegation_item_id).
+  // The single definition of delegation counts: the Delegation group holds only delegation.created events.
   function delegationCounts(list, q) {
-    var out = { total: 0, created: 0, writes: 0 };
+    var out = { created: 0 };
     (Array.isArray(list) ? list : []).forEach(function (ev) {
-      if (!ev || ev.group !== 'delegation' || !searchMatches(ev, q)) return;
-      out.total++;
-      if (ev.type === 'delegation.created') out.created++; else out.writes++;
+      if (ev && ev.group === 'delegation' && searchMatches(ev, q)) out.created++;
     });
     return out;
   }
 
   function delegationTooltip(c) {
-    return c.total + ' event' + (c.total === 1 ? '' : 's') + ': ' + c.created + ' created, ' +
-      c.writes + ' context write' + (c.writes === 1 ? '' : 's');
+    return c.created + ' delegation' + (c.created === 1 ? '' : 's') + ' created';
   }
 
   function filterIsActive(filter) {
@@ -553,30 +560,51 @@
     return parts.join(' · ') || 'no instructions or items';
   }
 
-  // Transcript anchors in seq order: the creation event, delegation.created events, context writes
-  // and client messages. Other delegation writes stay in the Delegation group and get no anchor.
+  // Transcript anchors in seq order, one per event at most: creation, delegation.created, gateway
+  // context writes labelled by source_kind (client or context group), and client_to_upstream frames.
+  // Acknowledgements, usage, session and conversation events get no anchor.
   function anchorRows(list) {
     var events = Array.isArray(list) ? list : [];
     var out = [];
     var creation = events.filter(function (ev) { return ev && ev.direction === 'gateway_creation'; })[0];
     if (creation) {
-      out.push({ seq: creation.seq, at: creation.at, kind: 'creation', label: 'Creation · ' + creationSummary(creationDetails(creationFromEvent(creation))) });
+      out.push({ seq: creation.seq, at: creation.at, kind: 'creation', label: 'Creation · ' + creationSummary(creationDetails(creationFromEvent(creation))), tags: [] });
     }
     delegationRows(events).forEach(function (r) {
-      if (r.kind !== 'created') return;
       out.push({
         seq: r.seq,
         at: r.at,
         kind: 'delegation',
-        label: 'Delegation' + (r.target ? ' · target ' + r.target : '') + (r.handoff ? ' · handoff ' + r.handoff : '')
+        label: 'Delegation' + (r.target ? ' · target ' + r.target : '') + (r.handoff ? ' · handoff ' + r.handoff : ''),
+        tags: []
       });
     });
     events.forEach(function (ev) {
       if (!ev) return;
-      if (ev.group === 'context') out.push({ seq: ev.seq, at: ev.at, kind: 'context', label: 'Context write · ' + ev.type });
-      if (ev.group === 'client') out.push({ seq: ev.seq, at: ev.at, kind: 'client', label: 'Client message · ' + ev.type });
+      if (isContextWriteType(ev.type) && ev.direction === 'gateway_to_upstream') {
+        var write = ev.group === 'client';
+        out.push({
+          seq: ev.seq,
+          at: ev.at,
+          kind: write ? 'client' : 'context',
+          label: (write ? 'Client message · ' : 'Context write · ') + (ev.source_kind || ev.type),
+          tags: writeTags(ev.payload)
+        });
+      } else if (ev.group === 'client' && ev.direction === 'client_to_upstream') {
+        out.push({ seq: ev.seq, at: ev.at, kind: 'client', label: 'Client message · ' + ev.type, tags: [] });
+      }
     });
     return out.sort(function (a, b) { return a.seq - b.seq; });
+  }
+
+  // Display-only tags for a context write: speakable channel and a delegation link. Never used for grouping.
+  function writeTags(payload) {
+    var obj = parseJSON(payload);
+    var tags = [];
+    if (!obj || typeof obj !== 'object') return tags;
+    if (obj.channel === 'speakable') tags.push('speakable');
+    if (obj.delegation_item_id) tags.push('delegation');
+    return tags;
   }
 
   // Creation anchors come first; every other anchor sits before the first turn whose seq is not lower.
@@ -909,7 +937,9 @@
       row.tabIndex = 0;
       row.title = 'Show #' + a.seq + ' in the timeline';
       row.appendChild(make('span', 'vw-time', formatClock(a.at)));
-      row.appendChild(make('span', 'vw-marker-text', a.label));
+      var label = make('span', 'vw-marker-text', a.label);
+      (a.tags || []).forEach(function (t) { label.appendChild(make('span', 'vw-tag', t)); });
+      row.appendChild(label);
       row.appendChild(make('span', 'vw-seq', '#' + a.seq));
       row.addEventListener('click', function () { jumpToSeq(a.seq); });
       row.addEventListener('keydown', function (e) {
@@ -1042,7 +1072,7 @@
       head.setAttribute('role', 'button');
       head.tabIndex = 0;
       head.setAttribute('aria-expanded', 'false');
-      head.title = r.group + ' · ' + r.dirLabel + (r.tag ? ' · type ' + r.rawType : '');
+      head.title = r.group + ' · ' + r.dirLabel + (r.tag ? ' · type ' + r.rawType : '') + (r.sourceKind ? ' · source ' + r.sourceKind : '');
       head.appendChild(make('span', 'vw-time', r.time));
       var arrow = make('span', 'vw-arrow dir-' + safeClass(r.direction), r.arrow);
       arrow.title = r.dirLabel;
@@ -1050,6 +1080,7 @@
       head.appendChild(arrow);
       var typeCell = make('span', 'vw-type', r.type);
       if (r.tag) typeCell.appendChild(make('span', 'vw-tag', r.tag));
+      if (r.sourceKind) typeCell.appendChild(make('span', 'vw-tag enc', r.sourceKind));
       head.appendChild(typeCell);
       head.appendChild(make('span', 'vw-size', r.size));
       head.appendChild(make('span', 'vw-delivery', r.delivery));
@@ -1061,12 +1092,12 @@
       var filled = false;
       var fill = function () {
         filled = true;
-        body.appendChild(make('div', 'vw-payload-meta', [groupLabel(ev.group), r.tag ? 'type ' + r.rawType : '', ev.at, ev.source, 'delivery ' + ev.delivery].filter(Boolean).join(' · ')));
+        body.appendChild(make('div', 'vw-payload-meta', [groupLabel(ev.group), r.tag ? 'type ' + r.rawType : '', ev.at, ev.source, r.sourceKind ? 'source_kind ' + r.sourceKind : '', 'delivery ' + ev.delivery].filter(Boolean).join(' · ')));
         if (r.direction === 'gateway_creation') {
           body.appendChild(make('pre', 'vw-pre vw-event-pre', creationDetails(creationFromEvent(ev)).body));
           return;
         }
-        body.appendChild(make('pre', 'vw-pre vw-event-pre', prettyPayload(ev.payload)));
+        body.appendChild(make('pre', 'vw-pre vw-event-pre', displayPayload(ev.payload)));
         if (ev.truncated) body.appendChild(make('div', 'vw-payload-meta warn', '[payload truncated by gateway]'));
       };
       var setOpen = function (open) {
@@ -1477,6 +1508,7 @@
     streamUrl: streamUrl,
     viewerUrl: viewerUrl,
     prettyPayload: prettyPayload,
+    displayPayload: displayPayload,
     readableJSON: readableJSON,
     PAGE_SIZE: PAGE_SIZE,
     GROUPS: GROUPS.map(function (g) { return { id: g.id, label: g.label }; }),
@@ -1491,6 +1523,7 @@
     filterParams: filterParams,
     filterFromParams: filterFromParams,
     delegationRows: delegationRows,
+    writeTags: writeTags,
     summaryIsActive: summaryIsActive,
     generationStateLabel: generationStateLabel,
     generationOptionLabel: generationOptionLabel,

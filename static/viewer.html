@@ -114,7 +114,9 @@
     .vw-anchor { cursor: pointer; }
     .vw-anchor.kind-creation { border-left-color: var(--dim); background: var(--surface-3); }
     .vw-anchor.kind-context { border-left-color: var(--amber); background: var(--amber-soft); }
-    .vw-anchor.kind-client { border-left-color: var(--ink-soft); background: var(--surface-2); }
+    .vw-anchor.kind-delegation { border-left-color: var(--green-dark); background: var(--green-soft); }
+    .vw-anchor.kind-client { border-left-width: 5px; border-left-color: var(--ink); background: var(--surface-3); }
+    .vw-anchor.kind-client .vw-marker-text { font-weight: 700; }
     .vw-anchor:hover { background: var(--row-hover); }
     .vw-anchor:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--green); }
     .vw-marker-text { min-width: 0; color: var(--ink); font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
@@ -239,6 +241,7 @@
         <div id="vwMenu" class="vw-menu" hidden>
           <div class="vw-menu-label">Presets</div>
           <button type="button" data-preset="conversation">Conversation only</button>
+          <button type="button" data-preset="client">Client messages only</button>
           <button type="button" data-preset="delegation">Delegation only</button>
           <button type="button" data-preset="everything">Show everything</button>
           <hr />

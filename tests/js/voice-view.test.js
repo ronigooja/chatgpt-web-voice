@@ -135,6 +135,35 @@ test('payload strings are kept as text and objects are serialized', () => {
   assert.equal(V.prettyPayload('{"a":'), '{"a":');
 });
 
+test('displayPayload unwraps string data_message payloads into readable JSON', () => {
+  const inner = { end_ms: 46000, item: { id: 'a', text: 'hi\nthere' }, type: 'output_transcript.added' };
+  const text = JSON.stringify({ type: 'data_message', data: JSON.stringify(inner) });
+  const out = V.displayPayload(text);
+  assert.ok(!out.includes('\\"'));
+  assert.ok(out.includes('"type": "output_transcript.added"'));
+  assert.ok(out.includes('"type": "data_message"'));
+  assert.match(out, /"text": "hi\n\s+there"/);
+});
+
+test('displayPayload keeps object data, non-data_message, non-JSON string data and invalid text unchanged', () => {
+  const objData = JSON.stringify({ type: 'data_message', data: { a: 1 } });
+  assert.equal(V.displayPayload(objData), V.prettyPayload(objData));
+  const other = JSON.stringify({ type: 'turn.done', data: '{"a":1}' });
+  assert.equal(V.displayPayload(other), V.prettyPayload(other));
+  const plain = JSON.stringify({ type: 'data_message', data: 'not json' });
+  assert.equal(V.displayPayload(plain), V.prettyPayload(plain));
+  assert.equal(V.displayPayload('{"a":'), '{"a":');
+});
+
+test('displayPayload unwraps nested string data_message up to three levels', () => {
+  const leaf = { type: 'output_transcript.added', text: 'x' };
+  const middle = JSON.stringify({ type: 'data_message', data: JSON.stringify(leaf) });
+  const text = JSON.stringify({ type: 'data_message', data: middle });
+  const out = V.displayPayload(text);
+  assert.ok(!out.includes('\\"'));
+  assert.deepEqual(JSON.parse(out), { type: 'data_message', data: { type: 'data_message', data: leaf } });
+});
+
 test('filtered view copies raw events, not normalized ones', () => {
   const s = V.createStore();
   const raw = ev(1, { delivery: 'sent', extra_field: 'kept' });

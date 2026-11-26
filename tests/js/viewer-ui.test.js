@@ -25,34 +25,38 @@ function fixtureStore() {
   s.add([
     ev(1, { type: 'turn.created', payload: JSON.stringify({ type: 'turn.created', turn: { role: 'user', id: 'u1', transcript: 'Synthetic question' } }) }),
     ev(2, { type: 'delegation.created', payload: JSON.stringify({ type: 'delegation.created', item: { id: 'di_1', handoff_id: 'h_1', target: 'client', content: [{ type: 'input_text', text: 'Synthetic note' }] } }) }),
-    ev(3, { direction: 'gateway_to_upstream', type: 'session.context.append', payload: JSON.stringify({ delegation_item_id: 'di_1' }) }),
-    ev(4, { direction: 'gateway_to_upstream', type: 'delegation.context.append', payload: JSON.stringify({ delegation_item_id: 'di_1' }) }),
+    ev(3, { direction: 'gateway_to_upstream', type: 'session.context.append', source_kind: 'task_result', payload: JSON.stringify({ delegation_item_id: 'di_1' }) }),
+    ev(4, { direction: 'gateway_to_upstream', type: 'delegation.context.append', source_kind: 'user_text', payload: JSON.stringify({ delegation_item_id: 'di_1' }) }),
     ev(5, { type: 'session.usage.updated', payload: '{}' })
   ]);
   return s;
 }
 
-test('delegation count is the number of delegation.created events; writes are the rest of the group', () => {
+test('delegation count is the number of delegation.created events; context writes are not delegations', () => {
   const c = V.delegationCounts(fixtureStore().list(), '');
-  assert.deepEqual(c, { total: 3, created: 1, writes: 2 });
-  assert.equal(V.delegationTooltip(c), '3 events: 1 created, 2 context writes');
+  assert.deepEqual(c, { created: 1 });
+  assert.equal(V.delegationTooltip(c), '1 delegation created');
 });
 
 test('delegation count respects the search text', () => {
   const list = fixtureStore().list();
-  assert.deepEqual(V.delegationCounts(list, 'synthetic note'), { total: 1, created: 1, writes: 0 });
-  assert.deepEqual(V.delegationCounts(list, 'nothing-matches'), { total: 0, created: 0, writes: 0 });
-  assert.deepEqual(V.delegationCounts(list, 'di_1'), { total: 3, created: 1, writes: 2 });
+  assert.deepEqual(V.delegationCounts(list, 'synthetic note'), { created: 1 });
+  assert.deepEqual(V.delegationCounts(list, 'nothing-matches'), { created: 0 });
+  assert.deepEqual(V.delegationCounts(list, 'di_1'), { created: 1 });
 });
 
-test('delegation tooltip uses singular forms for one event', () => {
-  assert.equal(V.delegationTooltip({ total: 1, created: 1, writes: 0 }), '1 event: 1 created, 0 context writes');
-  assert.equal(V.delegationTooltip({ total: 0, created: 0, writes: 0 }), '0 events: 0 created, 0 context writes');
+test('delegation tooltip uses plural forms unless there is exactly one', () => {
+  assert.equal(V.delegationTooltip({ created: 1 }), '1 delegation created');
+  assert.equal(V.delegationTooltip({ created: 0 }), '0 delegations created');
+  assert.equal(V.delegationTooltip({ created: 2 }), '2 delegations created');
 });
 
-test('the delegation group count equals the events in the group', () => {
+test('the delegation group count equals the delegation.created count', () => {
   const s = fixtureStore();
-  assert.equal(s.counts('').delegation, V.delegationCounts(s.list(), '').total);
+  assert.equal(s.counts('').delegation, V.delegationCounts(s.list(), '').created);
+  assert.equal(s.counts('').delegation, 1);
+  assert.equal(s.counts('').client, 1);
+  assert.equal(s.counts('').context, 1);
 });
 
 test('filter state is active only when a group is off, a type is chosen or search text is set', () => {
@@ -85,6 +89,12 @@ test('compact event row formats time, arrow, type, size, delivery and seq', () =
   assert.equal(row.delivery, 'sent');
   assert.equal(row.delegation, false);
   assert.match(row.time, /^\d{2}:\d{2}:\d{2}$/);
+});
+
+test('compact event row carries source_kind, empty when absent', () => {
+  const sourced = V.compactEventRow(ev(8, { direction: 'gateway_to_upstream', type: 'session.context.append', group: 'context', source_kind: 'ui_feedback' }));
+  assert.equal(sourced.sourceKind, 'ui_feedback');
+  assert.equal(V.compactEventRow(ev(9, { type: 'turn.done', group: 'conversation' })).sourceKind, '');
 });
 
 test('compact event row marks delegation rows and tolerates missing fields', () => {
@@ -297,20 +307,47 @@ function anchorFixture() {
     ev(2, { type: 'turn.created', payload: JSON.stringify({ type: 'turn.created', turn: { role: 'user', id: 'u1', transcript: 'hello' } }) }),
     ev(3, { direction: 'client_to_upstream', type: 'text', payload: '{"text":"hi"}' }),
     ev(4, { type: 'delegation.created', payload: JSON.stringify({ type: 'delegation.created', item: { id: 'di_1', handoff_id: 'h_1', target: 'client', content: [] } }) }),
-    ev(5, { direction: 'gateway_to_upstream', type: 'session.context.append', payload: JSON.stringify({ delegation_item_id: 'di_1' }) }),
+    ev(5, { direction: 'gateway_to_upstream', type: 'session.context.append', source_kind: 'task_result', payload: JSON.stringify({ delegation_item_id: 'di_1' }) }),
     ev(6, { direction: 'gateway_to_upstream', type: 'session.context.append', payload: JSON.stringify({ content: [] }) }),
-    ev(7, { type: 'turn.done', payload: JSON.stringify({ type: 'turn.done', turn: { role: 'assistant', id: 'a1', transcript: 'ok' } }) })
+    ev(7, { type: 'turn.done', payload: JSON.stringify({ type: 'turn.done', turn: { role: 'assistant', id: 'a1', transcript: 'ok' } }) }),
+    ev(8, { direction: 'gateway_to_upstream', type: 'delegation.context.append', source_kind: 'user_text', payload: JSON.stringify({ channel: 'speakable', content: [] }) }),
+    ev(9, { type: 'session.context.appended', payload: '{}' }),
+    ev(10, { type: 'session.usage.updated', payload: '{}' })
   ]);
   return s;
 }
 
-test('anchor rows cover creation, delegation.created, context writes and client messages in seq order', () => {
+test('anchor rows cover creation, delegation.created, source-labelled context writes and client messages in seq order', () => {
   const rows = V.anchorRows(anchorFixture().list());
-  assert.deepEqual(rows.map(r => r.seq), [1, 3, 4, 6]);
-  assert.deepEqual(rows.map(r => r.kind), ['creation', 'client', 'delegation', 'context']);
-  assert.equal(rows[2].label, 'Delegation · target client · handoff h_1');
-  assert.equal(rows[3].label, 'Context write · session.context.append');
+  assert.deepEqual(rows.map(r => r.seq), [1, 3, 4, 5, 6, 8]);
+  assert.deepEqual(rows.map(r => r.kind), ['creation', 'client', 'delegation', 'context', 'context', 'client']);
   assert.equal(rows[1].label, 'Client message · text');
+  assert.equal(rows[2].label, 'Delegation · target client · handoff h_1');
+  assert.equal(rows[3].label, 'Context write · task_result');
+  assert.equal(rows[4].label, 'Context write · session.context.append');
+  assert.equal(rows[5].label, 'Client message · user_text');
+});
+
+test('anchor tags show speakable and delegation links for display only', () => {
+  const rows = V.anchorRows(anchorFixture().list());
+  assert.deepEqual(rows[0].tags, []);
+  assert.deepEqual(rows[3].tags, ['delegation']);
+  assert.deepEqual(rows[4].tags, []);
+  assert.deepEqual(rows[5].tags, ['speakable']);
+  assert.deepEqual(V.writeTags('not json'), []);
+  assert.deepEqual(V.writeTags('null'), []);
+  assert.deepEqual(V.writeTags(JSON.stringify({ channel: 'speakable', delegation_item_id: 'd' })), ['speakable', 'delegation']);
+});
+
+test('acknowledgements, usage, session and conversation events get no anchor', () => {
+  const seqs = V.anchorRows(anchorFixture().list()).map(r => r.seq);
+  [2, 7, 9, 10].forEach(seq => assert.equal(seqs.indexOf(seq), -1, 'seq ' + seq));
+});
+
+test('a context write from the gateway gets exactly one anchor, labelled by source', () => {
+  const rows = V.anchorRows(anchorFixture().list());
+  assert.equal(rows.filter(r => r.seq === 5).length, 1);
+  assert.equal(rows.filter(r => r.seq === 5)[0].kind, 'context');
 });
 
 test('the creation anchor is labelled with the creation summary', () => {
@@ -322,18 +359,19 @@ test('the creation anchor is labelled with the creation summary', () => {
   assert.equal(V.anchorRows([]).length, 0);
 });
 
-test('delegation writes keep only the Delegation group and do not get a second anchor', () => {
+test('the Delegation group holds only delegation.created and gets exactly one anchor', () => {
   const list = anchorFixture().list();
-  assert.equal(list.filter(e => e.group === 'delegation').length, 2);
+  assert.equal(list.filter(e => e.group === 'delegation').length, 1);
   const rows = V.anchorRows(list);
   assert.equal(rows.filter(r => r.kind === 'delegation').length, 1);
-  assert.equal(rows.some(r => r.seq === 5), false);
+  assert.equal(rows.filter(r => r.seq === 4).length, 1);
 });
 
 test('anchors are placed between turns by seq and the creation anchor stays first', () => {
   const items = [{ seq: 2, role: 'user', text: 'hello', final: true }, { seq: 7, role: 'assistant', text: 'ok', final: true }];
   const entries = V.transcriptEntries(items, V.anchorRows(anchorFixture().list()));
-  assert.deepEqual(entries.map(e => e.anchor ? e.anchor.kind : 'turn'), ['creation', 'turn', 'client', 'delegation', 'context', 'turn']);
+  assert.deepEqual(entries.map(e => e.anchor ? e.anchor.kind : 'turn'),
+    ['creation', 'turn', 'client', 'delegation', 'context', 'context', 'turn', 'client']);
   assert.equal(entries[1].turn.seq, 2);
   assert.deepEqual(V.transcriptEntries([], []), []);
 });
