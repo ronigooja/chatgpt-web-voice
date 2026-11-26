@@ -79,7 +79,7 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	result, err := s.voice.CreateSession(voice.CreateSessionRequest{
+	req := voice.CreateSessionRequest{
 		Owner:                   adminVoiceOwner(r),
 		OfferSDP:                body.OfferSDP,
 		Voice:                   body.Voice,
@@ -91,7 +91,8 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) {
 		UpstreamParentMessageID: body.UpstreamParentMessageID,
 		UpstreamVoiceSessionID:  body.UpstreamVoiceSessionID,
 		Instructions:            body.Instructions,
-	})
+	}
+	result, err := s.voice.CreateSession(req.ForAdminWeb())
 	if err != nil {
 		writeServiceError(w, err)
 		return

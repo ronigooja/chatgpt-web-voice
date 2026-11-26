@@ -41,7 +41,7 @@ func openingHashFixture(t *testing.T) (*Service, *store.DB, *sessionBinding, Ope
 		t.Fatal(err)
 	}
 	s := New(config.Config{VoiceUpstreamRoute: "avas", SessionTTLSeconds: 180}, nil, nil).WithCallSessions(callsessions.NewStore(db))
-	b := &sessionBinding{Owner: "api_key:1", CreatedAt: time.Now(), UpdatedAt: time.Now(), mediaID: mediaevidence.Identity{VoiceSessionID: "s", MediaGeneration: 1}}
+	b := &sessionBinding{Owner: "api_key:1", route: "avas", CreatedAt: time.Now(), UpdatedAt: time.Now(), mediaID: mediaevidence.Identity{VoiceSessionID: "s", MediaGeneration: 1}}
 	s.bindings["s"] = b
 	return s, db, b, OpeningContext{Kind: "full", Version: 1, Items: []OpeningContextItem{{Role: "user", Text: "hello"}}}
 }
@@ -131,8 +131,8 @@ func TestOpeningHashConcurrentFinalization(t *testing.T) {
 }
 
 func TestOpeningHashWMUnverified(t *testing.T) {
-	s, db, _, c := openingHashFixture(t)
-	s.cfg.VoiceUpstreamRoute = "wm"
+	s, db, b, c := openingHashFixture(t)
+	b.route = "wm"
 	db.Conn().Exec(`UPDATE call_sessions SET opening_context_version=1`)
 	r, err := s.ApplyOpeningContext("api_key:1", "s", c)
 	if err != nil || r.Silent != "unverified" || r.ContentHash != "" {

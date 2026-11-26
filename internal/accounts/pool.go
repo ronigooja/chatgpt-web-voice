@@ -405,27 +405,39 @@ func (p *Pool) PickByID(id int64, excluded map[string]struct{}) (string, Account
 // A preferred token is only accepted when it already exists in this database;
 // callers cannot inject arbitrary upstream credentials.
 func (p *Pool) Pick(preferredToken string, excluded map[string]struct{}) (string, Account, error) {
+	return p.pick(preferredToken, 0, excluded, false)
+}
+
+// PickUnreserved selects an account not held by unresolved gateway media.
+func (p *Pool) PickUnreserved(preferredToken string, preferredID int64, excluded map[string]struct{}) (string, Account, error) {
+	return p.pick(preferredToken, preferredID, excluded, true)
+}
+
+func (p *Pool) pick(preferredToken string, preferredID int64, excluded map[string]struct{}, unreserved bool) (string, Account, error) {
 	p.db.Lock()
 	defer p.db.Unlock()
 	if excluded == nil {
 		excluded = map[string]struct{}{}
 	}
 
-	var rows *sql.Rows
-	var err error
-	if preferred := strings.TrimSpace(preferredToken); preferred != "" {
-		hash := p.tokenHash(preferred)
-		rows, err = p.db.Conn().Query(
-			"SELECT "+accountSelectColumns+" FROM accounts WHERE token_hash = ? AND disabled = 0 AND status <> '禁用'",
-			hash,
-		)
-	} else {
-		rows, err = p.db.Conn().Query(
-			"SELECT " + accountSelectColumns + ` FROM accounts
-			WHERE disabled = 0 AND status <> '禁用'
-			ORDER BY CASE WHEN last_used_at IS NULL THEN 0 ELSE 1 END, last_used_at, id`,
-		)
+	query := "SELECT " + accountSelectColumns + " FROM accounts WHERE disabled = 0 AND status <> '禁用'"
+	if unreserved {
+		query += ` AND NOT EXISTS (SELECT 1 FROM voice_media_sessions m WHERE m.state <> 'terminated'
+			AND (m.account_id = accounts.id OR m.current_account_id = accounts.id))`
 	}
+	var args []any
+	preferred := strings.TrimSpace(preferredToken)
+	switch {
+	case preferredID > 0:
+		query += " AND id = ?"
+		args = append(args, preferredID)
+	case preferred != "":
+		query += " AND token_hash = ?"
+		args = append(args, p.tokenHash(preferred))
+	default:
+		query += " ORDER BY CASE WHEN last_used_at IS NULL THEN 0 ELSE 1 END, last_used_at, id"
+	}
+	rows, err := p.db.Conn().Query(query, args...)
 	if err != nil {
 		return "", Account{}, fmt.Errorf("select account: %w", err)
 	}
@@ -455,7 +467,7 @@ func (p *Pool) Pick(preferredToken string, excluded map[string]struct{}) (string
 		}
 		return selected.AccessToken, selected, nil
 	}
-	if strings.TrimSpace(preferredToken) != "" {
+	if preferredID > 0 || preferred != "" {
 		return "", Account{}, &Error{Message: "preferred account is unavailable"}
 	}
 	return "", Account{}, &Error{Message: "no available web access_token in sqlite database"}

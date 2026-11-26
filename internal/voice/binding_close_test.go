@@ -36,7 +36,7 @@ func TestBindingAlreadyClosedRegistration(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		s.bindVoiceSessionMedia("api_key:1", "s", "", accounts.Account{}, UpstreamContext{}, m, mediaevidence.Identity{}, nil)
+		s.bindVoiceSessionMedia("api_key:1", "s", "", accounts.Account{}, UpstreamContext{}, m, mediaevidence.Identity{}, nil, "wm")
 	}()
 	select {
 	case <-done:
@@ -56,7 +56,7 @@ func TestBindingDelayedRegistrationReplacementFence(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		s.bindVoiceSessionMedia("api_key:1", "s", "", accounts.Account{}, UpstreamContext{}, old, mediaevidence.Identity{}, nil)
+		s.bindVoiceSessionMedia("api_key:1", "s", "", accounts.Account{}, UpstreamContext{}, old, mediaevidence.Identity{}, nil, "wm")
 	}()
 	select {
 	case <-old.registering:
@@ -67,7 +67,7 @@ func TestBindingDelayedRegistrationReplacementFence(t *testing.T) {
 	replaced := make(chan struct{})
 	go func() {
 		defer close(replaced)
-		s.bindVoiceSessionMedia("api_key:1", "s", "", accounts.Account{}, UpstreamContext{}, next, mediaevidence.Identity{}, nil)
+		s.bindVoiceSessionMedia("api_key:1", "s", "", accounts.Account{}, UpstreamContext{}, next, mediaevidence.Identity{}, nil, "wm")
 	}()
 	select {
 	case <-replaced:
