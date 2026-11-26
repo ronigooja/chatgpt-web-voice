@@ -30,7 +30,7 @@ const sessionSelectColumns = `
 	COALESCE(opening_context_version, 0), COALESCE(opening_context_kind, ''),
 	COALESCE(opening_context_items, 0), COALESCE(opening_context_chars, 0), COALESCE(opening_context_applied_at, ''),
 	COALESCE(voice, ''), COALESCE(voice_mode, ''), COALESCE(language_code, ''),
-	status, created_at, updated_at, last_seen_at, COALESCE(released_at, '')`
+	status, created_at, updated_at, last_seen_at, COALESCE(released_at, ''), upstream_route`
 
 // Session is gateway voice-session metadata. It never stores chat content.
 type Session struct {
@@ -60,6 +60,7 @@ type Session struct {
 	UpdatedAt               string `json:"updated_at"`
 	LastSeenAt              string `json:"last_seen_at"`
 	ReleasedAt              string `json:"released_at,omitempty"`
+	UpstreamRoute           string `json:"-"`
 }
 
 // ListFilter narrows admin list queries.
@@ -116,12 +117,12 @@ func (s *Store) Upsert(item Session) error {
 			conversation_state, conversation_reason, conversation_confirmed, context_chars,
 			opening_context_version, opening_context_kind, opening_context_items, opening_context_chars, opening_context_applied_at,
 			voice, voice_mode, language_code, status,
-			created_at, updated_at, last_seen_at, released_at
+			created_at, updated_at, last_seen_at, released_at, upstream_route
 		) VALUES (
 			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?,
 			?, ?, ?, ?, ?, ?, ?,
-			CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ''
+			CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, '', ?
 		)
 		ON CONFLICT(voice_session_id) DO UPDATE SET
 			owner = excluded.owner,
@@ -158,6 +159,7 @@ func (s *Store) Upsert(item Session) error {
 			voice_mode = CASE WHEN excluded.voice_mode <> '' THEN excluded.voice_mode ELSE call_sessions.voice_mode END,
 			language_code = CASE WHEN excluded.language_code <> '' THEN excluded.language_code ELSE call_sessions.language_code END,
 			status = excluded.status,
+			upstream_route = excluded.upstream_route,
 			updated_at = CURRENT_TIMESTAMP,
 			last_seen_at = CURRENT_TIMESTAMP,
 			released_at = CASE
@@ -168,7 +170,7 @@ func (s *Store) Upsert(item Session) error {
 		item.UpstreamConversationID, item.UpstreamParentMessageID, item.UpstreamVoiceSessionID,
 		item.Conversation, item.ConversationReason, boolValue(item.ConversationConfirmed), item.ContextChars,
 		item.OpeningContextVersion, item.OpeningContextKind, item.OpeningContextItems, item.OpeningContextChars, item.OpeningContextAppliedAt,
-		item.Voice, item.VoiceMode, item.LanguageCode, item.Status,
+		item.Voice, item.VoiceMode, item.LanguageCode, item.Status, item.UpstreamRoute,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert call session: %w", err)
@@ -475,7 +477,7 @@ func scanSession(row store.Scanner) (Session, error) {
 		&item.Conversation, &item.ConversationReason, &item.ConversationConfirmed, &item.ContextChars,
 		&item.OpeningContextVersion, &item.OpeningContextKind, &item.OpeningContextItems, &item.OpeningContextChars, &item.OpeningContextAppliedAt,
 		&item.Voice, &item.VoiceMode, &item.LanguageCode,
-		&item.Status, &item.CreatedAt, &item.UpdatedAt, &item.LastSeenAt, &item.ReleasedAt,
+		&item.Status, &item.CreatedAt, &item.UpdatedAt, &item.LastSeenAt, &item.ReleasedAt, &item.UpstreamRoute,
 	); err != nil {
 		return Session{}, err
 	}

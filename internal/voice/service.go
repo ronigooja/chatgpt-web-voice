@@ -113,6 +113,7 @@ type UpstreamContext struct {
 
 type sessionBinding struct {
 	Owner                  string
+	route                  string
 	AccountID              int64
 	AccessToken            string
 	Proxy                  string
@@ -528,10 +529,10 @@ func (s *Service) cleanupBindingsLocked(now time.Time) {
 }
 
 func (s *Service) bindVoiceSession(owner, sessionID, token string, account accounts.Account, upstream UpstreamContext) string {
-	return s.bindVoiceSessionMedia(owner, sessionID, token, account, upstream, nil, mediaevidence.Identity{}, nil)
+	return s.bindVoiceSessionMedia(owner, sessionID, token, account, upstream, nil, mediaevidence.Identity{}, nil, s.cfg.VoiceUpstreamRoute)
 }
 
-func (s *Service) bindVoiceSessionMedia(owner, sessionID, token string, account accounts.Account, upstream UpstreamContext, media relay.Session, mediaID mediaevidence.Identity, call *callState) string {
+func (s *Service) bindVoiceSessionMedia(owner, sessionID, token string, account accounts.Account, upstream UpstreamContext, media relay.Session, mediaID mediaevidence.Identity, call *callState, route string) string {
 	owner = normalizeSessionOwner(owner)
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
@@ -568,6 +569,7 @@ func (s *Service) bindVoiceSessionMedia(owner, sessionID, token string, account 
 		mediaID:                mediaID,
 		call:                   call,
 		Owner:                  owner,
+		route:                  route,
 		AccountID:              account.ID,
 		AccessToken:            token,
 		Proxy:                  account.Proxy,
@@ -865,7 +867,8 @@ func (s *Service) UpdateSessionContext(owner, voiceSessionID string, patch Upstr
 		}
 		var avasWriter *avasSidebandWriter
 		var avasDelegation string
-		if s.cfg.VoiceUpstreamRoute == "avas" && strings.TrimSpace(patch.Text) != "" {
+		deliverText := item.route == "avas" && strings.TrimSpace(patch.Text) != ""
+		if deliverText {
 			avasWriter = item.avasSideband
 			avasDelegation = item.openDelegation
 		}
@@ -877,7 +880,7 @@ func (s *Service) UpdateSessionContext(owner, voiceSessionID string, patch Upstr
 			if err := sendAVASContext(avasWriter, avasDelegation, patch.Text); err != nil {
 				return UpstreamContext{}, &ServiceError{Message: "context delivery failed", StatusCode: 502}
 			}
-		} else if strings.TrimSpace(patch.Text) != "" && s.cfg.VoiceUpstreamRoute == "avas" {
+		} else if deliverText {
 			return UpstreamContext{}, &ServiceError{Message: "context delivery failed", StatusCode: 502}
 		}
 		s.mu.Lock()
@@ -901,7 +904,7 @@ func (s *Service) UpdateSessionContext(owner, voiceSessionID string, patch Upstr
 	s.mu.Unlock()
 
 	// Memory binding gone (typical after hangup): update durable metadata only.
-	if s.GatewayOwnsCalls() {
+	if s.GatewayOwnsCalls() && !isAdminVoiceOwner(owner) {
 		return UpstreamContext{}, &ServiceError{Message: "voice session not active", StatusCode: 404}
 	}
 	if s.records == nil {
@@ -913,6 +916,9 @@ func (s *Service) UpdateSessionContext(owner, voiceSessionID string, patch Upstr
 			return UpstreamContext{}, &ServiceError{Message: "voice session not found", StatusCode: 404}
 		}
 		return UpstreamContext{}, &ServiceError{Message: "voice session lookup failed", StatusCode: 500}
+	}
+	if s.GatewayOwnsCalls() && row.UpstreamRoute != "wm" {
+		return UpstreamContext{}, &ServiceError{Message: "voice session not active", StatusCode: 404}
 	}
 	updated, err := s.records.UpdateUpstream(
 		owner,
@@ -964,7 +970,7 @@ func (s *Service) ApplyOpeningContext(owner, voiceSessionID string, c OpeningCon
 	if c.Version < row.OpeningContextVersion {
 		return nil, &ServiceError{Message: "opening context version must increase", StatusCode: 409}
 	}
-	if s.cfg.VoiceUpstreamRoute == "avas" && c.Version == row.OpeningContextVersion {
+	if binding.route == "avas" && c.Version == row.OpeningContextVersion {
 		if err := s.checkOpeningHash(owner, voiceSessionID, c); err != nil {
 			return nil, err
 		}
@@ -972,7 +978,7 @@ func (s *Service) ApplyOpeningContext(owner, voiceSessionID string, c OpeningCon
 	if c.Version == row.OpeningContextVersion && row.OpeningContextVersion > 0 {
 		return &OpeningContextResult{Applied: true, AlreadyApplied: true, Version: c.Version, ItemCount: row.OpeningContextItems, CharCount: row.OpeningContextChars, Silent: "unverified"}, nil
 	}
-	if s.cfg.VoiceUpstreamRoute == "avas" {
+	if binding.route == "avas" {
 		return nil, &ServiceError{Message: "opening context live injection is not supported on avas", StatusCode: 501}
 	}
 	injector, ok := binding.media.(relay.UpstreamEventInjector)
@@ -1317,6 +1323,11 @@ func normalizeSessionOwner(owner string) string {
 		return "internal"
 	}
 	return owner
+}
+
+func isAdminVoiceOwner(owner string) bool {
+	name, ok := strings.CutPrefix(owner, "admin:")
+	return ok && strings.TrimSpace(name) != ""
 }
 
 func encodeMultipart(fields [][2]string) (body []byte, contentType string) {
@@ -1919,9 +1930,16 @@ type CreateSessionRequest struct {
 	OpeningContext          OpeningContext
 	Instructions            string
 	RequestID               string
+	adminWeb                bool
 	owned                   *ownedCall
 	creationAttempt         string
 	diagnostics             *creationDiagnostics
+}
+
+// ForAdminWeb selects the direct WM path for an authenticated admin request.
+func (r CreateSessionRequest) ForAdminWeb() CreateSessionRequest {
+	r.adminWeb = true
+	return r
 }
 
 func openingContextText(c OpeningContext) string {
@@ -1938,23 +1956,40 @@ func openingContextText(c OpeningContext) string {
 
 // pickAccountForSession preserves stable account identity across token edits.
 // A token retained by a live binding may have been reassigned to another account.
-func (s *Service) pickAccountForSession(preferredToken string, preferredAccountID int64, excluded map[string]struct{}) (string, accounts.Account, error) {
+func (s *Service) pickAccountForSession(preferredToken string, preferredAccountID int64, excluded map[string]struct{}, unreserved bool) (string, accounts.Account, error) {
+	if unreserved {
+		pool, ok := s.pool.(interface {
+			PickUnreserved(string, int64, map[string]struct{}) (string, accounts.Account, error)
+		})
+		if !ok {
+			return "", accounts.Account{}, &accounts.Error{Message: "unreserved account selection unavailable"}
+		}
+		return pool.PickUnreserved(preferredToken, preferredAccountID, excluded)
+	}
 	if preferredAccountID > 0 {
 		return s.pool.PickByID(preferredAccountID, excluded)
 	}
 	return s.pool.Pick(strings.TrimSpace(preferredToken), excluded)
 }
 
-// CreateSession POSTs offer SDP to /realtime/wm and returns answer SDP.
+// CreateSession exchanges the offer SDP on the selected upstream route.
 func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult, createErr error) {
+	owner := normalizeSessionOwner(req.Owner)
+	adminWeb := req.adminWeb && req.owned == nil && isAdminVoiceOwner(owner)
+	route := s.cfg.VoiceUpstreamRoute
+	mediaRelay := s.relay
+	if adminWeb {
+		route = "wm"
+		mediaRelay = nil
+	}
 	diag := req.diagnostics
 	diag.fail(stageValidation, classValidation)
-	if req.owned == nil && s.cfg.ZoeGatewayAPIKeyID > 0 {
+	if req.owned == nil && s.GatewayOwnsCalls() && !adminWeb {
 		return nil, &ServiceError{Message: "media admission is gateway-owned", StatusCode: 503}
 	}
 	// Serialize AVAS opening preflight through finalization, without a DB
 	// transaction across network IO. Creation remains non-idempotent.
-	if s.cfg.VoiceUpstreamRoute == "avas" && len(req.OpeningContext.Items) > 0 {
+	if route == "avas" && len(req.OpeningContext.Items) > 0 {
 		s.openingMu.Lock()
 		defer s.openingMu.Unlock()
 	}
@@ -1978,7 +2013,6 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 		}
 	}
 	voice := options.Voice
-	owner := normalizeSessionOwner(req.Owner)
 	bound, ownedByOther := s.boundVoiceSession(owner, req.VoiceSessionID)
 	if ownedByOther {
 		return nil, &ServiceError{Message: "voice session does not belong to caller", StatusCode: 403}
@@ -1994,7 +2028,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 			}
 		}
 	}
-	if s.cfg.VoiceUpstreamRoute == "avas" && len(req.OpeningContext.Items) > 0 && strings.TrimSpace(req.VoiceSessionID) != "" {
+	if route == "avas" && len(req.OpeningContext.Items) > 0 && strings.TrimSpace(req.VoiceSessionID) != "" {
 		if err := s.checkOpeningHash(owner, req.VoiceSessionID, req.OpeningContext); err != nil {
 			return nil, err
 		}
@@ -2075,7 +2109,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 		}
 	}
 	upstreamForWM = normalizeConversation(upstreamForWM)
-	if s.cfg.VoiceUpstreamRoute == "avas" {
+	if route == "avas" {
 		upstreamForWM.ConversationState = "new"
 		upstreamForWM.ConversationReason = "avas_no_resume"
 		upstreamForWM.ConversationConfirmed = boolPtr(false)
@@ -2129,7 +2163,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 	upstreamAttempted := false
 	failedRelaysClean := freshCreate
 	finalizeCleanRejection := func() bool {
-		if !freshCreate || (s.relay != nil && !failedRelaysClean) {
+		if !freshCreate || (mediaRelay != nil && !failedRelaysClean) {
 			return false
 		}
 		// Do not send established:false unless this attempt's durable outcome agrees.
@@ -2140,7 +2174,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 		return outcomeDone
 	}
 	cleanRejections := func() bool {
-		return s.cfg.VoiceUpstreamRoute == "avas" && allAttemptsCleanRejection && lastStatus >= 400 && lastStatus <= 599
+		return route == "avas" && allAttemptsCleanRejection && lastStatus >= 400 && lastStatus <= 599
 	}
 	transportReleaseEligible := false
 	var failedMediaID mediaevidence.Identity
@@ -2167,8 +2201,9 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 		markOutcome(outcomeFinal, "", 0)
 	}()
 
+	unreserved := adminWeb && s.GatewayOwnsCalls()
 	for attempt := 1; attempt <= s.cfg.MaxAccountAttempts; attempt++ {
-		token, account, err := s.pickAccountForSession(preferredToken, preferredAccountID, excluded)
+		token, account, err := s.pickAccountForSession(preferredToken, preferredAccountID, excluded, unreserved)
 		if err != nil {
 			diag.fail(stageAccount, classDBWriteFailed)
 			outcomeFinal = "unknown"
@@ -2195,7 +2230,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 				upstreamForWM.ConversationID = ""
 				upstreamForWM.ParentMessageID = ""
 				sessionJSON = buildSessionJSON(voice, options.VoiceMode, options.LanguageCode, upstreamForWM)
-				token, account, err = s.pool.Pick("", excluded)
+				token, account, err = s.pickAccountForSession("", 0, excluded, unreserved)
 			}
 		}
 		if err != nil {
@@ -2266,10 +2301,10 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 				return nil, unavailableCall
 			}
 		}
-		if s.relay != nil {
+		if mediaRelay != nil {
 			var relayErr error
 			resourcesStarted = true
-			media, wmOffer, relayErr = s.relay.NewSession(context.Background(), offerSDP, s.relayRoute(account))
+			media, wmOffer, relayErr = mediaRelay.NewSession(context.Background(), offerSDP, s.relayRoute(account))
 			if diag != nil {
 				// A partially constructed relay can fail before returning a handle.
 				diag.relayStarted = diag.relayStarted || media != nil || errors.Is(relayErr, relay.ErrApplyOffer) || errors.Is(relayErr, relay.ErrCreateAfterStart)
@@ -2390,7 +2425,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 		wmStarted := time.Now()
 		var status int
 		var contentType, text, retryAfter, upstreamLocation string
-		if s.cfg.VoiceUpstreamRoute == "avas" {
+		if route == "avas" {
 			avasPayload := buildAVASSession(voice, upstreamForWM)
 			avasPayload.Instructions = req.Instructions
 			if len(req.OpeningContext.Items) > 0 {
@@ -2472,7 +2507,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 			continue
 		}
 
-		if s.cfg.VoiceUpstreamRoute == "avas" {
+		if route == "avas" {
 			if status != http.StatusCreated || !strings.HasPrefix(strings.TrimLeft(text, " \t\r\n"), "v=0") {
 				class := creationHTTPClass(status)
 				if status == http.StatusCreated {
@@ -2523,7 +2558,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 			return nil, &ServiceError{Message: msg, StatusCode: http.StatusBadGateway, Detail: truncate(text, 500)}
 		}
 		outcomeFinal = "unknown"
-		if s.cfg.VoiceUpstreamRoute == "avas" && media != nil {
+		if route == "avas" && media != nil {
 			observerReady = make(chan struct{})
 			callID := avasCallID(upstreamLocation)
 			var err error
@@ -2628,7 +2663,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 			if req.owned != nil {
 				call.forward.client.Transport = s.zoeHTTP.Transport
 			}
-			if s.cfg.VoiceUpstreamRoute == "avas" {
+			if route == "avas" {
 				s.configureAVASTurns(targetSessionID, media, call)
 			}
 			if req.owned != nil {
@@ -2639,7 +2674,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 				s.mu.Unlock()
 			}
 		}
-		voiceSessionID := s.bindVoiceSessionMedia(owner, targetSessionID, token, account, upstreamForWM, media, mediaID, call)
+		voiceSessionID := s.bindVoiceSessionMedia(owner, targetSessionID, token, account, upstreamForWM, media, mediaID, call, route)
 		s.mu.Lock()
 		createdBinding := s.bindings[voiceSessionID]
 		if createdBinding != nil && (createdBinding.media != media || createdBinding.mediaID != mediaID) {
@@ -2674,10 +2709,10 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 		}
 		outcomeDone = true
 		if media != nil {
-			media.SetEventShapeMetadata(voiceSessionID, s.cfg.VoiceUpstreamRoute)
+			media.SetEventShapeMetadata(voiceSessionID, route)
 			boundMedia, boundCall := media, call
 			media.SetEventObserver(func(data []byte) {
-				if s.cfg.VoiceUpstreamRoute == "avas" {
+				if route == "avas" {
 					s.observeAVASCallEvent(voiceSessionID, boundMedia, boundCall, data)
 				}
 				boundCall.forward.Observe(data)
@@ -2712,14 +2747,14 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 		if stored != nil {
 			upstreamOut = stored.upstreamContext()
 		}
-		s.persistCallSession(owner, voiceSessionID, account.ID, voice, options.VoiceMode, options.LanguageCode, upstreamOut)
+		s.persistCallSession(owner, voiceSessionID, account.ID, voice, options.VoiceMode, options.LanguageCode, upstreamOut, route)
 		var openingResult *OpeningContextResult
 		if len(req.OpeningContext.Items) > 0 {
 			openingResult = &OpeningContextResult{Applied: false, Version: req.OpeningContext.Version, ItemCount: len(req.OpeningContext.Items)}
 			if chars, validationErr := validateOpeningContext(req.OpeningContext); validationErr != nil {
 				diag.fail(stageValidation, classValidation)
 				return nil, validationErr
-			} else if s.cfg.VoiceUpstreamRoute == "avas" {
+			} else if route == "avas" {
 				openingResult = s.finalizeCreatedOpening(owner, voiceSessionID, createdBinding, req.OpeningContext, chars)
 			} else if applied, applyErr := s.ApplyOpeningContext(owner, voiceSessionID, req.OpeningContext); applyErr == nil {
 				openingResult = applied
@@ -2960,11 +2995,7 @@ func orDefault(s, def string) string {
 
 // persistCallSession writes metadata-only call session state for admin listing
 // and sticky resume. Chat content is never stored here.
-func (s *Service) persistCallSession(owner, voiceSessionID string, accountID int64, voiceName, voiceMode, languageCode string, upstream UpstreamContext) {
-	s.persistCallSessionMetrics(owner, voiceSessionID, accountID, voiceName, voiceMode, languageCode, upstream, conversationState(upstream), conversationReason(upstream), 0)
-}
-
-func (s *Service) persistCallSessionMetrics(owner, voiceSessionID string, accountID int64, voiceName, voiceMode, languageCode string, upstream UpstreamContext, conversation, reason string, contextChars int) {
+func (s *Service) persistCallSession(owner, voiceSessionID string, accountID int64, voiceName, voiceMode, languageCode string, upstream UpstreamContext, route string) {
 	if s == nil || s.records == nil {
 		return
 	}
@@ -2980,10 +3011,10 @@ func (s *Service) persistCallSessionMetrics(owner, voiceSessionID string, accoun
 		UpstreamConversationID:  upstream.ConversationID,
 		UpstreamParentMessageID: upstream.ParentMessageID,
 		UpstreamVoiceSessionID:  upstream.UpstreamVoiceSessionID,
-		Conversation:            conversation,
-		ConversationReason:      reason,
+		Conversation:            conversationState(upstream),
+		ConversationReason:      conversationReason(upstream),
 		ConversationConfirmed:   upstream.ConversationConfirmed,
-		ContextChars:            contextChars,
+		UpstreamRoute:           route,
 		Voice:                   voiceName,
 		VoiceMode:               voiceMode,
 		LanguageCode:            languageCode,

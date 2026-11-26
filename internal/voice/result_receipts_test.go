@@ -82,9 +82,9 @@ func resultFixture(t *testing.T) (*Service, *store.DB, *resultMedia, ResultDeliv
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	s := New(config.Config{}, nil, nil).WithResultReceipts(db)
+	s := New(config.Config{VoiceUpstreamRoute: "avas"}, nil, nil).WithResultReceipts(db)
 	m := &resultMedia{fakeMedia: &fakeMedia{}, attempted: true}
-	s.bindings["s"] = &sessionBinding{Owner: "api_key:1", media: m, mediaID: mediaevidence.Identity{MediaGeneration: 1}}
+	s.bindings["s"] = &sessionBinding{Owner: "api_key:1", route: "wm", media: m, mediaID: mediaevidence.Identity{MediaGeneration: 1}}
 	text := "hello result"
 	hash := sha256.Sum256([]byte(text))
 	return s, db, m, ResultDeliveryRequest{MediaGeneration: 1, DeliveryID: "delivery", ContentHash: hex.EncodeToString(hash[:]), Text: text}

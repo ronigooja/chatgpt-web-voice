@@ -232,6 +232,7 @@ func (db *DB) ensureCallSessionResumeColumns() error {
 		"opening_context_applied_at TEXT NOT NULL DEFAULT ''",
 		"opening_context_hash TEXT NOT NULL DEFAULT ''",
 		"opening_context_generation INTEGER NOT NULL DEFAULT 0",
+		"upstream_route TEXT NOT NULL DEFAULT ''",
 	} {
 		name := column[:strings.IndexByte(column, ' ')]
 		has, err := db.hasColumn("call_sessions", name)

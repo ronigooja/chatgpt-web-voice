@@ -476,14 +476,14 @@ func TestAVASContextConcurrentWritesAreWholeFrames(t *testing.T) {
 	}
 }
 
-func TestWMRouteIgnoresContextTextAndSendsNothingUpstream(t *testing.T) {
+func TestAVASContextUsesBindingRouteAfterConfigChange(t *testing.T) {
 	r := newAVASRig(t)
+	r.delegate(t, "delegation", "fixture")
 	r.svc.cfg.VoiceUpstreamRoute = "wm"
 	if _, err := r.svc.UpdateSessionContext("api_key:1", r.id, UpstreamContext{Text: "hello"}); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(150 * time.Millisecond)
-	if len(r.upstream.received()) != 0 || len(r.media.upstreamEvents) != 0 {
-		t.Fatal("wm route must not forward context text")
+	if frames := r.upstream.waitFrames(t, 1); contentText(t, frames[0]) != "hello" {
+		t.Fatal("AVAS binding must still forward context text")
 	}
 }

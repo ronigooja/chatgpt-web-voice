@@ -86,7 +86,8 @@ func TestUpgradeFrom411251cPreservesRowsAndSupportsReceipts(t *testing.T) {
 			if table == "call_sessions" {
 				wantColumns = append(wantColumns,
 					[]any{int64(26), "opening_context_hash", "TEXT", int64(1), "''", int64(0)},
-					[]any{int64(27), "opening_context_generation", "INTEGER", int64(1), "0", int64(0)})
+					[]any{int64(27), "opening_context_generation", "INTEGER", int64(1), "0", int64(0)},
+					[]any{int64(28), "upstream_route", "TEXT", int64(1), "''", int64(0)})
 			}
 			if table == "voice_creation_outcomes" {
 				wantColumns = append(wantColumns, []any{int64(8), "gateway_owned", "INTEGER", int64(1), "0", int64(0)})
@@ -119,6 +120,9 @@ func TestUpgradeFrom411251cPreservesRowsAndSupportsReceipts(t *testing.T) {
 		}
 		if got := upgradeRows(t, db.Conn(), `SELECT gateway_owned FROM voice_creation_outcomes ORDER BY request_id`); !reflect.DeepEqual(got, [][]any{{int64(0)}}) {
 			t.Errorf("legacy creation fence defaults = %v", got)
+		}
+		if got := upgradeRows(t, db.Conn(), `SELECT upstream_route FROM call_sessions`); !reflect.DeepEqual(got, [][]any{{""}, {""}}) {
+			t.Errorf("legacy call session route defaults = %v", got)
 		}
 		if got := upgradeRows(t, db.Conn(), `SELECT zoe_session_id, zoe_generation FROM voice_media_sessions ORDER BY voice_session_id`); !reflect.DeepEqual(got, [][]any{{"", int64(0)}, {"", int64(0)}}) {
 			t.Errorf("legacy Zoe binding defaults = %v", got)

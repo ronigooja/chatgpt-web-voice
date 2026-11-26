@@ -104,7 +104,7 @@ func TestOpeningContextDeltaAcceptedForNewAndConfirmedResumed(t *testing.T) {
 
 func TestOpeningContextAVASUnsupportedReturns501(t *testing.T) {
 	f, fr, _, id := openingContextFixture(t)
-	f.svc.cfg.VoiceUpstreamRoute = "avas"
+	f.svc.bindings[id].route = "avas"
 	_, err := f.svc.ApplyOpeningContext("api_key:1", id, OpeningContext{Kind: "delta", Version: 1, Items: []OpeningContextItem{{Role: "user", Text: "not injected"}}})
 	openingContextErr(t, err, 501)
 	if len(fr.session(0).upstreamEvents) != 0 {

@@ -136,7 +136,7 @@ func (s *Service) SubmitResultDelivery(owner, session string, p ResultDeliveryRe
 }
 
 func (s *Service) sendResultContextLocked(b *sessionBinding, text string) (bool, error) {
-	if s.cfg.VoiceUpstreamRoute == "avas" {
+	if b.route == "avas" {
 		if b.avasSideband == nil {
 			return false, errors.New("sideband unavailable")
 		}
