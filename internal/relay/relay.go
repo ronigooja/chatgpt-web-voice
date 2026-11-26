@@ -16,6 +16,10 @@ var ErrApplyOffer = errors.New("relay client offer rejected")
 // ErrCreateAfterStart marks other construction failures after peer allocation.
 var ErrCreateAfterStart = errors.New("relay construction failed after allocation")
 
+// ErrCreateLocalClosed attests that an otherwise unresolved construction
+// failure left no local media. It does not authorize abandoning a reservation.
+var ErrCreateLocalClosed = errors.New("failed relay construction closed local media")
+
 // Route carries per-session network routing.
 type Route struct {
 	// ProxyURL, when it names a socks5/socks5h/http/https proxy, makes the

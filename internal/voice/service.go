@@ -292,6 +292,9 @@ type Service struct {
 	ownedCalls    map[string]*ownedCall
 	ownedStopping bool
 	ownedDials    sync.WaitGroup
+
+	requestMu       sync.Mutex
+	requestActivity map[ownedRequest]*ownedRequestActivity
 }
 
 func (s *Service) WithEventLog(events *eventlog.Store) *Service { s.events = events; return s }
@@ -609,12 +612,14 @@ func (s *Service) bindVoiceSessionMedia(owner, sessionID, token string, account 
 					cancelSideband()
 				}
 				if sideband != nil && !sideband.closeAndWait() {
+					s.trackRequestSidebandCleanup(c, sideband)
 					if _, err := s.evidence.Close(mediaID, mediaevidence.Components{}, ownedEndReason(reason)); err != nil {
 						s.logger.Error("owned_call_unclean_sideband_evidence_failed", "gateway_session_id", sessionID)
 					}
 				}
 				s.onMediaClosed(owner, sessionID, media, mediaID, reason)
 				s.finishOwned(c, reason)
+				s.finishRequestMedia(c, media)
 				return
 			}
 			s.onMediaClosed(owner, sessionID, media, mediaID, reason)
@@ -2251,7 +2256,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 			}
 			mediaID = mediaevidence.Identity{VoiceSessionID: targetSessionID, MediaGeneration: generation, AccountID: account.ID,
 				LeaseID: accountLeaseID(account.ID, targetSessionID), LeaseGeneration: 1}
-			if err := s.evidence.(ownedEvidenceStore).ReserveOwned(owner, mediaID, req.owned.zoeID, req.owned.generation); err != nil {
+			if err := s.evidence.(ownedEvidenceStore).ReserveOwned(owner, req.RequestID, creationAttempt, mediaID, req.owned.zoeID, req.owned.generation); err != nil {
 				if errors.Is(err, mediaevidence.ErrAccountOccupied) {
 					occupied = true
 					attempt--
@@ -2280,6 +2285,9 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 				}
 				diag.fail(stage, class)
 				if req.owned != nil {
+					if !errors.Is(relayErr, relay.ErrCapacity) && !errors.Is(relayErr, relay.ErrCreateClean) && !errors.Is(relayErr, relay.ErrCreateLocalClosed) {
+						req.owned.requestCleanupUnverified(s)
+					}
 					comps := mediaevidence.Components{}
 					if errors.Is(relayErr, relay.ErrCapacity) || errors.Is(relayErr, relay.ErrCreateClean) {
 						// No live resources and no upstream POST; don't fabricate evidence.
@@ -2318,6 +2326,9 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 					avasCancel()
 				}
 				if avasSideband != nil && !avasSideband.closeAndWait() {
+					if req.owned != nil {
+						s.trackRequestSidebandCleanup(req.owned, avasSideband)
+					}
 					sidebandUnclean = true
 					failedRelaysClean = false
 				}
@@ -2343,6 +2354,11 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 				mediaID = id
 				media.SetCloseHandler(finalize)
 				marked := s.closeTracked(media, id, reason, diag.closeAttrs()...)
+				if req.owned != nil {
+					if term, ok := media.Termination(); !ok || !term.Clean() {
+						req.owned.requestCleanupUnverified(s)
+					}
+				}
 				if !marked && req.owned != nil {
 					failedRelaysClean = false
 				}
@@ -2617,6 +2633,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 			}
 			if req.owned != nil {
 				req.owned.media, req.owned.id, req.owned.state = media, mediaID, call
+				s.startRequestMedia(req.owned)
 				s.mu.Lock()
 				s.ownedCalls[targetSessionID] = req.owned
 				s.mu.Unlock()
@@ -2639,7 +2656,9 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 			}
 		}
 		if avasSideband != nil {
-			s.attachAVASSideband(voiceSessionID, media, avasSideband, avasCancel)
+			if !s.attachAVASSideband(voiceSessionID, media, avasSideband, avasCancel) && req.owned != nil && !avasSideband.closeAndWait() {
+				s.trackRequestSidebandCleanup(req.owned, avasSideband)
+			}
 		}
 		if !markOutcome("established", voiceSessionID, mediaID.MediaGeneration) && req.owned != nil {
 			// The bound close handler waits for the sideband and records closure.
@@ -2767,7 +2786,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 
 // attachAVASSideband registers the callback outside s.mu because an already
 // closed sideband invokes it synchronously and the callback takes s.mu itself.
-func (s *Service) attachAVASSideband(sessionID string, media relay.Session, sideband *avasSidebandWriter, cancel context.CancelFunc) {
+func (s *Service) attachAVASSideband(sessionID string, media relay.Session, sideband *avasSidebandWriter, cancel context.CancelFunc) bool {
 	s.mu.Lock()
 	b := s.bindings[sessionID]
 	attached := b != nil && b.media == media
@@ -2781,7 +2800,7 @@ func (s *Service) attachAVASSideband(sessionID string, media relay.Session, side
 			cancel()
 		}
 		sideband.close()
-		return
+		return false
 	}
 	sideband.setOnClose(func(diagnostics sidebandCloseDiagnostics) {
 		s.mu.Lock()
@@ -2800,6 +2819,7 @@ func (s *Service) attachAVASSideband(sessionID string, media relay.Session, side
 			go s.closeTracked(media, owned.id, "media_lost", diagnostics.attrs()...)
 		}
 	})
+	return true
 }
 
 func accountLeaseID(accountID int64, sessionID string) string {

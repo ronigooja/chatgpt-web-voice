@@ -7,6 +7,85 @@ import (
 	"testing"
 )
 
+func TestMediaRequestIdentityMigrationFailsClosedForUnattributableReservations(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "upgrade.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	_, err = db.conn.Exec(`DROP INDEX idx_voice_media_unresolved_request;
+		ALTER TABLE voice_media_sessions DROP COLUMN creation_request_id;
+		INSERT INTO voice_media_sessions (voice_session_id,media_generation,owner,account_id,lease_id,lease_generation,state,created_at,updated_at,zoe_session_id,zoe_generation)
+		VALUES ('exact',1,'owner',1,'lease1',1,'active','now','now','zoe1',1),
+		       ('unlinked',2,'owner',2,'lease2',1,'unknown','now','now','zoe2',1);
+		INSERT INTO voice_creation_outcomes (owner,request_id,outcome,voice_session_id,media_generation,gateway_owned)
+		VALUES ('owner','exact-request','established','exact',1,1);`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for session, want := range map[string]string{"exact": "exact-request", "unlinked": ""} {
+		var request string
+		if err := db.conn.QueryRow(`SELECT creation_request_id FROM voice_media_sessions WHERE voice_session_id=?`, session).Scan(&request); err != nil || request != want {
+			t.Fatalf("unexpected migration identity for %s: %q, %v", session, request, err)
+		}
+	}
+	for _, tc := range []struct{ owner, request, want string }{
+		{"owner", "exact-request", VoiceCreationFenceBusy},
+		{"owner", "not-linked", VoiceCreationFenceBusy},
+		{"other", "not-linked", VoiceCreationFencedNoLiveMedia},
+	} {
+		if result, _, err := db.FenceVoiceCreation(tc.owner, tc.request); err != nil || result != tc.want {
+			t.Fatalf("migration fence returned %q, %v; want %q", result, err, tc.want)
+		}
+	}
+}
+
+func TestRequestFenceMigrationPreservesExistingOwnedRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "before-request-fence.db")
+	sqlite, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = sqlite.Exec(`CREATE TABLE voice_creation_outcomes (
+		request_id TEXT NOT NULL, owner TEXT NOT NULL, outcome TEXT NOT NULL,
+		voice_session_id TEXT, media_generation INTEGER, created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL, attempt_id TEXT NOT NULL DEFAULT '', gateway_owned INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY(owner, request_id));
+		INSERT INTO voice_creation_outcomes VALUES
+		('owned', 'owner', 'established', 'session', 3, '2026-01-01', '2026-01-02', 'attempt', 1),
+		('unresolved', 'owner', 'unknown', NULL, NULL, '2026-01-01', '2026-01-02', 'unresolved-attempt', 1)`)
+	if err := errors.Join(err, sqlite.Close()); err != nil {
+		t.Fatal(err)
+	}
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	row, err := db.GetVoiceCreationOutcome("owner", "owned")
+	if err != nil || row.Outcome != "established" || row.AttemptID != "attempt" || row.VoiceSessionID.String != "session" ||
+		row.MediaGeneration.Int64 != 3 || row.CreatedAt != "2026-01-01" || row.UpdatedAt != "2026-01-02" {
+		t.Fatalf("outcome changed during migration: %+v, %v", row, err)
+	}
+	if outcome, _, err := db.FenceVoiceCreation("owner", "unresolved"); err != nil || outcome != VoiceCreationFencedNoLiveMedia {
+		t.Fatalf("existing unresolved claim was not fenced: %q %v", outcome, err)
+	}
+	if err := db.UpdateVoiceCreationOutcome("owner", "unresolved", "never_established", "", 0, "unresolved-attempt"); !errors.Is(err, ErrVoiceCreationAttemptStale) {
+		t.Fatalf("fenced claim was still mutable: %v", err)
+	}
+	if _, err := db.BeginVoiceCreationOutcome("owner", "unresolved"); !errors.Is(err, ErrVoiceCreationFenced) {
+		t.Fatalf("fenced claim could be reopened: %v", err)
+	}
+}
+
 func TestOwnedAttemptFenceSurvivesLegacyCleanupAndReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "fence.db")
 	db, err := Open(path)

@@ -21,7 +21,7 @@ import (
 )
 
 type ownedEvidenceStore interface {
-	ReserveOwned(string, mediaevidence.Identity, string, int64) error
+	ReserveOwned(string, string, string, mediaevidence.Identity, string, int64) error
 	AttachOwnedRelay(mediaevidence.Identity, string) error
 	AbandonOwnedReservation(mediaevidence.Identity) error
 	OwnedBinding(string, string) (string, int64, error)
@@ -234,7 +234,7 @@ func (s *Service) DialClient(ctx context.Context, key string, p ClientDialReques
 		switch {
 		case status == 401 && code == "unauthenticated" && start.Error.Details.Credential == "instance_key":
 			return nil, &CallError{401, "unauthenticated"}
-		case status == 400 && code == "invalid_request", status == 409 && (code == "idempotency_conflict" || code == "voice_lease_busy"):
+		case status == 400 && code == "invalid_request", status == 409 && (code == "idempotency_conflict" || code == "voice_lease_busy" || code == "voice_request_terminal"):
 			return nil, &CallError{status, code}
 		case status == 503 && code == "voice_pool_quarantined":
 			diag.fail(stageZoeStart, classQuarantined)
@@ -249,8 +249,20 @@ func (s *Service) DialClient(ctx context.Context, key string, p ClientDialReques
 		return nil, unavailableCall
 	}
 	owner, requestID = s.zoeCallOwner(), start.RequestID
-	attempt, err := claims.ClaimOwnedVoiceCreation(owner, start.RequestID)
+	request := ownedRequest{owner, requestID}
+	s.requestMu.Lock()
+	attempt, err := claims.ClaimOwnedVoiceCreation(owner, requestID)
+	if err == nil && attempt != "" {
+		if s.requestActivity == nil {
+			s.requestActivity = make(map[ownedRequest]*ownedRequestActivity)
+		}
+		s.requestActivity[request] = &ownedRequestActivity{creating: true}
+	}
+	s.requestMu.Unlock()
 	if err != nil || attempt == "" {
+		if errors.Is(err, store.ErrVoiceCreationFenced) {
+			return nil, &CallError{409, "voice_request_fenced"}
+		}
 		class := classDBWriteFailed
 		if errors.Is(err, store.ErrVoiceCreationAttemptStale) {
 			class = classReplay
@@ -263,6 +275,13 @@ func (s *Service) DialClient(ctx context.Context, key string, p ClientDialReques
 		}
 		return nil, unavailableCall
 	}
+	defer func() {
+		panicked := recover()
+		s.finishRequestCreate(request, panicked != nil)
+		if panicked != nil {
+			panic(panicked)
+		}
+	}()
 	diag.claimStarted = time.Now()
 	diag.outcomeWritten("pending", nil)
 	call := &ownedCall{owner: owner, zoeID: start.VoiceSessionID, generation: start.Generation, requestID: start.RequestID,
@@ -286,7 +305,6 @@ func (s *Service) DialClient(ctx context.Context, key string, p ClientDialReques
 		LanguageCode: p.LanguageCode, RequestID: start.RequestID, Instructions: *start.Instructions, OpeningContext: start.Opening,
 		owned: call, creationAttempt: attempt, diagnostics: diag})
 	if err != nil {
-		// media.md specifies read-only request-outcome reconciliation pre-bind.
 		if errors.Is(err, mediaevidence.ErrAccountOccupied) {
 			return nil, &CallError{503, "voice_pool_quarantined"}
 		}

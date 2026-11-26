@@ -172,6 +172,16 @@ func (db *DB) migrate() error {
 	if err := db.cleanupVoiceCreationOutcomes(); err != nil {
 		return err
 	}
+	if has, err := db.hasColumn("voice_creation_outcomes", "fenced"); err != nil {
+		return err
+	} else if !has {
+		if _, err := db.conn.Exec(`ALTER TABLE voice_creation_outcomes ADD COLUMN fenced INTEGER NOT NULL DEFAULT 0 CHECK (fenced IN (0, 1))`); err != nil {
+			return fmt.Errorf("add voice creation request fence: %w", err)
+		}
+	}
+	if err := db.ensureMediaRequestIdentity(); err != nil {
+		return err
+	}
 	// Created after legacy account-table rebuilds.
 	if _, err := db.conn.Exec(`CREATE TABLE IF NOT EXISTS bridge_accounts (
 		remote_id TEXT PRIMARY KEY,
@@ -564,4 +574,31 @@ func (db *DB) ensureMediaEvidenceTables() error {
 		}
 	}
 	return nil
+}
+
+func (db *DB) ensureMediaRequestIdentity() error {
+	has, err := db.hasColumn("voice_media_sessions", "creation_request_id")
+	if err != nil || has {
+		return err
+	}
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, stmt := range []string{
+		`ALTER TABLE voice_media_sessions ADD COLUMN creation_request_id TEXT NOT NULL DEFAULT ''`,
+		// Backfill only exact, unambiguous identities. Unlinked owned rows with
+		// unresolved media cannot safely be attributed to any particular request.
+		`UPDATE voice_media_sessions AS m SET creation_request_id=COALESCE((
+			SELECT CASE WHEN count(*)=1 THEN min(c.request_id) END FROM voice_creation_outcomes c
+			WHERE c.gateway_owned=1 AND c.owner=m.owner AND c.voice_session_id=m.voice_session_id
+			AND c.media_generation=m.media_generation), '') WHERE m.zoe_generation>0`,
+		`CREATE INDEX idx_voice_media_unresolved_request ON voice_media_sessions(owner, creation_request_id) WHERE state<>'terminated'`,
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("migrate media creation request identity: %w", err)
+		}
+	}
+	return tx.Commit()
 }

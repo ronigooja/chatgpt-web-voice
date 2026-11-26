@@ -84,13 +84,21 @@ func (w *responseRecorder) Flush() {
 	_ = w.FlushError()
 }
 
+// IsVoiceRequestFence identifies the sensitive endpoint before mux dispatch.
+func IsVoiceRequestFence(r *http.Request) bool {
+	return strings.HasPrefix(r.URL.Path, "/v1/voice/requests/") && strings.HasSuffix(r.URL.Path, "/fence")
+}
+
 // HTTPMiddleware adds request IDs, panic recovery, and structured access logs.
 func HTTPMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
 		clientVoice := strings.HasPrefix(r.URL.Path, "/client/v1/")
+		fence := IsVoiceRequestFence(r)
 		id, path, method, userAgent := "", "/client/v1/", "", ""
-		if clientVoice {
+		if fence {
+			id, path = uuid.NewString(), "/v1/voice/requests/{request_id}/fence"
+		} else if clientVoice {
 			id = uuid.NewString()
 		} else {
 			id, path, method, userAgent = requestID(r), sanitize(r.URL.Path, 200), sanitize(r.Method, 32), sanitize(r.UserAgent(), 120)
@@ -110,7 +118,7 @@ func HTTPMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				if clientVoice {
+				if clientVoice || fence {
 					requestLogger.Error("http_panic")
 				} else {
 					requestLogger.Error("http_panic",
@@ -132,8 +140,9 @@ func HTTPMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 				"status", status,
 				"response_bytes", recorder.bytes,
 				"duration_ms", float64(time.Since(started).Microseconds()) / 1000,
-				"remote_ip", remoteIP(r.RemoteAddr),
-				"user_agent", userAgent,
+			}
+			if !fence {
+				attrs = append(attrs, "remote_ip", remoteIP(r.RemoteAddr), "user_agent", userAgent)
 			}
 			switch {
 			case status >= 500:

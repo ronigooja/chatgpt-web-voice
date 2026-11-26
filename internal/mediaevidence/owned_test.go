@@ -15,12 +15,21 @@ func TestOwnedReservationBlocksUnresolvedAccountAcrossOwners(t *testing.T) {
 	}
 	defer db.Close()
 	s := NewStore(db)
+	claim := func(owner, request string) string {
+		t.Helper()
+		attempt, err := db.ClaimOwnedVoiceCreation(owner, request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return attempt
+	}
+	firstAttempt, secondAttempt := claim("owner1", "req1"), claim("owner2", "req2")
 	first := Identity{VoiceSessionID: "first", MediaGeneration: 1, AccountID: 42, LeaseID: "first-lease", LeaseGeneration: 1}
 	second := Identity{VoiceSessionID: "second", MediaGeneration: 1, AccountID: 42, LeaseID: "second-lease", LeaseGeneration: 1}
-	if err := s.ReserveOwned("owner1", first, "zoe1", 1); err != nil {
+	if err := s.ReserveOwned("owner1", "req1", firstAttempt, first, "zoe1", 1); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ReserveOwned("owner2", second, "zoe2", 1); !errors.Is(err, ErrAccountOccupied) {
+	if err := s.ReserveOwned("owner2", "req2", secondAttempt, second, "zoe2", 1); !errors.Is(err, ErrAccountOccupied) {
 		t.Fatal(err)
 	}
 	if err := s.MarkClosing(first, "user_hangup"); err != nil {
@@ -32,7 +41,7 @@ func TestOwnedReservationBlocksUnresolvedAccountAcrossOwners(t *testing.T) {
 	if row, err := s.Current("first"); err != nil || row.CloseAttemptFinished() {
 		t.Fatal("restart falsely finished close", row, err)
 	}
-	if err := s.ReserveOwned("owner2", second, "zoe2", 1); !errors.Is(err, ErrAccountOccupied) {
+	if err := s.ReserveOwned("owner2", "req2", secondAttempt, second, "zoe2", 1); !errors.Is(err, ErrAccountOccupied) {
 		t.Fatal(err)
 	}
 	if lookup, err := s.LookupTermination("owner1", first); err != nil || lookup.Outcome != "unknown" || lookup.Evidence != nil {
@@ -45,7 +54,7 @@ func TestOwnedReservationBlocksUnresolvedAccountAcrossOwners(t *testing.T) {
 		t.Fatal(id, gen, err)
 	}
 	second.AccountID++
-	if err := s.ReserveOwned("owner2", second, "zoe2", 2); err != nil {
+	if err := s.ReserveOwned("owner2", "req2", secondAttempt, second, "zoe2", 2); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Close(second, Components{true, true, true, true}, "user_hangup"); err != nil {
@@ -53,7 +62,7 @@ func TestOwnedReservationBlocksUnresolvedAccountAcrossOwners(t *testing.T) {
 	}
 	third := second
 	third.VoiceSessionID, third.LeaseID = "third", "third-lease"
-	if err := s.ReserveOwned("owner1", third, "zoe1", 3); err != nil {
+	if err := s.ReserveOwned("owner1", "req3", claim("owner1", "req3"), third, "zoe1", 3); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -59,13 +59,22 @@ func (m *APIKeyManager) Require(next http.Handler) http.Handler {
 			return
 		}
 		key, valid, err := m.keys.Authenticate(secret)
+		fence := logging.IsVoiceRequestFence(r)
 		if err != nil {
-			m.logger.Error("api_key_authentication_failed", "error", err)
+			if fence {
+				m.logger.Error("api_key_authentication_failed", "error_class", "authentication_unavailable")
+			} else {
+				m.logger.Error("api_key_authentication_failed", "error", err)
+			}
 			writeAPIKeyError(w, http.StatusServiceUnavailable, "authentication_unavailable", "API key authentication unavailable")
 			return
 		}
 		if !valid {
-			logging.FromContext(r.Context()).Warn("api_key_denied", "remote_addr", r.RemoteAddr)
+			if fence {
+				logging.FromContext(r.Context()).Warn("api_key_denied", "error_class", "invalid_api_key")
+			} else {
+				logging.FromContext(r.Context()).Warn("api_key_denied", "remote_addr", r.RemoteAddr)
+			}
 			writeAPIKeyError(w, http.StatusUnauthorized, "invalid_api_key", "valid Bearer API key required")
 			return
 		}

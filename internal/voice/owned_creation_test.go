@@ -203,7 +203,11 @@ func TestOwnedCreationFailureDiagnostics(t *testing.T) {
 			fixtureSQL(t, db, `CREATE TRIGGER fail_account BEFORE UPDATE ON accounts BEGIN SELECT RAISE(FAIL, '`+leak+`'); END`)
 		}, stage: "account_reservation", class: "db_write_failed", outcome: "unknown"},
 		{name: "account occupied", accounts: 1, change: func(t *testing.T, _ *Service, db *store.DB, _ *fakeRelay, _ *ClientDialRequest) {
-			if err := mediaevidence.NewStore(db).ReserveOwned("api_key:42", mediaevidence.Identity{VoiceSessionID: "occupied", MediaGeneration: 1, AccountID: 1, LeaseID: "fixture", LeaseGeneration: 1}, "other", 1); err != nil {
+			attempt, err := db.ClaimOwnedVoiceCreation("api_key:42", "occupying-request")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := mediaevidence.NewStore(db).ReserveOwned("api_key:42", "occupying-request", attempt, mediaevidence.Identity{VoiceSessionID: "occupied", MediaGeneration: 1, AccountID: 1, LeaseID: "fixture", LeaseGeneration: 1}, "other", 1); err != nil {
 				t.Fatal(err)
 			}
 		}, stage: "account_reservation", class: "pool_quarantined", outcome: "never_established"},
