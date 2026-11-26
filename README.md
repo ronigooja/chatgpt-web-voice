@@ -215,7 +215,7 @@ the loaded image.
 | `VOICE_AUDIO_CAPTURE_DIR` | Directory of `VOICE_DATABASE_FILE` + `/audio-capture` | Private audio capture directory |
 | `VOICE_AUDIO_CAPTURE_MAX_BYTES` | `1073741824` | Retention limit in bytes; must be positive |
 | `VOICE_AUDIO_CAPTURE_SEGMENT_SECONDS` | `180` | Segment duration in seconds |
-| `VOICE_VIEWER_READ_KEY` | empty | Optional read-only bearer credential for viewer endpoints |
+| `VOICE_VIEWER_READ_KEY` | empty | Optional read-only bearer credential; see [viewer access](docs/zoe-transcript-forwarding.md#viewer-access) |
 | `VOICE_RELAY_MAX_SESSIONS` | `16` | Concurrent relayed calls (`0` uses the default) |
 | `VOICE_RELAY_UDP_PORT_MIN` / `VOICE_RELAY_UDP_PORT_MAX` | unset | Restrict the relay's UDP port range; set both or neither |
 | `VOICE_RELAY_PUBLIC_IP` | unset | Advertise this address as the relay's host candidate |
