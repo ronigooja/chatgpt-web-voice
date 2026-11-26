@@ -1,14 +1,18 @@
 package voice
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"github.com/dyhhhhhh/chatgpt-web-voice/internal/voice/eventlog"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/config"
 	"github.com/dyhhhhhh/chatgpt-web-voice/internal/mediaevidence"
@@ -223,6 +227,75 @@ func TestResultAVASPartial(t *testing.T) {
 		err := sendAVASContext(sender, "", strings.Repeat("a", 1001))
 		if err == nil || sender.attempted != (failure == 2) || calls != failure {
 			t.Fatal(calls, sender.attempted, err)
+		}
+	}
+}
+
+type sourceKindSocket struct{ frames [][]byte }
+
+func (*sourceKindSocket) SetWriteDeadline(time.Time) error { return nil }
+func (s *sourceKindSocket) WriteMessage(_ int, b []byte) error {
+	s.frames = append(s.frames, append([]byte(nil), b...))
+	return nil
+}
+func (*sourceKindSocket) Close() error { return nil }
+
+func TestResultSourceKindCapture(t *testing.T) {
+	for _, delegation := range []string{"", "delegation"} {
+		for _, kind := range []string{"", "user_text", "plan_note", "Bad", strings.Repeat("a", 33), "a-b", "1bad"} {
+			t.Run(delegation+"/"+kind, func(t *testing.T) {
+				s, _, _, p := resultFixture(t)
+				p.Text = strings.Repeat("x", 1001)
+				h := sha256.Sum256([]byte(p.Text))
+				p.ContentHash = hex.EncodeToString(h[:])
+				p.SourceKind = kind
+				log := eventlog.New(eventlog.Defaults())
+				key := eventlog.Key{SessionID: "s", Generation: 1}
+				log.Start(key, "")
+				sock := &sourceKindSocket{}
+				w := &avasSidebandWriter{conn: sock, capture: func(data []byte, delivery, sourceKind string) {
+					log.AppendWithSourceKind(key, "gateway_to_upstream", "avas_sideband", delivery, data, false, sourceKind)
+				}}
+				b := s.bindings["s"]
+				b.route = "avas"
+				b.avasSideband = w
+				b.openDelegation = delegation
+				r, err := s.SubmitResultDelivery("api_key:1", "s", p)
+				if err != nil || r.State != "applied" {
+					t.Fatal(r, err)
+				}
+				p.SourceKind = "different"
+				if _, err := s.SubmitResultDelivery("api_key:1", "s", p); err != nil {
+					t.Fatal(err)
+				}
+				snap, _ := log.Snapshot(key, 0, 10)
+				if len(snap.Events) != 3 || len(sock.frames) != 3 {
+					t.Fatal(snap.Events, len(sock.frames))
+				}
+				expected := sanitizeSourceKind(kind)
+				for _, event := range snap.Events {
+					typ := "session.context.append"
+					if delegation != "" {
+						typ = "delegation.context.append"
+					}
+					if event.SourceKind != expected || event.Type != typ {
+						t.Fatal(event)
+					}
+					raw, _ := json.Marshal(event)
+					if bytes.Contains(raw, []byte(`"source_kind"`)) != (expected != "") {
+						t.Fatal(string(raw))
+					}
+				}
+				baseline := &sourceKindSocket{}
+				if err := sendAVASContext(&avasSidebandWriter{conn: baseline}, delegation, p.Text); err != nil {
+					t.Fatal(err)
+				}
+				for i := range sock.frames {
+					if !bytes.Equal(sock.frames[i], baseline.frames[i]) {
+						t.Fatal("upstream frame changed")
+					}
+				}
+			})
 		}
 	}
 }

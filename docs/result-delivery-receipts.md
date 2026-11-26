@@ -2,7 +2,7 @@
 
 Applies to authenticated downstream result delivery requests when the service has durable receipt storage configured. `/v1/health` advertises `result_deliveries.version="v1"`, `max_text_bytes=8000`, and `applied_evidence="local_transport_writes_and_durable_receipt"` only to authenticated clients when storage is wired.
 
-- `POST /v1/voice/sessions/{id}/result-deliveries`: exact JSON fields `media_generation` (positive integer), `delivery_id` (1–128 ASCII letters/digits/`_.-`), `content_hash` (lowercase SHA-256 hex of UTF-8 text), `text` (nonblank, at most 8000 UTF-8 bytes). Body limit: 64 KiB; duplicate/unknown fields, malformed UTF-8 and unpaired surrogate escapes are rejected.
+- `POST /v1/voice/sessions/{id}/result-deliveries`: exact JSON fields `media_generation` (positive integer), `delivery_id` (1–128 ASCII letters/digits/`_.-`), `content_hash` (lowercase SHA-256 hex of UTF-8 text), `text` (nonblank, at most 8000 UTF-8 bytes), optional `source_kind` (informational string; values not matching `^[a-z][a-z0-9_]{0,31}$` are treated as absent). The kind is not sent upstream, stored in receipts, or included in replay comparisons. Body limit: 64 KiB; duplicate/unknown fields, malformed UTF-8 and unpaired surrogate escapes are rejected.
 - `GET /v1/voice/sessions/{id}/result-deliveries/{delivery_id}?media_generation=N`: read-only receipt lookup; no live session required. Missing or differently owned identities return 404.
 - Successful responses contain exactly `media_generation`, `delivery_id`, `content_hash`, `state`. States: `pending`, `applied`, `unknown`, `rejected`. Invalid payloads return 400; immutable content conflicts or stale media generations return 409; persistence failures return 503.
 

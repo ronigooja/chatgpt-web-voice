@@ -70,7 +70,7 @@ the environment file `/opt/llm-auth-bridge/.secrets/voice_viewer_read.env`.
 conversation content, held only in a bounded in-memory buffer cleared on
 gateway restart. Audio events are counted, not stored; oversized JSON is
 dropped. Eviction and lag are reported as gaps; delivery describes gateway
-transport observations, not upstream receipt.
+transport observations, not upstream receipt. Result-delivery context write events may carry `source_kind`; see [result delivery receipts](result-delivery-receipts.md).
 
 ## Turns and delegation
 

@@ -124,7 +124,7 @@ func validResultJSON(raw []byte) bool {
 			return false
 		}
 		switch key {
-		case "media_generation", "delivery_id", "content_hash", "text":
+		case "media_generation", "delivery_id", "content_hash", "text", "source_kind":
 		default:
 			return false
 		}

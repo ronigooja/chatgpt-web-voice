@@ -152,7 +152,7 @@ type avasSidebandWriter struct {
 	onClose  func(sidebandCloseDiagnostics)
 	done     chan struct{}
 	closeErr error
-	capture  func([]byte, string)
+	capture  func([]byte, string, string)
 	diag     sidebandDiagnostics
 }
 
@@ -188,6 +188,10 @@ func (w *avasSidebandWriter) send(data []byte) error {
 
 // sendAttempt distinguishes a definite pre-write failure from an ambiguous write.
 func (w *avasSidebandWriter) sendAttempt(data []byte) (bool, error) {
+	return w.sendAttemptWithSourceKind(data, "")
+}
+
+func (w *avasSidebandWriter) sendAttemptWithSourceKind(data []byte, sourceKind string) (bool, error) {
 	if w == nil {
 		return false, errors.New("avas sideband writer unavailable")
 	}
@@ -196,7 +200,7 @@ func (w *avasSidebandWriter) sendAttempt(data []byte) (bool, error) {
 	delivery := "rejected"
 	defer func() {
 		if w.capture != nil {
-			w.capture(data, delivery)
+			w.capture(data, delivery, sourceKind)
 		}
 	}()
 	if w.closed {
@@ -2640,8 +2644,8 @@ func (s *Service) CreateSession(req CreateSessionRequest) (result *SessionResult
 			}
 			if avasSideband != nil {
 				avasSideband.mu.Lock()
-				avasSideband.capture = func(data []byte, delivery string) {
-					s.events.Append(key, "gateway_to_upstream", "avas_sideband", delivery, data, false)
+				avasSideband.capture = func(data []byte, delivery, sourceKind string) {
+					s.events.AppendWithSourceKind(key, "gateway_to_upstream", "avas_sideband", delivery, data, false, sourceKind)
 				}
 				avasSideband.mu.Unlock()
 			}
