@@ -72,3 +72,18 @@ func TestResultDeliveryStrictJSON(t *testing.T) {
 		}
 	}
 }
+
+func TestResultDeliverySourceKindHTTP(t *testing.T) {
+	stub := &resultHTTPStub{}
+	handler, key, _ := newDownstreamTestHandler(t, stub)
+	for _, kind := range []string{"plan_note", "Invalid!", ""} {
+		body := `{"media_generation":1,"delivery_id":"d","content_hash":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824","text":"hello","source_kind":"` + kind + `"}`
+		req := httptest.NewRequest(http.MethodPost, "/v1/voice/sessions/s/result-deliveries", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+key)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Fatal(rec.Code, rec.Body.String())
+		}
+	}
+}

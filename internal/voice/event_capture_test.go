@@ -29,7 +29,7 @@ func TestAVASRejectedContextCapturedOnce(t *testing.T) {
 	store := eventlog.New(eventlog.Defaults())
 	key := eventlog.Key{SessionID: "s", Generation: 1}
 	store.Start(key, "zoe", 4)
-	w := &avasSidebandWriter{closed: true, capture: func(data []byte, delivery string) {
+	w := &avasSidebandWriter{closed: true, capture: func(data []byte, delivery, sourceKind string) {
 		store.Append(key, "gateway_to_upstream", "avas_sideband", delivery, data, false)
 	}}
 	if err := sendAVASContext(w, "delegation", "hello"); err == nil {

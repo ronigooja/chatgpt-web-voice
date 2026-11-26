@@ -17,6 +17,7 @@ type ResultDeliveryRequest struct {
 	DeliveryID      string `json:"delivery_id"`
 	ContentHash     string `json:"content_hash"`
 	Text            string `json:"text"`
+	SourceKind      string `json:"source_kind,omitempty"`
 }
 type ResultReceiptStore interface {
 	GetResultReceipt(string, string, int64, string) (ResultReceipt, error)
@@ -118,7 +119,7 @@ func (s *Service) SubmitResultDelivery(owner, session string, p ResultDeliveryRe
 	if !claimed {
 		return s.LookupResultDelivery(owner, session, p.MediaGeneration, p.DeliveryID)
 	}
-	attempted, sendErr := s.sendResultContextLocked(b, p.Text)
+	attempted, sendErr := s.sendResultContextLocked(b, p.Text, sanitizeSourceKind(p.SourceKind))
 	r.State = "applied"
 	if sendErr != nil {
 		r.State = "rejected"
@@ -135,12 +136,14 @@ func (s *Service) SubmitResultDelivery(owner, session string, p ResultDeliveryRe
 	return r, nil
 }
 
-func (s *Service) sendResultContextLocked(b *sessionBinding, text string) (bool, error) {
+func (s *Service) sendResultContextLocked(b *sessionBinding, text, sourceKind string) (bool, error) {
 	if b.route == "avas" {
 		if b.avasSideband == nil {
 			return false, errors.New("sideband unavailable")
 		}
-		tracker := &resultAVASSender{write: b.avasSideband.sendAttempt}
+		tracker := &resultAVASSender{write: func(data []byte) (bool, error) {
+			return b.avasSideband.sendAttemptWithSourceKind(data, sourceKind)
+		}}
 		err := sendAVASContext(tracker, b.openDelegation, text)
 		return tracker.attempted, err
 	}
@@ -160,4 +163,17 @@ func (s *resultAVASSender) send(data []byte) error {
 	attempted, err := s.write(data)
 	s.attempted = s.attempted || attempted
 	return err
+}
+
+func sanitizeSourceKind(kind string) string {
+	if len(kind) == 0 || len(kind) > 32 || kind[0] < 'a' || kind[0] > 'z' {
+		return ""
+	}
+	for i := 1; i < len(kind); i++ {
+		c := kind[i]
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_') {
+			return ""
+		}
+	}
+	return kind
 }

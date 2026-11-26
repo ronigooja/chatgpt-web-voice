@@ -137,3 +137,21 @@ func TestViewerHeartbeatAndDisconnect(t *testing.T) {
 	}
 	resp.Body.Close()
 }
+
+func TestViewerSourceKindJSON(t *testing.T) {
+	store := eventlog.New(eventlog.Defaults())
+	key := eventlog.Key{SessionID: "s", Generation: 1}
+	store.Start(key, "")
+	store.AppendWithSourceKind(key, "gateway_to_upstream", "avas_sideband", "sent", []byte(`{"type":"session.context.append"}`), false, "plan_note")
+	store.Append(key, "gateway_to_upstream", "avas_sideband", "sent", []byte(`{"type":"session.context.append"}`), false)
+	store.End(key)
+	mux := http.NewServeMux()
+	New(Dependencies{Events: store}).RegisterViewer(mux)
+	for _, suffix := range []string{"events", "events/stream"} {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/call-sessions/s/generations/1/"+suffix, nil))
+		if w.Code != 200 || strings.Count(w.Body.String(), `"source_kind":"plan_note"`) != 1 || strings.Count(w.Body.String(), `"source_kind"`) != 1 {
+			t.Fatal(suffix, w.Code, w.Body.String())
+		}
+	}
+}

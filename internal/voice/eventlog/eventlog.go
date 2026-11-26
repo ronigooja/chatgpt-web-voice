@@ -35,16 +35,17 @@ type Key struct {
 }
 
 type Event struct {
-	Seq       uint64    `json:"seq"`
-	At        time.Time `json:"at"`
-	Direction string    `json:"direction"`
-	Type      string    `json:"type"`
-	Wrapper   string    `json:"wrapper,omitempty"`
-	Source    string    `json:"source"`
-	Payload   string    `json:"payload"`
-	Size      int       `json:"size"`
-	Truncated bool      `json:"truncated"`
-	Delivery  string    `json:"delivery"`
+	Seq        uint64    `json:"seq"`
+	At         time.Time `json:"at"`
+	Direction  string    `json:"direction"`
+	Type       string    `json:"type"`
+	Wrapper    string    `json:"wrapper,omitempty"`
+	Source     string    `json:"source"`
+	Payload    string    `json:"payload"`
+	Size       int       `json:"size"`
+	Truncated  bool      `json:"truncated"`
+	Delivery   string    `json:"delivery"`
+	SourceKind string    `json:"source_kind,omitempty"`
 }
 
 type Generation struct {
@@ -165,6 +166,10 @@ func (s *Store) End(k Key) {
 
 // Append never waits for subscribers. Payload bytes are copied into the store.
 func (s *Store) Append(k Key, direction, source, delivery string, payload []byte, binary bool) {
+	s.AppendWithSourceKind(k, direction, source, delivery, payload, binary, "")
+}
+
+func (s *Store) AppendWithSourceKind(k Key, direction, source, delivery string, payload []byte, binary bool, sourceKind string) {
 	if s == nil {
 		return
 	}
@@ -230,7 +235,7 @@ func (s *Store) Append(k Key, direction, source, delivery string, payload []byte
 	if len(payload) > limit {
 		payload = payload[:limit]
 	}
-	event := Event{At: time.Now().UTC(), Direction: direction, Type: typ, Wrapper: wrapper, Source: source, Payload: string(payload), Size: size, Truncated: size > len(payload), Delivery: delivery}
+	event := Event{At: time.Now().UTC(), Direction: direction, Type: typ, Wrapper: wrapper, Source: source, Payload: string(payload), Size: size, Truncated: size > len(payload), Delivery: delivery, SourceKind: sourceKind}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e := s.entries[k]
@@ -252,7 +257,7 @@ func (s *Store) Append(k Key, direction, source, delivery string, payload []byte
 }
 
 func eventSize(e Event) int {
-	return eventOverhead + len(e.Payload) + len(e.Type) + len(e.Wrapper) + len(e.Source) + len(e.Direction) + len(e.Delivery)
+	return eventOverhead + len(e.Payload) + len(e.Type) + len(e.Wrapper) + len(e.Source) + len(e.Direction) + len(e.Delivery) + len(e.SourceKind)
 }
 
 func (s *Store) enforceGlobal() {
