@@ -45,7 +45,7 @@ test('every live inner type maps to the documented group', () => {
     ['session.started', 'upstream_to_client', 'session'],
     ['session.usage.updated', 'upstream_to_client', 'session'],
     ['session.something_else', 'upstream_to_client', 'session'],
-    ['session.create', 'gateway_creation', 'instructions'],
+    ['session.create', 'gateway_creation', 'creation'],
     ['text', 'client_to_upstream', 'client'],
     ['binary', 'client_to_upstream', 'client'],
     ['mystery.event', 'upstream_to_client', 'other'],
@@ -107,7 +107,7 @@ test('counts sum to the number of events and respect the search text', () => {
     raw('mystery.event', { seq: 8 })
   ]);
   const all = s.counts('');
-  assert.deepEqual(all, { conversation: 2, delegation: 1, instructions: 1, context: 1, client: 1, session: 1, other: 1 });
+  assert.deepEqual(all, { conversation: 2, delegation: 1, creation: 1, context: 1, client: 1, session: 1, other: 1 });
   const total = Object.keys(all).reduce((n, k) => n + all[k], 0);
   assert.equal(total, s.size());
 
@@ -128,10 +128,10 @@ test('search is case-insensitive over type and payload text and never parses for
 test('presets select exactly the documented groups', () => {
   assert.deepEqual(V.presetGroups('conversation'), ['conversation']);
   assert.deepEqual(V.presetGroups('delegation'), ['delegation']);
-  assert.deepEqual(V.presetGroups('everything'), ['conversation', 'delegation', 'instructions', 'context', 'client', 'session', 'other']);
+  assert.deepEqual(V.presetGroups('everything'), ['conversation', 'delegation', 'creation', 'context', 'client', 'session', 'other']);
   assert.equal(V.presetGroups('nope'), null);
   assert.equal(V.presetOf(['conversation']), 'conversation');
-  assert.equal(V.presetOf(['other', 'session', 'client', 'context', 'instructions', 'delegation', 'conversation']), 'everything');
+  assert.equal(V.presetOf(['other', 'session', 'client', 'context', 'creation', 'delegation', 'conversation']), 'everything');
   assert.equal(V.presetOf(['conversation', 'delegation']), '');
   assert.equal(V.presetOf(undefined), '');
 });
@@ -164,6 +164,16 @@ test('filter state round-trips through URL parameters', () => {
   assert.equal(qs.get('q'), 'a b');
   assert.deepEqual(V.filterFromParams(qs), { groups: ['conversation', 'delegation'], type: 'turn.done', q: 'a b' });
   assert.equal(V.viewerUrl('vs_1', 2, f), '/viewer?session=vs_1&gen=2&groups=conversation%2Cdelegation&type=turn.done&q=a%20b');
+});
+
+test('the creation group is named creation in ids, labels, presets and URLs', () => {
+  assert.deepEqual(V.GROUPS.find(g => g.id === 'creation'), { id: 'creation', label: 'Creation' });
+  assert.equal(V.GROUPS.some(g => g.id === 'instructions'), false);
+  assert.equal(V.presetGroups('everything').indexOf('creation') >= 0, true);
+  const f = { groups: ['creation', 'conversation'], type: '', q: '' };
+  assert.equal(V.viewerUrl('vs_1', 1, f), '/viewer?session=vs_1&gen=1&groups=conversation%2Ccreation');
+  assert.deepEqual(V.filterFromParams(new URLSearchParams('groups=conversation,creation')).groups, ['conversation', 'creation']);
+  assert.deepEqual(V.filterFromParams(new URLSearchParams('groups=instructions')).groups, []);
 });
 
 test('default filter state is all groups; an empty groups parameter means none', () => {
