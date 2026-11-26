@@ -96,11 +96,11 @@ test('compact event row marks delegation rows and tolerates missing fields', () 
   assert.equal(row.delivery, 'unknown');
 });
 
-test('creation row shows the creation label and an Instructions tag, keeping the raw type', () => {
-  const row = V.compactEventRow(ev(1, { direction: 'gateway_creation', type: 'text', group: 'instructions' }));
+test('creation row shows the creation label and a Creation tag, keeping the raw type', () => {
+  const row = V.compactEventRow(ev(1, { direction: 'gateway_creation', type: 'text', group: 'creation' }));
   assert.equal(row.type, 'creation');
   assert.equal(row.rawType, 'text');
-  assert.equal(row.tag, 'Instructions');
+  assert.equal(row.tag, 'Creation');
   assert.equal(row.dirLabel, 'creation');
 });
 
@@ -163,6 +163,7 @@ test('creation details count instructions and initial items without reading them
   assert.equal(d.instructionChars, 'Be brief.'.length);
   assert.equal(d.items, 3);
   assert.ok(d.body.indexOf('instructions:\nBe brief.') === 0);
+  assert.ok(d.body.indexOf('initial_items:\n') > 0);
   assert.equal(V.creationSummary(d), 'instructions 9 chars · 3 initial items · ' + d.itemChars + ' chars');
 });
 
@@ -287,4 +288,78 @@ test('audio facts tolerate partial shapes', () => {
   assert.deepEqual(facts.facts, []);
   assert.deepEqual(facts.samples, []);
   assert.equal(V.audioFactLine({ direction: '', source: '', type: '', events: 1, bytes: 0, maxBytes: 0 }), ': 1 event, 0 B');
+});
+
+function anchorFixture() {
+  const s = V.createStore();
+  s.add([
+    ev(1, { direction: 'gateway_creation', type: 'session.create', payload: JSON.stringify({ instructions: 'Line one.\nLine two.', initial_items: [{ type: 'message', content: [{ type: 'input_text', text: 'Hi\nthere' }] }] }) }),
+    ev(2, { type: 'turn.created', payload: JSON.stringify({ type: 'turn.created', turn: { role: 'user', id: 'u1', transcript: 'hello' } }) }),
+    ev(3, { direction: 'client_to_upstream', type: 'text', payload: '{"text":"hi"}' }),
+    ev(4, { type: 'delegation.created', payload: JSON.stringify({ type: 'delegation.created', item: { id: 'di_1', handoff_id: 'h_1', target: 'client', content: [] } }) }),
+    ev(5, { direction: 'gateway_to_upstream', type: 'session.context.append', payload: JSON.stringify({ delegation_item_id: 'di_1' }) }),
+    ev(6, { direction: 'gateway_to_upstream', type: 'session.context.append', payload: JSON.stringify({ content: [] }) }),
+    ev(7, { type: 'turn.done', payload: JSON.stringify({ type: 'turn.done', turn: { role: 'assistant', id: 'a1', transcript: 'ok' } }) })
+  ]);
+  return s;
+}
+
+test('anchor rows cover creation, delegation.created, context writes and client messages in seq order', () => {
+  const rows = V.anchorRows(anchorFixture().list());
+  assert.deepEqual(rows.map(r => r.seq), [1, 3, 4, 6]);
+  assert.deepEqual(rows.map(r => r.kind), ['creation', 'client', 'delegation', 'context']);
+  assert.equal(rows[2].label, 'Delegation · target client · handoff h_1');
+  assert.equal(rows[3].label, 'Context write · session.context.append');
+  assert.equal(rows[1].label, 'Client message · text');
+});
+
+test('the creation anchor is labelled with the creation summary', () => {
+  const store = anchorFixture();
+  const rows = V.anchorRows(store.list());
+  assert.equal(rows[0].label, 'Creation · ' + V.creationSummary(V.creationDetails(store.creation())));
+  assert.match(rows[0].label, /^Creation · instructions 19 chars · 1 initial item · \d+ chars$/);
+  assert.equal(rows[0].at, '2026-11-18T10:00:00Z');
+  assert.equal(V.anchorRows([]).length, 0);
+});
+
+test('delegation writes keep only the Delegation group and do not get a second anchor', () => {
+  const list = anchorFixture().list();
+  assert.equal(list.filter(e => e.group === 'delegation').length, 2);
+  const rows = V.anchorRows(list);
+  assert.equal(rows.filter(r => r.kind === 'delegation').length, 1);
+  assert.equal(rows.some(r => r.seq === 5), false);
+});
+
+test('anchors are placed between turns by seq and the creation anchor stays first', () => {
+  const items = [{ seq: 2, role: 'user', text: 'hello', final: true }, { seq: 7, role: 'assistant', text: 'ok', final: true }];
+  const entries = V.transcriptEntries(items, V.anchorRows(anchorFixture().list()));
+  assert.deepEqual(entries.map(e => e.anchor ? e.anchor.kind : 'turn'), ['creation', 'turn', 'client', 'delegation', 'context', 'turn']);
+  assert.equal(entries[1].turn.seq, 2);
+  assert.deepEqual(V.transcriptEntries([], []), []);
+});
+
+test('creation details show instructions and initial item strings with real line breaks', () => {
+  const store = V.createStore();
+  store.add([ev(1, {
+    direction: 'gateway_creation',
+    type: 'session.create',
+    payload: JSON.stringify({ instructions: 'Be brief.\nNo filler.', initial_items: [{ type: 'message', content: [{ type: 'input_text', text: 'Line A\nLine B' }] }] })
+  })]);
+  const d = V.creationDetails(store.creation());
+  assert.ok(d.body.indexOf('instructions:\nBe brief.\nNo filler.') === 0);
+  assert.ok(d.body.indexOf('"text": "Line A\n') > 0);
+  assert.ok(d.body.indexOf('Line B"') > 0);
+  assert.equal(d.body.indexOf('\\n'), -1);
+});
+
+test('readableJSON breaks multi-line strings and keeps other JSON unchanged', () => {
+  assert.equal(V.readableJSON({ a: 'x\ny' }), '{\n  "a": "x\n    y"\n}');
+  assert.equal(V.readableJSON(['a\nb']), '[\n  "a\n    b"\n]');
+  assert.equal(V.readableJSON({ n: 1, s: 'plain', q: 'say "hi"' }), JSON.stringify({ n: 1, s: 'plain', q: 'say "hi"' }, null, 2));
+  assert.equal(V.readableJSON(undefined), '');
+});
+
+test('the truncation note stays on the creation body', () => {
+  const d = V.creationDetails({ parsed: { instructions: 'a\nb' }, text: '', truncated: true });
+  assert.match(d.body, /\[payload truncated by gateway\]$/);
 });

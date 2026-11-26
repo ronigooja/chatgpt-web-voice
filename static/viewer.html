@@ -110,8 +110,15 @@
     .vw-transcript { padding: 4px 0 8px; font-size: 13px; line-height: 1.45; }
     .vw-turn, .vw-marker { display: grid; grid-template-columns: 62px 76px minmax(0, 1fr); column-gap: 10px; padding: 2px 12px; }
     .vw-turn:hover { background: var(--row-hover); }
-    .vw-marker { grid-template-columns: 62px minmax(0, 1fr); margin: 4px 0; padding: 5px 12px; border-left: 3px solid var(--green-bright); background: var(--green-soft); }
-    .vw-marker-text { color: var(--ink); font-size: 12px; font-weight: 600; }
+    .vw-marker { grid-template-columns: 62px minmax(0, 1fr) auto; margin: 4px 0; padding: 5px 12px; border-left: 3px solid var(--green-bright); background: var(--green-soft); }
+    .vw-anchor { cursor: pointer; }
+    .vw-anchor.kind-creation { border-left-color: var(--dim); background: var(--surface-3); }
+    .vw-anchor.kind-context { border-left-color: var(--amber); background: var(--amber-soft); }
+    .vw-anchor.kind-client { border-left-color: var(--ink-soft); background: var(--surface-2); }
+    .vw-anchor:hover { background: var(--row-hover); }
+    .vw-anchor:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--green); }
+    .vw-marker-text { min-width: 0; color: var(--ink); font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
+    .vw-anchor .vw-seq { padding-left: 8px; }
     .vw-time { color: var(--dim); font-family: var(--font-mono); font-size: 11.5px; font-variant-numeric: tabular-nums; white-space: nowrap; padding-top: 1px; }
     .vw-role { padding-top: 1px; font-size: 11.5px; font-weight: 700; }
     .vw-turn.user .vw-role { color: var(--muted); }
@@ -140,6 +147,7 @@
     .vw-tag.warn { border-color: var(--red); color: var(--red); }
     .vw-event.is-delegation { background: var(--green-soft); }
     .vw-event.is-delegation > .vw-row { box-shadow: inset 3px 0 0 var(--green-bright); }
+    .vw-event.flash { background: var(--amber-soft); }
     .vw-event.is-oversize { background: var(--amber-soft); }
     .vw-payload { padding: 0 12px 10px; }
     .vw-payload[hidden] { display: none; }
@@ -180,7 +188,7 @@
       #vwFrames .vw-row { grid-template-columns: 58px 14px minmax(0, 1fr) 44px 52px 42px; }
       .vw-pop { left: 0; right: auto; }
       .vw-turn, .vw-marker { grid-template-columns: 58px 62px minmax(0, 1fr); column-gap: 8px; }
-      .vw-marker { grid-template-columns: 58px minmax(0, 1fr); }
+      .vw-marker { grid-template-columns: 58px minmax(0, 1fr) auto; }
     }
     @media (max-width: 999px) {
       .viewer-body .top-actions { flex-wrap: nowrap; gap: 6px; overflow: hidden; }

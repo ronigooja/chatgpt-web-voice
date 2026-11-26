@@ -26,7 +26,7 @@
   var GROUPS = [
     { id: 'conversation', label: 'Conversation' },
     { id: 'delegation', label: 'Delegation' },
-    { id: 'instructions', label: 'Instructions' },
+    { id: 'creation', label: 'Creation' },
     { id: 'context', label: 'Context writes' },
     { id: 'client', label: 'Client messages' },
     { id: 'session', label: 'Session & usage' },
@@ -73,6 +73,19 @@
   function prettyPayload(text) {
     var value = parseJSON(text);
     return value !== null ? JSON.stringify(value, null, 2) : String(text == null ? '' : text);
+  }
+
+  // Display only: indented JSON where string values show real line breaks instead of \n.
+  function readableJSON(value) {
+    var text = JSON.stringify(value, null, 2);
+    if (typeof text !== 'string') return '';
+    return text.replace(/"(?:[^"\\\n]|\\.)*"/g, function (token, offset) {
+      var str = parseJSON(token);
+      if (typeof str !== 'string' || str.indexOf('\n') < 0) return token;
+      var lineStart = text.lastIndexOf('\n', offset) + 1;
+      var indent = /^ */.exec(text.slice(lineStart, offset))[0] + '  ';
+      return '"' + str.split('\n').map(function (part) { return JSON.stringify(part).slice(1, -1); }).join('\n' + indent) + '"';
+    });
   }
 
   function parseGeneration(value) {
@@ -128,7 +141,7 @@
   }
 
   function groupOf(direction, type, payload) {
-    if (direction === 'gateway_creation') return 'instructions';
+    if (direction === 'gateway_creation') return 'creation';
     if (type.indexOf('delegation') >= 0) return 'delegation';
     var contextWrite = type === 'session.context.append' || type === 'session.context.appended';
     if (contextWrite && DELEGATION_MARKER.test(String(payload || ''))) return 'delegation';
@@ -365,6 +378,7 @@
       filtered: function (filter) {
         return api.list().filter(function (ev) { return eventMatches(ev, filter); });
       },
+      get: function (seq) { return byseq[seq] || null; },
       counts: function (q) { return groupCounts(api.list(), q); },
       delegations: function () { return delegationRows(api.list()); },
       types: function () {
@@ -375,9 +389,7 @@
       creation: function () {
         var list = api.list();
         for (var i = 0; i < list.length; i++) {
-          if (list[i].direction === 'gateway_creation') {
-            return { seq: list[i].seq, at: list[i].at, text: list[i].payload, parsed: parseJSON(list[i].payload), truncated: list[i].truncated };
-          }
+          if (list[i].direction === 'gateway_creation') return creationFromEvent(list[i]);
         }
         return null;
       }
@@ -424,7 +436,7 @@
   }
 
   // One compact timeline row. Only display fields; the payload is never parsed here.
-  // Creation rows show "creation" plus an Instructions tag; rawType keeps the wire type visible.
+  // Creation rows show "creation" plus a Creation tag; rawType keeps the wire type visible.
   function compactEventRow(ev) {
     var e = ev || {};
     var direction = String(e.direction || '');
@@ -438,7 +450,7 @@
       dirLabel: lookup(DIRECTION_LABELS, direction, direction || 'unknown'),
       type: creation ? 'creation' : rawType,
       rawType: rawType,
-      tag: creation ? 'Instructions' : '',
+      tag: creation ? 'Creation' : '',
       size: formatBytes(e.size),
       delivery: String(e.delivery || 'unknown'),
       group: String(e.group || 'other'),
@@ -493,6 +505,10 @@
     return 'Filtered: ' + shown + ' of ' + total + ' event' + (total === 1 ? '' : 's');
   }
 
+  function creationFromEvent(ev) {
+    return { seq: ev.seq, at: ev.at, text: ev.payload, parsed: parseJSON(ev.payload), truncated: ev.truncated };
+  }
+
   // Creation facts. Structured payloads get counts; anything else is shown as raw text.
   function creationDetails(c) {
     if (!c) return null;
@@ -510,19 +526,19 @@
     };
     var lines = [];
     if (obj && obj.instructions !== undefined) {
-      var text = typeof obj.instructions === 'string' ? obj.instructions : JSON.stringify(obj.instructions, null, 2);
+      var text = typeof obj.instructions === 'string' ? obj.instructions : readableJSON(obj.instructions);
       out.hasInstructions = true;
       out.instructionChars = text.length;
       lines.push('instructions:\n' + text);
     }
     if (obj && obj.initial_items !== undefined) {
-      var itemsText = JSON.stringify(obj.initial_items, null, 2);
+      var itemsText = readableJSON(obj.initial_items);
       out.hasItems = true;
       out.items = Array.isArray(obj.initial_items) ? obj.initial_items.length : 0;
       out.itemChars = itemsText.length;
       lines.push('initial_items:\n' + itemsText);
     }
-    if (!lines.length) lines.push(prettyPayload(c.text));
+    if (!lines.length) lines.push(c.parsed === null || c.parsed === undefined ? String(c.text || '') : readableJSON(c.parsed));
     out.body = lines.join('\n\n');
     if (out.truncated) out.body += '\n\n[payload truncated by gateway]';
     return out;
@@ -535,6 +551,46 @@
     if (d.hasInstructions) parts.push('instructions ' + d.instructionChars + ' chars');
     if (d.hasItems) parts.push(d.items + ' initial item' + (d.items === 1 ? '' : 's') + ' · ' + d.itemChars + ' chars');
     return parts.join(' · ') || 'no instructions or items';
+  }
+
+  // Transcript anchors in seq order: the creation event, delegation.created events, context writes
+  // and client messages. Other delegation writes stay in the Delegation group and get no anchor.
+  function anchorRows(list) {
+    var events = Array.isArray(list) ? list : [];
+    var out = [];
+    var creation = events.filter(function (ev) { return ev && ev.direction === 'gateway_creation'; })[0];
+    if (creation) {
+      out.push({ seq: creation.seq, at: creation.at, kind: 'creation', label: 'Creation · ' + creationSummary(creationDetails(creationFromEvent(creation))) });
+    }
+    delegationRows(events).forEach(function (r) {
+      if (r.kind !== 'created') return;
+      out.push({
+        seq: r.seq,
+        at: r.at,
+        kind: 'delegation',
+        label: 'Delegation' + (r.target ? ' · target ' + r.target : '') + (r.handoff ? ' · handoff ' + r.handoff : '')
+      });
+    });
+    events.forEach(function (ev) {
+      if (!ev) return;
+      if (ev.group === 'context') out.push({ seq: ev.seq, at: ev.at, kind: 'context', label: 'Context write · ' + ev.type });
+      if (ev.group === 'client') out.push({ seq: ev.seq, at: ev.at, kind: 'client', label: 'Client message · ' + ev.type });
+    });
+    return out.sort(function (a, b) { return a.seq - b.seq; });
+  }
+
+  // Creation anchors come first; every other anchor sits before the first turn whose seq is not lower.
+  function transcriptEntries(items, anchors) {
+    var sorted = (Array.isArray(anchors) ? anchors : []).slice().sort(function (a, b) { return a.seq - b.seq; });
+    var out = sorted.filter(function (a) { return a.kind === 'creation'; }).map(function (a) { return { anchor: a }; });
+    var rest = sorted.filter(function (a) { return a.kind !== 'creation'; });
+    var i = 0;
+    (Array.isArray(items) ? items : []).forEach(function (item) {
+      while (i < rest.length && rest[i].seq <= item.seq) out.push({ anchor: rest[i++] });
+      out.push({ turn: item });
+    });
+    while (i < rest.length) out.push({ anchor: rest[i++] });
+    return out;
   }
 
   // Warnings for an incomplete, truncated or capped log. Empty when the log is complete.
@@ -847,11 +903,18 @@
       return row;
     }
 
-    function markerRow(m) {
-      var text = 'Delegation' + (m.target ? ' · target ' + m.target : '') + (m.handoff ? ' · handoff ' + m.handoff : '');
-      var row = make('div', 'vw-marker');
-      row.appendChild(make('span', 'vw-time', formatClock(m.at)));
-      row.appendChild(make('span', 'vw-marker-text', text));
+    function anchorRow(a) {
+      var row = make('div', 'vw-marker vw-anchor kind-' + a.kind);
+      row.setAttribute('role', 'button');
+      row.tabIndex = 0;
+      row.title = 'Show #' + a.seq + ' in the timeline';
+      row.appendChild(make('span', 'vw-time', formatClock(a.at)));
+      row.appendChild(make('span', 'vw-marker-text', a.label));
+      row.appendChild(make('span', 'vw-seq', '#' + a.seq));
+      row.addEventListener('click', function () { jumpToSeq(a.seq); });
+      row.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); jumpToSeq(a.seq); }
+      });
       return row;
     }
 
@@ -862,15 +925,12 @@
       if (!view.store) { applyScroll(pane, top, 'transcript'); return; }
       el.transcript.appendChild(boundaryRow('Generation ' + view.gen + (view.startedAt ? ' started ' + formatClock(view.startedAt) : ' started')));
       var items = view.store.captions();
-      var markers = view.store.delegations().filter(function (r) { return r.kind === 'created'; });
-      var pending = markers.slice();
-      items.forEach(function (item) {
-        pending.forEach(function (m) { if (m.seq <= item.seq) el.transcript.appendChild(markerRow(m)); });
-        pending = pending.filter(function (m) { return m.seq > item.seq; });
-        el.transcript.appendChild(turnRow(transcriptLine(item, view.store.at(item.seq))));
+      var anchors = anchorRows(view.store.list());
+      transcriptEntries(items, anchors).forEach(function (entry) {
+        if (entry.anchor) el.transcript.appendChild(anchorRow(entry.anchor));
+        else el.transcript.appendChild(turnRow(transcriptLine(entry.turn, view.store.at(entry.turn.seq))));
       });
-      pending.forEach(function (m) { el.transcript.appendChild(markerRow(m)); });
-      if (!items.length && !markers.length) el.transcript.appendChild(emptyRow('No captions in this generation yet.'));
+      if (!items.length && !anchors.length) el.transcript.appendChild(emptyRow('No captions in this generation yet.'));
       if (!view.active && view.store.size()) {
         el.transcript.appendChild(boundaryRow('Generation ' + view.gen + ' ended' + (view.endedAt ? ' ' + formatClock(view.endedAt) : '')));
       }
@@ -977,6 +1037,7 @@
     function eventRow(ev) {
       var r = compactEventRow(ev);
       var wrap = make('div', 'vw-event' + (r.delegation ? ' is-delegation' : ''));
+      wrap.setAttribute('data-seq', String(r.seq));
       var head = make('div', 'vw-row');
       head.setAttribute('role', 'button');
       head.tabIndex = 0;
@@ -1001,6 +1062,10 @@
       var fill = function () {
         filled = true;
         body.appendChild(make('div', 'vw-payload-meta', [groupLabel(ev.group), r.tag ? 'type ' + r.rawType : '', ev.at, ev.source, 'delivery ' + ev.delivery].filter(Boolean).join(' · ')));
+        if (r.direction === 'gateway_creation') {
+          body.appendChild(make('pre', 'vw-pre vw-event-pre', creationDetails(creationFromEvent(ev)).body));
+          return;
+        }
         body.appendChild(make('pre', 'vw-pre vw-event-pre', prettyPayload(ev.payload)));
         if (ev.truncated) body.appendChild(make('div', 'vw-payload-meta warn', '[payload truncated by gateway]'));
       };
@@ -1262,6 +1327,28 @@
       renderAll();
     }
 
+    // Opens the timeline on an event: widens only the filters that hide it, expands it and flashes it.
+    function jumpToSeq(seq) {
+      var ev = view.store ? view.store.get(seq) : null;
+      if (!ev) return;
+      var f = view.filters;
+      if (!eventMatches(ev, f)) {
+        if (f.groups.indexOf(ev.group) < 0) f.groups = GROUP_IDS.filter(function (id) { return id === ev.group || f.groups.indexOf(id) >= 0; });
+        if (f.type && f.type !== ev.type) { f.type = ''; el.type.value = ''; }
+        if (f.q && !searchMatches(ev, f.q)) { f.q = ''; el.search.value = ''; }
+      }
+      view.open[seq] = true;
+      view.tab = 'events';
+      view.following.events = false;
+      renderAll();
+      var row = el.events.querySelector('[data-seq="' + seq + '"]');
+      if (!row) { toast('Event #' + seq + ' is not in the visible rows'); return; }
+      var pane = el.eventsScroll;
+      pane.scrollTop = pane.scrollTop + row.getBoundingClientRect().top - pane.getBoundingClientRect().top - 40;
+      row.classList.add('flash');
+      root.setTimeout(function () { row.classList.remove('flash'); }, 1600);
+    }
+
     function bind() {
       el.genSelect.addEventListener('change', function () {
         var gen = Number(el.genSelect.value);
@@ -1390,6 +1477,7 @@
     streamUrl: streamUrl,
     viewerUrl: viewerUrl,
     prettyPayload: prettyPayload,
+    readableJSON: readableJSON,
     PAGE_SIZE: PAGE_SIZE,
     GROUPS: GROUPS.map(function (g) { return { id: g.id, label: g.label }; }),
     PRESETS: PRESETS.map(function (p) { return { id: p.id, label: p.label, groups: p.groups.slice() }; }),
@@ -1419,6 +1507,8 @@
     filterSummary: filterSummary,
     creationDetails: creationDetails,
     creationSummary: creationSummary,
+    anchorRows: anchorRows,
+    transcriptEntries: transcriptEntries,
     storeWarnings: storeWarnings,
     audioFacts: audioFacts,
     audioFactLine: audioFactLine,
