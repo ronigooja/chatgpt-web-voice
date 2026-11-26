@@ -75,6 +75,23 @@
     return value !== null ? JSON.stringify(value, null, 2) : String(text == null ? '' : text);
   }
 
+  // Display only: expands string `data` holding JSON (up to 3 levels) so no escaped quotes remain.
+  function unwrapPayloadData(value, depth) {
+    if (!value || typeof value !== 'object' || value.type !== 'data_message' || typeof value.data !== 'string' || depth >= 3) return value;
+    var inner = parseJSON(value.data);
+    if (inner === null || typeof inner !== 'object') return value;
+    var out = {};
+    Object.keys(value).forEach(function (key) { out[key] = value[key]; });
+    out.data = unwrapPayloadData(inner, depth + 1);
+    return out;
+  }
+
+  function displayPayload(text) {
+    var value = parseJSON(text);
+    var unwrapped = unwrapPayloadData(value, 0);
+    return unwrapped === value ? prettyPayload(text) : readableJSON(unwrapped);
+  }
+
   // Display only: indented JSON where string values show real line breaks instead of \n.
   function readableJSON(value) {
     var text = JSON.stringify(value, null, 2);
@@ -1066,7 +1083,7 @@
           body.appendChild(make('pre', 'vw-pre vw-event-pre', creationDetails(creationFromEvent(ev)).body));
           return;
         }
-        body.appendChild(make('pre', 'vw-pre vw-event-pre', prettyPayload(ev.payload)));
+        body.appendChild(make('pre', 'vw-pre vw-event-pre', displayPayload(ev.payload)));
         if (ev.truncated) body.appendChild(make('div', 'vw-payload-meta warn', '[payload truncated by gateway]'));
       };
       var setOpen = function (open) {
@@ -1477,6 +1494,7 @@
     streamUrl: streamUrl,
     viewerUrl: viewerUrl,
     prettyPayload: prettyPayload,
+    displayPayload: displayPayload,
     readableJSON: readableJSON,
     PAGE_SIZE: PAGE_SIZE,
     GROUPS: GROUPS.map(function (g) { return { id: g.id, label: g.label }; }),
