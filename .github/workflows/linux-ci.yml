@@ -1,29 +1,6 @@
 name: Linux CI
 
 on:
-  push:
-    branches: ['integration/**']
-    paths:
-      - '**.go'
-      - 'go.mod'
-      - 'go.sum'
-      - 'cmd/**'
-      - 'internal/**'
-      - 'static/**'
-      - 'Dockerfile'
-      - 'docker-compose.yml'
-      - '.github/workflows/**'
-  pull_request:
-    paths:
-      - '**.go'
-      - 'go.mod'
-      - 'go.sum'
-      - 'cmd/**'
-      - 'internal/**'
-      - 'static/**'
-      - 'Dockerfile'
-      - 'docker-compose.yml'
-      - '.github/workflows/**'
   workflow_dispatch:
 
 permissions:
